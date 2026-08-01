@@ -14,6 +14,8 @@ Ported from the TUI's `services/news.py`, with four differences:
      Failures return "" or [] instead of Korean placeholder text (routes turn that into a user-facing error).
   5. `fetch_article_content`는 클라이언트가 준 URL을 받으므로 SSRF/과대응답 가드를 추가했다 (TUI는 없음).
      `fetch_article_content` takes a client-supplied URL, so SSRF and size guards were added (the TUI has none).
+  6. RSS 파싱은 `xml.etree` 대신 `defusedxml`을 쓴다 (엔티티 확장 DoS·XXE 차단).
+     RSS parsing uses `defusedxml` instead of `xml.etree` (entity-expansion DoS and XXE).
 
 `parse_rss`는 네트워크와 무관한 순수 함수다 (단위 테스트 대상).
 `parse_rss` is a pure function with no network involvement (unit-tested directly).
@@ -27,11 +29,14 @@ import json
 import logging
 import re
 import socket
-import xml.etree.ElementTree as ET
 from typing import Any, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
+# 원격 3rd-party RSS를 파싱하므로 stdlib 파서를 쓰지 않는다 (내부 엔티티 확장 DoS·XXE 차단)
+# Remote third-party RSS is parsed here, so the stdlib parser is avoided (entity-expansion DoS and XXE)
+from defusedxml.ElementTree import ParseError, fromstring as xml_fromstring
+from defusedxml.common import DefusedXmlException
 
 from app.core import config
 from app.models import NewsItem
@@ -141,16 +146,19 @@ def parse_rss(xml_text: str, source: str, is_korean: bool) -> list[NewsItem]:
         is_korean: 한국어 피드 여부 -> language "ko"/"en" / whether the feed is Korean -> language "ko"/"en".
 
     Returns:
-        list[NewsItem] - title이 없는 항목은 건너뛴다. 깨진 XML은 경고 후 빈 리스트.
-        list[NewsItem]; items without a title are skipped, broken XML warns and yields [].
+        list[NewsItem] - title이 없는 항목은 건너뛴다. 깨진 XML과 적대적 XML은 경고 후 빈 리스트.
+        list[NewsItem]; items without a title are skipped, broken and hostile XML warn and yield [].
     """
     items: list[NewsItem] = []
     language = "ko" if is_korean else "en"
 
     try:
-        root = ET.fromstring(xml_text)
-    except ET.ParseError as exc:
-        _warn("news_rss_parse_failed", source=source, error=str(exc))
+        root = xml_fromstring(xml_text)
+    except (DefusedXmlException, ParseError) as exc:
+        # DefusedXmlException = 적대적 피드(엔티티 폭탄/XXE), ParseError = 단순 깨진 XML
+        # DefusedXmlException marks a hostile feed (entity bomb, XXE); ParseError is plain malformed XML
+        _warn("news_rss_parse_failed", source=source,
+              error_type=type(exc).__name__, error=str(exc))
         return items
 
     for element in root.findall(".//item"):

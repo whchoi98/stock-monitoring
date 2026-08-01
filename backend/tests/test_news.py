@@ -209,6 +209,88 @@ def test_parse_rss_invalid_xml_warns_and_returns_empty(caplog):
 
     payloads = _warning_payloads(caplog)
     assert any(p.get("source") == "Yahoo" for p in payloads)
+    assert any(p.get("error_type") == "ParseError" for p in payloads)
+
+
+def test_parse_rss_accepts_plain_doctype():
+    """엔티티 없는 DOCTYPE은 정상 파싱 (실피드 호환) / A DOCTYPE without entities still parses (real-feed compatibility)."""
+    xml_text = (
+        '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE rss>'
+        '<rss version="2.0"><channel>'
+        "<item><title>Kept</title><link>https://example.com/d</link></item>"
+        "</channel></rss>"
+    )
+    assert [i.title for i in parse_rss(xml_text, "Yahoo", is_korean=False)] == ["Kept"]
+
+
+# ---------------------------------------------------------------------------
+# parse_rss - 적대적 XML (원격 3rd-party 피드다) / parse_rss - hostile XML (feeds are remote and third-party)
+# ---------------------------------------------------------------------------
+
+# 엔티티 확장 폭탄 - 중첩은 3단계로 작게 유지한다 (defusedxml이 즉시 거부하므로 확장되지 않는다)
+# Entity-expansion bomb - kept tiny at three levels; defusedxml refuses it before any expansion
+BILLION_LAUGHS = (
+    '<?xml version="1.0"?>'
+    "<!DOCTYPE lolz ["
+    '<!ENTITY lol "lol">'
+    '<!ENTITY lol2 "&lol;&lol;&lol;">'
+    '<!ENTITY lol3 "&lol2;&lol2;&lol2;">'
+    "]>"
+    "<rss version=\"2.0\"><channel>"
+    "<item><title>&lol3;</title><link>https://example.com/bomb</link></item>"
+    "</channel></rss>"
+)
+
+# 외부 엔티티 (XXE) - 로컬 파일 읽기 시도 / External entity (XXE) attempting a local file read
+XXE_FEED = (
+    '<?xml version="1.0"?>'
+    '<!DOCTYPE r [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
+    "<rss version=\"2.0\"><channel>"
+    "<item><title>&xxe;</title><link>https://example.com/xxe</link></item>"
+    "</channel></rss>"
+)
+
+
+@pytest.mark.parametrize("payload,label", [(BILLION_LAUGHS, "bomb"), (XXE_FEED, "xxe")])
+def test_parse_rss_rejects_hostile_entities(caplog, payload, label):
+    """
+    엔티티 폭탄/XXE는 확장 없이 즉시 거부 + 경고 / Entity bombs and XXE are refused immediately, with a warning.
+
+    예외를 전파하지 않으므로 적대적 피드 하나가 워커를 죽이지 못한다.
+    No exception propagates, so a single hostile feed cannot take down the worker.
+    """
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert parse_rss(payload, "Yahoo", is_korean=False) == []
+
+    payloads = _warning_payloads(caplog)
+    # defusedxml 계열 예외로 거부되었음을 명시 (ParseError가 아니다)
+    # Explicitly a defusedxml-family rejection, not a ParseError
+    assert any(p.get("error_type") == "EntitiesForbidden" and p.get("source") == "Yahoo"
+               for p in payloads), payloads
+
+
+def test_parse_rss_does_not_read_local_files_for_xxe(caplog):
+    """XXE 페이로드가 로컬 파일 내용을 항목으로 흘리지 않는다 / An XXE payload never leaks local file content into items."""
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        items = parse_rss(XXE_FEED, "Yahoo", is_korean=False)
+
+    assert items == []
+    assert "root:" not in caplog.text   # /etc/passwd 내용이 로그로도 새지 않는다 / no passwd content leaks into logs
+
+
+async def test_fetch_news_skips_hostile_feed_and_keeps_others(monkeypatch, caplog):
+    """적대적 피드는 skip하고 나머지 소스는 유지 / A hostile feed is skipped while the other sources survive."""
+    routes = {url: FakeResponse(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    routes[config.NEWS_FEEDS["yahoo"]] = FakeResponse(BILLION_LAUGHS)
+    _patch_get(monkeypatch, routes)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        items = await news.fetch_news()
+
+    assert len(items) == 6
+    # 제목 첫 토큰이 소스 키다 ("yahoo_markets"는 살아남아야 하므로 정확히 비교) / the first title token is the source key
+    assert {i.title.split()[0] for i in items} == {"yahoo_markets", "hankyung", "mk"}
+    assert any(p.get("error_type") == "EntitiesForbidden" for p in _warning_payloads(caplog))
 
 
 # ---------------------------------------------------------------------------
