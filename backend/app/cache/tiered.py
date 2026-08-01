@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -19,6 +20,19 @@ class TieredCache:
         """
         self.l1 = l1
         self.l2 = l2
+        # Per-key locks so concurrent callers of the same cold key trigger only one
+        # upstream fetch. The map grows with the number of distinct keys seen and is
+        # never evicted; that is bounded by the cache key universe
+        # (symbol universe x endpoint), so it stays small at this scale.
+        self._locks: dict[str, asyncio.Lock] = {}
+
+    def _lock_for(self, key: str) -> asyncio.Lock:
+        """Return the lock for a key, creating it on demand (single event loop, no race)."""
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[key] = lock
+        return lock
 
     async def get_or_fetch(
         self,
@@ -30,6 +44,10 @@ class TieredCache:
         Get value from tiered cache or fetch fresh data.
 
         Lookup order: L1 -> L2 -> fetch -> L2 stale fallback
+
+        Concurrent callers for the same key are suppressed by a per-key lock: only
+        one of them runs the L2/fetch path, the others wait and then hit the L1
+        entry it wrote ("l1"). Locks are per key, so unrelated keys never serialize.
 
         Args:
             key: Cache key
@@ -43,45 +61,52 @@ class TieredCache:
         Raises:
             Exception: Original fetcher exception if fetch fails and no stale fallback available
         """
-        # Try L1
+        # Try L1 without taking the lock (fast path for warm keys)
         l1_result = self.l1.get(key)
         if l1_result is not None:
             value, as_of = l1_result
             return (value, as_of, "l1")
 
-        # Try L2
-        l2_result = await self.l2.get(key)
-        if l2_result is not None:
-            value, as_of = l2_result
-            # Populate L1 from L2
-            self.l1.set(key, value, ttl, as_of)
-            return (value, as_of, "l2")
+        async with self._lock_for(key):
+            # Double-checked: a concurrent caller may have populated L1 while we waited
+            l1_result = self.l1.get(key)
+            if l1_result is not None:
+                value, as_of = l1_result
+                return (value, as_of, "l1")
 
-        # Try to fetch fresh data
-        try:
-            fresh_value = await fetcher()
-            now_iso = datetime.now(timezone.utc).isoformat()
-            # Write to both L1 and L2
-            self.l1.set(key, fresh_value, ttl, now_iso)
-            await self.l2.put(key, fresh_value, ttl, now_iso)
-            return (fresh_value, now_iso, "fetch")
-        except Exception as fetch_error:
-            # Log the fetch failure as JSON
-            error_log = {
-                "event": "fetch_failed",
-                "key": key,
-                "error": str(fetch_error),
-            }
-            logger.warning(json.dumps(error_log))
+            # Try L2
+            l2_result = await self.l2.get(key)
+            if l2_result is not None:
+                value, as_of = l2_result
+                # Populate L1 from L2
+                self.l1.set(key, value, ttl, as_of)
+                return (value, as_of, "l2")
 
-            # Try L2 stale fallback (ignores TTL)
-            l2_stale_result = await self.l2.get_stale(key)
-            if l2_stale_result is not None:
-                value, as_of = l2_stale_result
-                return (value, as_of, "l2-stale")
+            # Try to fetch fresh data
+            try:
+                fresh_value = await fetcher()
+                now_iso = datetime.now(timezone.utc).isoformat()
+                # Write to both L1 and L2
+                self.l1.set(key, fresh_value, ttl, now_iso)
+                await self.l2.put(key, fresh_value, ttl, now_iso)
+                return (fresh_value, now_iso, "fetch")
+            except Exception as fetch_error:
+                # Log the fetch failure as JSON
+                error_log = {
+                    "event": "fetch_failed",
+                    "key": key,
+                    "error": str(fetch_error),
+                }
+                logger.warning(json.dumps(error_log))
 
-            # No fallback available, re-raise original exception
-            raise
+                # Try L2 stale fallback (ignores TTL)
+                l2_stale_result = await self.l2.get_stale(key)
+                if l2_stale_result is not None:
+                    value, as_of = l2_stale_result
+                    return (value, as_of, "l2-stale")
+
+                # No fallback available, re-raise original exception
+                raise
 
     async def put(self, key: str, value: Any, ttl: int) -> None:
         """

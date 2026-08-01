@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from app.cache.memory import MemoryCache
 from app.cache.tiered import TieredCache
@@ -62,3 +64,50 @@ async def test_fetch_failure_falls_back_to_stale(cache):
 
     v, as_of, s = await cache.get_or_fetch("k", 60, fetcher)
     assert (v, s) == ("stale-data", "l2-stale")
+
+
+async def test_concurrent_same_key_fetches_once(cache):
+    """Concurrent callers of the same cold key must trigger exactly one fetch."""
+    calls = []
+
+    async def fetcher():
+        calls.append(1)
+        await asyncio.sleep(0.01)
+        return "fresh"
+
+    results = await asyncio.gather(
+        *(cache.get_or_fetch("k", 60, fetcher) for _ in range(5))
+    )
+
+    assert len(calls) == 1
+    values = [v for v, _, _ in results]
+    as_ofs = [as_of for _, as_of, _ in results]
+    sources = [s for _, _, s in results]
+    assert values == ["fresh"] * 5
+    assert len(set(as_ofs)) == 1
+    assert sources.count("fetch") == 1
+    assert sources.count("l1") == 4
+
+
+async def test_concurrent_distinct_keys_are_not_serialized(cache):
+    """Distinct keys must not block each other: each key fetches independently."""
+    calls = []
+
+    def make_fetcher(name):
+        async def fetcher():
+            calls.append(name)
+            await asyncio.sleep(0.01)
+            return name
+
+        return fetcher
+
+    results = await asyncio.gather(
+        *(cache.get_or_fetch(k, 60, make_fetcher(k)) for k in ("a", "b", "c"))
+    )
+
+    assert sorted(calls) == ["a", "b", "c"]
+    assert [(v, s) for v, _, s in results] == [
+        ("a", "fetch"),
+        ("b", "fetch"),
+        ("c", "fetch"),
+    ]
