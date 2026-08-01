@@ -12,6 +12,8 @@ Ported from the TUI's `services/news.py`, with four differences:
      `published` keeps the raw pubDate string (no 16-char truncation, no date parsing).
   4. 실패 시 한국어 안내 문구 대신 빈 문자열/빈 리스트를 반환한다 (라우트가 사용자 오류로 변환).
      Failures return "" or [] instead of Korean placeholder text (routes turn that into a user-facing error).
+  5. `fetch_article_content`는 클라이언트가 준 URL을 받으므로 SSRF/과대응답 가드를 추가했다 (TUI는 없음).
+     `fetch_article_content` takes a client-supplied URL, so SSRF and size guards were added (the TUI has none).
 
 `parse_rss`는 네트워크와 무관한 순수 함수다 (단위 테스트 대상).
 `parse_rss` is a pure function with no network involvement (unit-tested directly).
@@ -20,12 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import re
+import socket
 import xml.etree.ElementTree as ET
 from typing import Any, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
 
@@ -75,6 +79,15 @@ BOILERPLATE_MARKERS = (
 _ARTICLE_TAG_RE = re.compile(r"<article[^>]*>(.*?)</article>", re.DOTALL)
 _PARAGRAPH_RE = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
 
+# 기사 조회 가드 - URL이 클라이언트에서 오므로 SSRF/과대응답을 막는다 (피드 URL은 코드 고정이라 무관)
+# Article fetch guards - the URL is client-supplied, so SSRF and oversized bodies must be blocked
+# (feed URLs are code-fixed and need none of this).
+ALLOWED_SCHEMES = {"http", "https"}
+MAX_REDIRECTS = 3
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# 본문 상한 (바이트=선언된 content-length, 문자=실제 본문) / Body cap: bytes for the declared content-length, chars for the body
+MAX_ARTICLE_SIZE = 2_000_000
+
 
 # ---------------------------------------------------------------------------
 # 유틸리티 / Utilities
@@ -100,11 +113,16 @@ def _item_id(link: str) -> str:
     return hashlib.sha1(link.encode()).hexdigest()[:16]
 
 
-def _client() -> httpx.AsyncClient:
-    """공통 헤더/타임아웃이 적용된 AsyncClient / An AsyncClient carrying the shared headers and timeout."""
+def _client(follow_redirects: bool = True) -> httpx.AsyncClient:
+    """
+    공통 헤더/타임아웃이 적용된 AsyncClient / An AsyncClient carrying the shared headers and timeout.
+
+    기사 조회는 `follow_redirects=False`로 만들어 리다이렉트를 직접 따라간다 (대상마다 재검증해야 한다).
+    Article fetches pass `follow_redirects=False` and follow hops manually, re-validating each target.
+    """
     return httpx.AsyncClient(
         timeout=FETCH_TIMEOUT,
-        follow_redirects=True,
+        follow_redirects=follow_redirects,
         headers={"User-Agent": USER_AGENT},
     )
 
@@ -295,31 +313,142 @@ def _extract_paragraphs(html: str) -> list[str]:
     return _paragraphs(html, MIN_LOOSE_PARAGRAPH_LEN, drop_boilerplate=True)
 
 
+def _resolve_addresses(host: str) -> list[str]:
+    """
+    호스트를 IP 문자열 목록으로 해석 / Resolve a host to a list of IP strings.
+
+    호스트가 이미 IP 리터럴이면 DNS를 거치지 않는다 (bare IP URL도 같은 검사를 받아야 한다).
+    An IP literal skips DNS entirely, so a bare-IP URL still goes through the same checks.
+
+    블로킹 호출이므로 `asyncio.to_thread`로 감싸 호출한다 / Blocking, so callers wrap it in `asyncio.to_thread`.
+    """
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    return [info[4][0] for info in socket.getaddrinfo(host, None)]
+
+
+def _is_disallowed_address(address: str) -> bool:
+    """
+    내부망/예약 대역 주소인지 / Whether an address falls in an internal or reserved range.
+
+    파싱 불가한 주소는 거부한다 (fail-closed; 예: 스코프가 붙은 IPv6 link-local).
+    Unparseable addresses are rejected (fail closed; e.g. scoped IPv6 link-local).
+    """
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return True
+    return (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
+async def _is_safe_url(url: str) -> bool:
+    """
+    기사 URL이 외부 공개 대상인지 검증 (SSRF 차단) / Validate that an article URL targets a public host (SSRF guard).
+
+    스킴 화이트리스트 + 해석된 **모든** 주소가 공개 대역이어야 통과한다 (하나라도 내부면 거부).
+    A scheme allowlist plus every resolved address being public; one internal address rejects the URL.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    if scheme not in ALLOWED_SCHEMES:
+        _warn("article_url_rejected", url=url, scheme=scheme, reason="scheme not allowed")
+        return False
+
+    host = parsed.hostname
+    if not host:
+        _warn("article_url_rejected", url=url, scheme=scheme, reason="missing host")
+        return False
+
+    try:
+        addresses = await asyncio.to_thread(_resolve_addresses, host)
+    except Exception as exc:
+        _warn("article_host_unresolved", url=url, host=host, error=str(exc))
+        return False
+
+    blocked = [a for a in addresses if _is_disallowed_address(a)]
+    if blocked or not addresses:
+        _warn("article_url_rejected", url=url, host=host, addresses=blocked,
+              reason="host resolves to a non-public address")
+        return False
+    return True
+
+
+def _limited_text(response: Any, url: str) -> Optional[str]:
+    """
+    크기 상한을 적용해 본문을 문자열로 / Return the body as text under the size cap.
+
+    선언된 content-length가 상한을 넘으면 거부하고, 실제 본문이 넘으면 상한까지 잘라 쓴다.
+    An oversized declared content-length is rejected; an oversized body is truncated to the cap.
+    """
+    declared = response.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > MAX_ARTICLE_SIZE:
+        _warn("article_too_large", url=url, declared=int(declared))
+        return None
+
+    text = response.text
+    if len(text) > MAX_ARTICLE_SIZE:
+        _warn("article_truncated", url=url, chars=len(text))
+        return text[:MAX_ARTICLE_SIZE]
+    return text
+
+
 async def _fetch_html(url: str) -> Optional[str]:
-    """기사 HTML 조회 (실패는 경고 + None) / Fetch article HTML (failures warn and return None)."""
-    async with _client() as client:
-        try:
-            response = await client.get(url)
-        except Exception as exc:
-            _warn("article_fetch_failed", url=url, error=str(exc))
-            return None
-        if response.status_code != 200:
-            _warn("article_fetch_failed", url=url, status=response.status_code)
-            return None
-        return response.text
+    """
+    기사 HTML 조회 - 가드 통과 후 리다이렉트를 직접 따라간다 / Fetch article HTML, following redirects manually behind the guard.
+
+    URL이 클라이언트에서 오므로 매 홉마다 `_is_safe_url`을 다시 실행한다 (리다이렉트로 내부망을
+    훑는 것을 막는다). 실패·거부는 모두 경고 + None.
+    The URL is client-supplied, so `_is_safe_url` re-runs on every hop, which stops redirect chains
+    from probing the internal network. Failures and rejections warn and return None.
+    """
+    target = url
+    async with _client(follow_redirects=False) as client:
+        for _ in range(MAX_REDIRECTS + 1):
+            if not await _is_safe_url(target):
+                return None
+
+            try:
+                response = await client.get(target)
+            except Exception as exc:
+                _warn("article_fetch_failed", url=target, error=str(exc))
+                return None
+
+            if response.status_code in REDIRECT_STATUSES:
+                location = response.headers.get("location", "")
+                if location:
+                    target = urljoin(target, location)
+                    continue
+
+            if response.status_code != 200:
+                _warn("article_fetch_failed", url=target, status=response.status_code)
+                return None
+            return _limited_text(response, target)
+
+    _warn("article_too_many_redirects", url=url, last_url=target)
+    return None
 
 
 async def fetch_article_content(url: str) -> str:
     """
     기사 URL에서 본문 텍스트 추출 / Fetch an article URL and extract its body text.
 
+    URL은 클라이언트가 지정하므로 http/https + 공개 호스트만 허용하고 응답 크기를 제한한다.
+    The URL is client-supplied, so only http/https public hosts are allowed and the body size is capped.
+
     Args:
         url: 기사 URL / the article URL.
 
     Returns:
-        str - 단락을 빈 줄로 이어붙인 본문 (최대 25단락). 조회/추출 실패 시 "" (호출부가 사용자 오류로 변환).
-        Paragraphs joined by blank lines (at most 25); "" when the fetch or the extraction fails,
-        which the caller turns into a user-facing error.
+        str - 단락을 빈 줄로 이어붙인 본문 (최대 25단락). 조회/추출 실패나 가드 거부 시 ""
+        (호출부가 사용자 오류로 변환).
+        Paragraphs joined by blank lines (at most 25); "" when the fetch, the extraction or the
+        guard rejects the URL, which the caller turns into a user-facing error.
     """
     html = await _fetch_html(url)
     if html is None:
