@@ -1,0 +1,298 @@
+"""
+Bedrock AI 서비스 - Claude 모델로 뉴스 기사 분석과 종목 분석을 수행
+Bedrock AI service - news article analysis and stock analysis via a Claude model.
+
+TUI(`$TUI/services/bedrock.py`) 포팅. 프롬프트와 invoke_model 요청 본문은 그대로 유지하고,
+서버 환경에 맞춰 세 가지만 바꿨다.
+Ported from the TUI module: the prompts and the invoke_model request bodies are kept as they
+were, with exactly three server-side changes.
+
+1. 리전은 `config.BEDROCK_REGION`(기본 `ap-northeast-2`) / The region comes from config (default ap-northeast-2).
+2. BEDROCK_API_KEY 분기 제거 — 자격 증명은 ECS Task Role이 제공한다 / No API-key branch: the ECS Task Role supplies credentials.
+3. 실패 시 안내 문자열을 반환하지 않고 `BedrockUnavailableError`/`BedrockCallError`를 raise한다
+   (API 계층이 각각 503/500으로 매핑) / Failures raise typed errors instead of returning a message
+   (the API layer maps them to 503/500).
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any, Optional
+
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+
+from app.core import config
+
+logger = logging.getLogger(__name__)
+
+# 기사 분석 / 종목 분석 응답 토큰 상한 (TUI 값 유지) / Response token caps (kept from the TUI)
+ARTICLE_MAX_TOKENS = 2048
+STOCK_MAX_TOKENS = 1024
+# Bedrock의 Anthropic Messages API 버전 / Anthropic Messages API version on Bedrock
+ANTHROPIC_VERSION = "bedrock-2023-05-31"
+# 프롬프트에 담는 기사 본문 최대 길이 / Maximum article body length carried in the prompt
+ARTICLE_CONTENT_LIMIT = 6000
+# 프롬프트에 담는 최근 뉴스 제목 개수 / Number of recent news titles carried in the prompt
+NEWS_TITLE_LIMIT = 5
+
+# 자격 증명·권한 문제로 보는 Bedrock 에러 코드 (503 대상) / Bedrock error codes treated as "unavailable" (503)
+_UNAVAILABLE_ERROR_CODES = frozenset({
+    "AccessDeniedException",
+    "UnrecognizedClientException",
+    "ExpiredTokenException",
+    "InvalidSignatureException",
+})
+
+# 가용성 캐시: 성공만 기억한다 (일시적 실패 후 복구 가능해야 하므로)
+# Availability cache: only successes are remembered, so a transient failure can still recover.
+_bedrock_available: Optional[bool] = None
+
+
+class BedrockUnavailableError(Exception):
+    """자격 증명 없음 또는 모델 접근 거부 / No credentials, or model access denied (API layer: 503)."""
+
+
+class BedrockCallError(Exception):
+    """invoke 실패 또는 응답 해석 실패 / The invoke failed, or the response could not be read (API layer: 500)."""
+
+
+def _log_failure(event: str, error: Exception, **fields: Any) -> None:
+    """실패를 단일 라인 JSON으로 기록 (조용한 실패 금지) / Log a failure as single-line JSON (no silent failures)."""
+    payload = {"event": event, "error": str(error), "error_type": type(error).__name__}
+    payload.update(fields)
+    logger.error(json.dumps(payload, default=str, ensure_ascii=False))
+
+
+def is_bedrock_available() -> bool:
+    """
+    boto3 기본 자격 증명이 해석되는지 확인 / Check whether boto3 default credentials resolve.
+
+    ECS Task Role·환경변수·`aws configure` 등 기본 체인을 그대로 사용한다. 성공 결과만 캐시하므로
+    (컨테이너 크레덴셜 엔드포인트의 일시적 실패로) 한 번 실패해도 다음 호출에서 다시 시도한다.
+    Uses the default provider chain (ECS Task Role, env vars, `aws configure`). Only a positive
+    result is cached, so a transient resolution failure is retried on the next call.
+    """
+    global _bedrock_available
+    if _bedrock_available:
+        return True
+    try:
+        creds = boto3.Session().get_credentials()
+        if creds is None:
+            return False
+        frozen = creds.get_frozen_credentials()
+        available = bool(frozen.access_key and frozen.secret_key)
+    except Exception as exc:
+        _log_failure("bedrock_credentials_error", exc)
+        return False
+    if available:
+        _bedrock_available = True
+    return available
+
+
+def _get_client():
+    """
+    bedrock-runtime 클라이언트 생성 / Create the bedrock-runtime client.
+
+    Raises:
+        BedrockUnavailableError: 기본 자격 증명이 없을 때 / when no default credentials resolve.
+    """
+    if not is_bedrock_available():
+        raise BedrockUnavailableError(
+            "AWS 자격 증명이 없어 Bedrock을 사용할 수 없습니다 / No AWS credentials available for Bedrock"
+        )
+    return boto3.client("bedrock-runtime", region_name=config.BEDROCK_REGION)
+
+
+def _is_unavailable(exc: Exception) -> bool:
+    """자격 증명·권한 계열 오류인지 판별 / Tell credential/authorization failures from other errors."""
+    if isinstance(exc, NoCredentialsError):
+        return True
+    if isinstance(exc, ClientError):
+        code = exc.response.get("Error", {}).get("Code")
+        return code in _UNAVAILABLE_ERROR_CODES
+    return False
+
+
+def _invoke(prompt: str, max_tokens: int) -> str:
+    """모델을 호출하고 응답 텍스트를 반환 / Invoke the model and return the response text."""
+    client = _get_client()
+
+    body = json.dumps({
+        "anthropic_version": ANTHROPIC_VERSION,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+    })
+
+    response = client.invoke_model(
+        modelId=config.BEDROCK_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=body,
+    )
+
+    result = json.loads(response["body"].read())
+    return result["content"][0]["text"]
+
+
+def _analyze(prompt: str, max_tokens: int, event: str) -> str:
+    """
+    모델 호출을 감싸 실패를 타입 있는 예외로 변환 / Wrap the invoke, mapping failures to typed errors.
+
+    Raises:
+        BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
+        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+    """
+    try:
+        return _invoke(prompt, max_tokens)
+    except BedrockUnavailableError as exc:
+        _log_failure(event, exc, model_id=config.BEDROCK_MODEL_ID, region=config.BEDROCK_REGION)
+        raise
+    except Exception as exc:
+        _log_failure(event, exc, model_id=config.BEDROCK_MODEL_ID, region=config.BEDROCK_REGION)
+        if _is_unavailable(exc):
+            raise BedrockUnavailableError(str(exc)) from exc
+        raise BedrockCallError(str(exc)) from exc
+
+
+def analyze_article(title: str, content: str, is_korean: bool) -> str:
+    """
+    뉴스 기사를 AI로 분석 / Analyze a news article with the model.
+
+    한국어 기사는 요약·분석·인사이트를, 영문 기사는 한국어 번역까지 함께 요청한다.
+    Korean articles get summary/analysis/insights; English articles also get a Korean translation.
+
+    Args:
+        title: 기사 제목 / article title.
+        content: 기사 본문 (앞 6000자만 사용) / article body (only the first 6000 characters are used).
+        is_korean: 한국어 기사 여부 / whether the article is Korean.
+
+    Returns:
+        마크다운 분석 텍스트 / the markdown analysis text.
+
+    Raises:
+        BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
+        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+    """
+    if is_korean:
+        # 한국어 기사용 프롬프트: 요약, 분석, 투자 인사이트, 관련 종목 / Korean article prompt: summary, analysis, investment insights, related stocks
+        prompt = f"""다음 경제/금융 뉴스 기사를 분석해 주세요.
+
+제목: {title}
+
+본문:
+{content[:ARTICLE_CONTENT_LIMIT]}
+
+다음 형식으로 한국어로 작성해 주세요:
+
+## 요약
+(기사의 핵심 내용을 3-5문장으로 요약)
+
+## 분석
+(이 뉴스가 시장에 미치는 영향, 관련 산업/기업에 대한 분석)
+
+## 투자 인사이트
+(투자자 관점에서의 시사점, 주목할 포인트)
+
+## 관련 종목
+(이 뉴스와 관련된 주요 종목들)"""
+    else:
+        # 영어 기사용 프롬프트: 번역 + 요약 + 분석 + 투자 인사이트 + 관련 종목 / English article prompt: translation + summary + analysis + investment insights + related stocks
+        prompt = f"""다음 영문 경제/금융 뉴스 기사를 한국어로 번역하고 분석해 주세요.
+
+Title: {title}
+
+Content:
+{content[:ARTICLE_CONTENT_LIMIT]}
+
+다음 형식으로 한국어로 작성해 주세요:
+
+## 한국어 번역
+(기사 핵심 내용의 한국어 번역, 3-5문장)
+
+## 요약
+(기사의 핵심 내용을 3-5문장으로 요약)
+
+## 분석
+(이 뉴스가 글로벌 시장 및 한국 시장에 미치는 영향 분석)
+
+## 투자 인사이트
+(투자자 관점에서의 시사점, 주목할 포인트)
+
+## 관련 종목
+(이 뉴스와 관련된 주요 종목들 - 미국/한국)"""
+
+    return _analyze(prompt, ARTICLE_MAX_TOKENS, "bedrock_article_analysis_error")
+
+
+def analyze_stock(
+    symbol: str,
+    name: str,
+    price: float,
+    change_pct: float,
+    pe_ratio: Optional[float] = None,
+    week52_high: float = 0,
+    week52_low: float = 0,
+    sector: str = "",
+    market: str = "US",
+    news_titles: Optional[list] = None,
+) -> str:
+    """
+    종목을 AI로 분석 / Analyze a stock with the model.
+
+    Args:
+        symbol: yfinance 티커 / yfinance ticker.
+        name: 종목명 / stock name.
+        price: 현재가 / current price.
+        change_pct: 등락률(%) / change percentage.
+        pe_ratio: PER (없으면 N/A로 표기) / P/E ratio (rendered as N/A when missing).
+        week52_high: 52주 최고가 / 52-week high.
+        week52_low: 52주 최저가 / 52-week low.
+        sector: 섹터 / sector.
+        market: `US` 또는 `KR` / `US` or `KR`.
+        news_titles: 최근 뉴스 제목 (앞 5개만 사용) / recent news titles (only the first five are used).
+
+    Returns:
+        마크다운 분석 텍스트 / the markdown analysis text.
+
+    Raises:
+        BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
+        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+    """
+    # 최근 뉴스 제목을 문자열로 변환 (최대 5개) / Convert recent news titles to string (max 5)
+    news_str = ""
+    if news_titles:
+        news_str = "\n".join(f"- {t}" for t in news_titles[:NEWS_TITLE_LIMIT])
+
+    # PER 값을 문자열로 변환 (없으면 N/A) / Convert PE ratio to string (N/A if not available)
+    per_str = f"{pe_ratio:.2f}" if pe_ratio else "N/A"
+    # 현재 가격의 52주 범위 내 위치를 백분율로 계산 / Calculate current price position within 52-week range as percentage
+    w52_pct = ((price - week52_low) / (week52_high - week52_low) * 100) if week52_high > week52_low else 0
+
+    # 종목 분석 프롬프트: 기술적 분석, 투자 포인트, 리스크 요인 / Stock analysis prompt: technical analysis, investment points, risk factors
+    prompt = f"""다음 종목을 간결하게 분석해 주세요. 각 항목을 2-3문장으로 작성하세요.
+
+종목: {symbol} ({name})
+시장: {"미국" if market == "US" else "한국"}
+섹터: {sector or "N/A"}
+현재가: {price:,.2f} ({change_pct:+.2f}%)
+PER: {per_str}
+52주 범위: {week52_low:,.2f} ~ {week52_high:,.2f} (현재 위치: {w52_pct:.0f}%)
+
+최근 뉴스:
+{news_str if news_str else "(없음)"}
+
+다음 형식으로 한국어로 간결하게 작성해 주세요:
+
+## 기술적 분석
+(가격 위치, 추세, 모멘텀에 대한 간단 분석)
+
+## 투자 포인트
+(이 종목의 매력 포인트 2-3개)
+
+## 리스크 요인
+(주의할 리스크 2-3개)"""
+
+    return _analyze(prompt, STOCK_MAX_TOKENS, "bedrock_stock_analysis_error")
