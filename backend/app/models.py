@@ -121,6 +121,9 @@ class StockDetailResponse(BaseModel):
     beta: Optional[float] = None
     sector: str = ""
     pbr: Optional[float] = None
+    # 기간수익률 (%) - 키: "1w"/"1m"/"3m"/"1y", 데이터 부족 시 None
+    # Period returns (%) - keys "1w"/"1m"/"3m"/"1y"; None when history is too short
+    returns: Optional[dict[str, Optional[float]]] = None
     last_updated: Optional[datetime] = None
 
 
