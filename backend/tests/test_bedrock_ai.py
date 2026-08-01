@@ -377,3 +377,68 @@ def test_throttling_raises_call_error(monkeypatch, creds):
 
     with pytest.raises(BedrockCallError):
         analyze_stock(**STOCK_ARGS)
+
+
+# ---------------------------------------------------------------------------
+# 잘못된 입력 / Bad input — 프롬프트 조립 실패도 타입 있는 예외로 나가야 한다
+# Prompt-assembly failures must leave as typed errors too (assembly sits inside the try)
+# ---------------------------------------------------------------------------
+
+def test_none_price_raises_call_error_not_type_error(client, caplog):
+    """price=None → 포맷 단계 TypeError를 BedrockCallError로 매핑 + 로그 / None price maps to BedrockCallError."""
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        with pytest.raises(BedrockCallError):
+            analyze_stock(**dict(STOCK_ARGS, price=None))
+
+    assert client.calls == []  # 모델을 호출하지 않았다 / the model was never invoked
+    payloads = _error_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["error_type"] == "TypeError"
+    assert payloads[0]["event"] == "bedrock_stock_analysis_error"
+
+
+def test_none_week52_high_raises_call_error(client):
+    """week52_high=None → 비교 단계 TypeError를 BedrockCallError로 매핑 / None 52-week high maps too."""
+    with pytest.raises(BedrockCallError):
+        analyze_stock(**dict(STOCK_ARGS, week52_high=None))
+
+    assert client.calls == []
+
+
+def test_none_change_pct_raises_call_error(client):
+    """change_pct=None도 동일 / A None change_pct behaves the same."""
+    with pytest.raises(BedrockCallError):
+        analyze_stock(**dict(STOCK_ARGS, change_pct=None))
+
+
+def test_none_article_content_raises_call_error(client, caplog):
+    """content=None → 슬라이싱 TypeError를 BedrockCallError로 매핑 + 로그 / None content maps to BedrockCallError."""
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        with pytest.raises(BedrockCallError):
+            analyze_article("t", None, True)
+
+    assert client.calls == []
+    payloads = _error_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["error_type"] == "TypeError"
+    assert payloads[0]["event"] == "bedrock_article_analysis_error"
+
+
+def test_no_raw_exception_type_escapes_the_module(client):
+    """조립 실패가 TypeError로 새어 나가지 않는다 / A raw TypeError never escapes the module."""
+    for call in (
+        lambda: analyze_stock(**dict(STOCK_ARGS, price=None)),
+        lambda: analyze_stock(**dict(STOCK_ARGS, week52_low=None)),
+        lambda: analyze_article("t", None, False),
+    ):
+        with pytest.raises((BedrockCallError, BedrockUnavailableError)):
+            call()
+
+
+def test_bad_input_without_credentials_still_raises_unavailable(monkeypatch, no_creds):
+    """자격 증명 없음이 우선: 잘못된 입력이어도 Unavailable로 재분류되지 않는다 / Unavailable is not reclassified."""
+    _install_client(monkeypatch, FakeClient())
+
+    # 조립 성공 → _get_client에서 Unavailable / assembly succeeds, then _get_client raises Unavailable
+    with pytest.raises(BedrockUnavailableError):
+        analyze_stock(**STOCK_ARGS)

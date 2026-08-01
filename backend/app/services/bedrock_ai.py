@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, NoReturn, Optional
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -137,24 +137,28 @@ def _invoke(prompt: str, max_tokens: int) -> str:
     return result["content"][0]["text"]
 
 
-def _analyze(prompt: str, max_tokens: int, event: str) -> str:
+def _raise_mapped(exc: Exception, event: str) -> NoReturn:
     """
-    모델 호출을 감싸 실패를 타입 있는 예외로 변환 / Wrap the invoke, mapping failures to typed errors.
+    실패를 로그로 남기고 타입 있는 예외로 다시 던진다 / Log the failure, then re-raise it as a typed error.
+
+    호출부는 프롬프트 조립과 모델 호출을 하나의 try로 감싼다(TUI와 동일). 잘못된 입력(예: `price=None`)이
+    포맷 단계에서 터지는 것도 여기서 `BedrockCallError`로 매핑되므로, 이 모듈을 벗어나는 예외는 항상
+    `BedrockUnavailableError` 아니면 `BedrockCallError`다.
+    Callers wrap prompt assembly *and* the invoke in one try (as the TUI did), so a bad input blowing up in
+    a formatter (e.g. `price=None`) is mapped here too: only the two typed errors ever leave this module.
 
     Raises:
         BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
-        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+        BedrockCallError: 그 외 조립·호출·응답 실패 / any other assembly, invoke or response failure.
     """
-    try:
-        return _invoke(prompt, max_tokens)
-    except BedrockUnavailableError as exc:
-        _log_failure(event, exc, model_id=config.BEDROCK_MODEL_ID, region=config.BEDROCK_REGION)
-        raise
-    except Exception as exc:
-        _log_failure(event, exc, model_id=config.BEDROCK_MODEL_ID, region=config.BEDROCK_REGION)
-        if _is_unavailable(exc):
-            raise BedrockUnavailableError(str(exc)) from exc
-        raise BedrockCallError(str(exc)) from exc
+    _log_failure(event, exc, model_id=config.BEDROCK_MODEL_ID, region=config.BEDROCK_REGION)
+    # 가용성 실패는 재분류하지 않는다 (503이 500으로 뒤바뀌면 안 된다)
+    # Availability failures are never reclassified (a 503 must not turn into a 500).
+    if isinstance(exc, BedrockUnavailableError):
+        raise exc
+    if _is_unavailable(exc):
+        raise BedrockUnavailableError(str(exc)) from exc
+    raise BedrockCallError(str(exc)) from exc
 
 
 def analyze_article(title: str, content: str, is_korean: bool) -> str:
@@ -174,11 +178,15 @@ def analyze_article(title: str, content: str, is_korean: bool) -> str:
 
     Raises:
         BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
-        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+        BedrockCallError: 그 외 호출·응답 실패, 그리고 잘못된 입력(예: `content=None`)으로 인한 조립 실패
+            / any other invoke or response failure, plus assembly failures from bad input (e.g. `content=None`).
     """
-    if is_korean:
-        # 한국어 기사용 프롬프트: 요약, 분석, 투자 인사이트, 관련 종목 / Korean article prompt: summary, analysis, investment insights, related stocks
-        prompt = f"""다음 경제/금융 뉴스 기사를 분석해 주세요.
+    # 프롬프트 조립도 try 안에 둔다 (TUI와 동일): 잘못된 입력이 포맷 단계에서 터져도 타입 있는 예외로 나간다
+    # Assembly stays inside the try (as in the TUI): bad input failing in a formatter still leaves typed.
+    try:
+        if is_korean:
+            # 한국어 기사용 프롬프트: 요약, 분석, 투자 인사이트, 관련 종목 / Korean article prompt: summary, analysis, investment insights, related stocks
+            prompt = f"""다음 경제/금융 뉴스 기사를 분석해 주세요.
 
 제목: {title}
 
@@ -198,9 +206,9 @@ def analyze_article(title: str, content: str, is_korean: bool) -> str:
 
 ## 관련 종목
 (이 뉴스와 관련된 주요 종목들)"""
-    else:
-        # 영어 기사용 프롬프트: 번역 + 요약 + 분석 + 투자 인사이트 + 관련 종목 / English article prompt: translation + summary + analysis + investment insights + related stocks
-        prompt = f"""다음 영문 경제/금융 뉴스 기사를 한국어로 번역하고 분석해 주세요.
+        else:
+            # 영어 기사용 프롬프트: 번역 + 요약 + 분석 + 투자 인사이트 + 관련 종목 / English article prompt: translation + summary + analysis + investment insights + related stocks
+            prompt = f"""다음 영문 경제/금융 뉴스 기사를 한국어로 번역하고 분석해 주세요.
 
 Title: {title}
 
@@ -224,7 +232,9 @@ Content:
 ## 관련 종목
 (이 뉴스와 관련된 주요 종목들 - 미국/한국)"""
 
-    return _analyze(prompt, ARTICLE_MAX_TOKENS, "bedrock_article_analysis_error")
+        return _invoke(prompt, ARTICLE_MAX_TOKENS)
+    except Exception as exc:
+        _raise_mapped(exc, "bedrock_article_analysis_error")
 
 
 def analyze_stock(
@@ -259,20 +269,25 @@ def analyze_stock(
 
     Raises:
         BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
-        BedrockCallError: 그 외 호출·응답 실패 / any other invoke or response failure.
+        BedrockCallError: 그 외 호출·응답 실패, 그리고 잘못된 입력(예: `price=None`, `week52_high=None`)으로 인한 조립 실패
+            / any other invoke or response failure, plus assembly failures from bad input
+            (e.g. `price=None`, `week52_high=None`).
     """
-    # 최근 뉴스 제목을 문자열로 변환 (최대 5개) / Convert recent news titles to string (max 5)
-    news_str = ""
-    if news_titles:
-        news_str = "\n".join(f"- {t}" for t in news_titles[:NEWS_TITLE_LIMIT])
+    # 프롬프트 조립도 try 안에 둔다 (TUI와 동일): 잘못된 입력이 포맷 단계에서 터져도 타입 있는 예외로 나간다
+    # Assembly stays inside the try (as in the TUI): bad input failing in a formatter still leaves typed.
+    try:
+        # 최근 뉴스 제목을 문자열로 변환 (최대 5개) / Convert recent news titles to string (max 5)
+        news_str = ""
+        if news_titles:
+            news_str = "\n".join(f"- {t}" for t in news_titles[:NEWS_TITLE_LIMIT])
 
-    # PER 값을 문자열로 변환 (없으면 N/A) / Convert PE ratio to string (N/A if not available)
-    per_str = f"{pe_ratio:.2f}" if pe_ratio else "N/A"
-    # 현재 가격의 52주 범위 내 위치를 백분율로 계산 / Calculate current price position within 52-week range as percentage
-    w52_pct = ((price - week52_low) / (week52_high - week52_low) * 100) if week52_high > week52_low else 0
+        # PER 값을 문자열로 변환 (없으면 N/A) / Convert PE ratio to string (N/A if not available)
+        per_str = f"{pe_ratio:.2f}" if pe_ratio else "N/A"
+        # 현재 가격의 52주 범위 내 위치를 백분율로 계산 / Calculate current price position within 52-week range as percentage
+        w52_pct = ((price - week52_low) / (week52_high - week52_low) * 100) if week52_high > week52_low else 0
 
-    # 종목 분석 프롬프트: 기술적 분석, 투자 포인트, 리스크 요인 / Stock analysis prompt: technical analysis, investment points, risk factors
-    prompt = f"""다음 종목을 간결하게 분석해 주세요. 각 항목을 2-3문장으로 작성하세요.
+        # 종목 분석 프롬프트: 기술적 분석, 투자 포인트, 리스크 요인 / Stock analysis prompt: technical analysis, investment points, risk factors
+        prompt = f"""다음 종목을 간결하게 분석해 주세요. 각 항목을 2-3문장으로 작성하세요.
 
 종목: {symbol} ({name})
 시장: {"미국" if market == "US" else "한국"}
@@ -295,4 +310,6 @@ PER: {per_str}
 ## 리스크 요인
 (주의할 리스크 2-3개)"""
 
-    return _analyze(prompt, STOCK_MAX_TOKENS, "bedrock_stock_analysis_error")
+        return _invoke(prompt, STOCK_MAX_TOKENS)
+    except Exception as exc:
+        _raise_mapped(exc, "bedrock_stock_analysis_error")
