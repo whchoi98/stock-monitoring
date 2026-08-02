@@ -1,0 +1,6 @@
+aws-cdk-lib>=2.150
+constructs>=10
+# CDK CLI를 venv에 함께 고정한다 / Pin the CDK CLI into the venv too.
+# 시스템 전역 CLI(2.1110)는 aws-cdk-lib 2.263이 내는 cloud assembly schema 54를 읽지 못한다.
+# The system-wide CLI (2.1110) cannot read the cloud assembly schema 54 emitted by aws-cdk-lib 2.263.
+aws-cdk-cli>=2.1134

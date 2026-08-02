@@ -1,0 +1,10 @@
+# Virtual environments
+.venv/
+venv/
+
+# CDK synth output (cdk.context.json is committed on purpose - VPC lookup pin)
+cdk.out/
+
+# Python
+__pycache__/
+*.py[cod]
