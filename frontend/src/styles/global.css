@@ -43,3 +43,217 @@ a {
   border-radius: var(--radius);
   padding: 16px;
 }
+
+/*
+ * ── 앱 셸 / App shell ──
+ * F1이 `.card`를 여기에 둔 선례를 따라 공통 컴포넌트(F3)의 클래스도 이 파일에 모은다.
+ * 색은 예외 없이 tokens.css의 변수만 쓴다.
+ * Following F1's precedent of keeping `.card` here, the shared components' (F3) classes live in this
+ * file too. Colours come from tokens.css variables, without exception.
+ */
+.app {
+  min-height: 100vh;
+  /* 하단 고정 티커 바가 마지막 콘텐츠를 가리지 않도록 그만큼 비운다 / Reserve room so the fixed ticker never covers content */
+  padding-bottom: 56px;
+}
+
+.app-nav {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 12px 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--card);
+}
+
+.app-brand {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.app-links {
+  display: flex;
+  gap: 16px;
+  /* 테마 토글을 오른쪽 끝으로 밀어낸다 / Push the theme toggle to the far right */
+  margin-right: auto;
+}
+
+.app-links a {
+  color: var(--text);
+}
+
+/* react-router의 NavLink가 현재 경로에 붙이는 클래스 / The class react-router's NavLink adds on the active route */
+.app-links a.active {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.app-main {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+/* ── 카드 머리 / Card header ── */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.card-title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.card-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* ── 버튼 / Buttons ── */
+.theme-toggle,
+.retry-button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+/* 네비(--bg 배경) 위에서는 카드색이 대비를 만든다 / On the nav (a --bg surface) the card colour provides contrast */
+.theme-toggle {
+  background: var(--card);
+}
+
+/* 카드 안에서는 페이지 배경색이 대비를 만든다 / Inside a card the page background provides contrast */
+.retry-button {
+  background: var(--bg);
+}
+
+.theme-toggle:hover,
+.retry-button:hover {
+  color: var(--text-strong);
+}
+
+/* ── 뱃지 (시뮬레이션 / 기준 시각) — 신뢰 신호이므로 보이되 튀지 않게 / Badges: trust signals, visible but subdued ── */
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--card);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+/* ── 위젯 에러 / Widget error ── */
+.error-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.error-message {
+  margin: 0;
+}
+
+/* ── 스피너 / Spinner ── */
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--bg);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spinner-rotate 0.8s linear infinite;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── 하단 경제지표 티커 바 / Bottom economic-indicator ticker ── */
+.ticker-bar {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 10;
+  overflow: hidden;
+  padding: 10px 0;
+  background: var(--card);
+  border-top: 1px solid var(--bg);
+}
+
+/*
+ * 같은 목록 두 벌을 이어 붙인 트랙을 -50%까지 밀면 사본의 첫 항목이 원본의 첫 항목 자리에
+ * 정확히 도달하므로 끊김 없이 순환한다 (TickerBar.tsx가 사본을 렌더한다).
+ * The track holds two copies of the list, so sliding it to -50% lands the copy's first item exactly
+ * where the original's was — a loop with no gap (TickerBar.tsx renders the copy).
+ */
+.ticker-track {
+  display: flex;
+  width: max-content;
+  animation: ticker-scroll 40s linear infinite;
+}
+
+.ticker-group {
+  display: flex;
+}
+
+.ticker-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 18px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.ticker-name {
+  color: var(--text);
+}
+
+.ticker-value {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+@keyframes ticker-scroll {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* 모션 최소화 설정에서는 자동 스크롤을 멈추고 손으로 넘기게 한다 / With reduced motion, stop the crawl and allow manual scrolling */
+@media (prefers-reduced-motion: reduce) {
+  .ticker-track {
+    animation: none;
+  }
+
+  .ticker-bar {
+    overflow-x: auto;
+  }
+
+  .spinner {
+    animation-duration: 2s;
+  }
+}
