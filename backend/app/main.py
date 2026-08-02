@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 
-from app.api import health, market, stocks
+from app.api import ai, health, market, stocks
 from app.cache.memory import MemoryCache
 from app.cache.tiered import TieredCache
 from app.state import AppState
@@ -66,4 +66,5 @@ def create_app(state: Optional[AppState] = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(market.router)
     app.include_router(stocks.router)
+    app.include_router(ai.router)
     return app
