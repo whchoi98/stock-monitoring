@@ -75,6 +75,10 @@ ARTICLE_BODY_CLASSES = (
     "newsct_article", "news_end", "view_con",
 )
 
+# 전략 2가 본문 컨테이너 시작 태그 뒤로 훑는 최대 창 크기(문자)
+# Stage-2 forward window (characters) scanned after the body container's opening tag
+ARTICLE_BODY_WINDOW = 100_000
+
 # 전략 3에서 걸러낼 네비게이션/광고/약관 문구 / Navigation, ad and boilerplate markers filtered in stage 3
 BOILERPLATE_MARKERS = (
     "cookie", "javascript", "subscribe", "sign up", "login",
@@ -84,14 +88,37 @@ BOILERPLATE_MARKERS = (
 _ARTICLE_TAG_RE = re.compile(r"<article[^>]*>(.*?)</article>", re.DOTALL)
 _PARAGRAPH_RE = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
 
+# 전략 2: 본문 컨테이너의 **시작 태그만** 찾는다 (닫는 태그까지 게으르게 훑지 않는다).
+# `<div ...>(.*?)</div>` 형태는 `<div` 출현마다 EOF까지 재스캔해 입력 길이의 제곱이 되고,
+# 중첩 `<div>`가 있는 정상 기사에서는 첫 내부 `</div>`에서 본문이 끊긴다. 둘 다 시작 태그 +
+# 고정 창(`ARTICLE_BODY_WINDOW`) 방식으로 해결된다.
+# Stage 2 matches only the container's *opening tag*. A `<div ...>(.*?)</div>` pattern rescans to EOF
+# for every `<div` occurrence (quadratic in the input) and, on a legitimate article containing a nested
+# `<div>`, truncates the body at the first inner `</div>`. An opening-tag match plus a fixed forward
+# window (`ARTICLE_BODY_WINDOW`) fixes both.
+_BODY_CLASS_RES = tuple(
+    re.compile(rf'<div[^>]*class="[^"]*{css_class}[^"]*"[^>]*>')
+    for css_class in ARTICLE_BODY_CLASSES
+)
+
 # 기사 조회 가드 - URL이 클라이언트에서 오므로 SSRF/과대응답을 막는다 (피드 URL은 코드 고정이라 무관)
 # Article fetch guards - the URL is client-supplied, so SSRF and oversized bodies must be blocked
 # (feed URLs are code-fixed and need none of this).
 ALLOWED_SCHEMES = {"http", "https"}
 MAX_REDIRECTS = 3
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-# 본문 상한 (바이트=선언된 content-length, 문자=실제 본문) / Body cap: bytes for the declared content-length, chars for the body
-MAX_ARTICLE_SIZE = 2_000_000
+# 본문 상한 (바이트) - 선언된 content-length와 실제로 읽는 본문에 같은 값을 적용한다.
+# 256KB면 충분하다: 프롬프트에 실리는 본문은 `bedrock_ai.ARTICLE_CONTENT_LIMIT`(6000자)까지이고
+# 단락 수도 25개로 제한되므로, 이보다 큰 HTML을 더 읽어도 분석 결과는 달라지지 않는다.
+# Body cap in bytes, applied both to the declared content-length and to the bytes actually read.
+# 256KB loses nothing: only `bedrock_ai.ARTICLE_CONTENT_LIMIT` (6000 chars) of the extracted body ever
+# reaches the prompt and at most 25 paragraphs are kept, so reading more HTML cannot change the analysis.
+MAX_ARTICLE_SIZE = 262_144
+# 기사 조회는 압축을 요청하지 않는다: 압축 해제 폭탄(작은 본문이 GB로 부푸는 응답)이 크기 상한을
+# 우회하지 못하게 한다. 오리진이 이를 무시해도 스트리밍 카운터가 상한에서 읽기를 끊는다.
+# Article fetches ask for no compression, so a decompression bomb (a tiny body inflating to gigabytes)
+# cannot slip past the size cap. Should an origin ignore it, the streaming counter still stops at the cap.
+IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
 
 
 # ---------------------------------------------------------------------------
@@ -296,8 +323,14 @@ def _extract_paragraphs(html: str) -> list[str]:
     3단계 전략으로 기사 단락 추출 / Extract article paragraphs with a three-stage strategy.
 
     1. `<article>` 태그 안의 `<p>` (가장 신뢰할 수 있다) / `<p>` inside `<article>` (most reliable).
-    2. 대표적인 본문 CSS 클래스 `<div>` 안의 `<p>` / `<p>` inside a well-known article-body `<div>`.
+    2. 대표적인 본문 CSS 클래스 `<div>` **시작 태그 뒤 고정 창** 안의 `<p>` / `<p>` inside a fixed window
+       after a well-known article-body `<div>`'s opening tag.
     3. 페이지 전체 `<p>` + 광고·약관 필터 (마지막 폴백) / every `<p>` on the page with an ad/boilerplate filter.
+
+    CPU 바운드 순수 함수다 (정규식 스캔). 이벤트 루프를 막지 않도록 호출부에서
+    `asyncio.to_thread`로 감싼다.
+    A CPU-bound pure function (regex scanning); callers wrap it in `asyncio.to_thread` so it cannot
+    block the event loop.
     """
     # 전략 1 / Stage 1
     article_match = _ARTICLE_TAG_RE.search(html)
@@ -306,14 +339,13 @@ def _extract_paragraphs(html: str) -> list[str]:
         if found:
             return found
 
-    # 전략 2 / Stage 2
-    for css_class in ARTICLE_BODY_CLASSES:
-        body_match = re.search(
-            rf'<div[^>]*class="[^"]*{css_class}[^"]*"[^>]*>(.*?)</div>',
-            html, re.DOTALL,
-        )
-        if body_match:
-            found = _paragraphs(body_match.group(1), MIN_PARAGRAPH_LEN)
+    # 전략 2 - 닫는 태그를 찾지 않고 시작 태그 뒤 고정 창만 훑는다 (선형 + 중첩 div 안전)
+    # Stage 2 - no closing-tag search: scan a fixed window after the opening tag (linear, nesting-safe)
+    for pattern in _BODY_CLASS_RES:
+        opening = pattern.search(html)
+        if opening:
+            window = html[opening.end():opening.end() + ARTICLE_BODY_WINDOW]
+            found = _paragraphs(window, MIN_PARAGRAPH_LEN)
             if found:
                 return found
 
@@ -387,23 +419,74 @@ async def _is_safe_url(url: str) -> bool:
     return True
 
 
-def _limited_text(response: Any, url: str) -> Optional[str]:
+async def _limited_text(response: httpx.Response, url: str) -> Optional[str]:
     """
-    크기 상한을 적용해 본문을 문자열로 / Return the body as text under the size cap.
+    크기 상한을 적용하며 본문을 스트리밍으로 읽어 문자열로 / Stream the body under the size cap and decode it.
 
-    선언된 content-length가 상한을 넘으면 거부하고, 실제 본문이 넘으면 상한까지 잘라 쓴다.
-    An oversized declared content-length is rejected; an oversized body is truncated to the cap.
+    본문을 한 번에 메모리에 올리지 않는다(`response.text`/`.read()` 금지): 압축 해제 폭탄이면
+    선언된 content-length는 압축 크기라서 상한 검사를 통과하고, 본문 전체를 버퍼링하는 순간
+    OOM으로 워커가 죽는다. 그래서 청크마다 누적 바이트를 세고 상한을 넘으면 즉시 읽기를 끊는다.
+    The body is never materialized in one go (no `response.text`/`.read()`): with a decompression bomb the
+    declared content-length is the *compressed* size, so it passes the cap check and buffering the whole
+    body would OOM the worker. Instead every chunk updates a running byte count that breaks out at the cap.
+
+    선언된 content-length는 값싼 사전 필터로 남겨 둔다 (정직한 오리진은 요청조차 아끼게 된다).
+    The declared content-length stays as a cheap pre-filter, saving the read for honest origins.
+
+    버퍼링 상한은 "상한 + 마지막 청크 1개"다. 압축을 요청하지 않으므로(`IDENTITY_ENCODING`) 보통
+    청크는 네트워크 청크 크기지만, 오리진이 identity를 무시하면 그 1개 청크가 압축 해제분만큼
+    커질 수 있다 - 그래도 무한이 아니라 한 청크로 묶인다.
+    Peak buffering is "the cap plus one final chunk". Compression is not requested
+    (`IDENTITY_ENCODING`), so a chunk is normally a network-sized read; if an origin ignores that, the one
+    trailing chunk can be as large as its decompressed expansion - bounded to a single chunk, not unbounded.
+
+    Returns:
+        본문 문자열, 선언된 크기가 상한을 넘으면 None / The body text, or None when the declared size exceeds the cap.
     """
     declared = response.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > MAX_ARTICLE_SIZE:
         _warn("article_too_large", url=url, declared=int(declared))
         return None
 
-    text = response.text
-    if len(text) > MAX_ARTICLE_SIZE:
-        _warn("article_truncated", url=url, chars=len(text))
-        return text[:MAX_ARTICLE_SIZE]
-    return text
+    chunks: list = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > MAX_ARTICLE_SIZE:
+            _warn("article_truncated", url=url, read_bytes=total)
+            break
+
+    body = b"".join(chunks)[:MAX_ARTICLE_SIZE]
+    # 상한에서 자르면 멀티바이트 문자가 쪼개질 수 있다 -> 대체 문자로 흡수한다 (본문은 어차피 잘렸다)
+    # Cutting at the cap can split a multi-byte character; replacement absorbs it (the body is cut anyway)
+    return body.decode(response.charset_encoding or "utf-8", errors="replace")
+
+
+async def _fetch_hop(client: httpx.AsyncClient, url: str) -> tuple:
+    """
+    리다이렉트 한 홉을 스트리밍으로 조회 / Fetch one redirect hop as a stream.
+
+    Returns:
+        `(next_url, body)` - 리다이렉트면 `(다음 URL, None)`, 최종 응답이면 `(None, 본문)`,
+        실패·거부면 `(None, None)`.
+        `(next_url, body)`: a redirect yields `(next URL, None)`, a final response `(None, body)`,
+        and a failure or rejection `(None, None)`.
+    """
+    try:
+        async with client.stream("GET", url, headers=IDENTITY_ENCODING) as response:
+            if response.status_code in REDIRECT_STATUSES:
+                location = response.headers.get("location", "")
+                if location:
+                    return urljoin(url, location), None
+
+            if response.status_code != 200:
+                _warn("article_fetch_failed", url=url, status=response.status_code)
+                return None, None
+            return None, await _limited_text(response, url)
+    except Exception as exc:
+        _warn("article_fetch_failed", url=url, error=str(exc))
+        return None, None
 
 
 async def _fetch_html(url: str) -> Optional[str]:
@@ -421,22 +504,10 @@ async def _fetch_html(url: str) -> Optional[str]:
             if not await _is_safe_url(target):
                 return None
 
-            try:
-                response = await client.get(target)
-            except Exception as exc:
-                _warn("article_fetch_failed", url=target, error=str(exc))
-                return None
-
-            if response.status_code in REDIRECT_STATUSES:
-                location = response.headers.get("location", "")
-                if location:
-                    target = urljoin(target, location)
-                    continue
-
-            if response.status_code != 200:
-                _warn("article_fetch_failed", url=target, status=response.status_code)
-                return None
-            return _limited_text(response, target)
+            next_target, body = await _fetch_hop(client, target)
+            if next_target is None:
+                return body
+            target = next_target
 
     _warn("article_too_many_redirects", url=url, last_url=target)
     return None
@@ -462,7 +533,9 @@ async def fetch_article_content(url: str) -> str:
     if html is None:
         return ""
 
-    paragraphs = _extract_paragraphs(html)
+    # 추출은 CPU 바운드 정규식 스캔이다 - 이벤트 루프 밖(스레드)에서 돌린다
+    # Extraction is a CPU-bound regex scan, so it runs off the event loop in a thread
+    paragraphs = await asyncio.to_thread(_extract_paragraphs, html)
     if not paragraphs:
         _warn("article_extract_failed", url=url)
         return ""

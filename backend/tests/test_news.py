@@ -1,11 +1,25 @@
 """
-뉴스 서비스 테스트 - 고정 RSS/HTML 문자열 + `httpx.AsyncClient.get` monkeypatch (실제 네트워크 호출 없음)
-News service tests - fixed RSS/HTML strings plus a monkeypatched `httpx.AsyncClient.get` (no real network calls).
+뉴스 서비스 테스트 - 고정 RSS/HTML 문자열 + `httpx.MockTransport` (실제 네트워크 호출 없음)
+News service tests - fixed RSS/HTML strings served through `httpx.MockTransport` (no real network calls).
+
+**시임(seam)은 트랜스포트다 - `AsyncClient.get`이 아니다.** 클라이언트 메서드를 가로채면 httpx의
+리다이렉트 처리기가 실행되지 않으므로, `follow_redirects=False`를 `True`로 바꿔도 테스트가 전부
+통과해버린다 (홉별 SSRF 재검증이 테스트에 보이지 않는다). 트랜스포트를 대체하면 요청 생성·리다이렉트·
+스트리밍·콘텐츠 디코딩이 모두 실제 코드로 실행되고, 리다이렉트 대상도 트랜스포트를 통과하므로
+"내부망으로 유도하는 리다이렉트"를 진짜로 관측할 수 있다.
+**The seam is the transport, not `AsyncClient.get`.** Patching the client method skips httpx's redirect
+machinery, so flipping `follow_redirects=False` to `True` would leave every test green while the per-hop
+SSRF re-validation silently stops running. Replacing the transport keeps request building, redirects,
+streaming and content decoding on the real code path, and a redirect target really does reach the
+transport, which is what makes "a redirect toward the internal network" observable.
 """
+import gzip
 import hashlib
 import json
 import logging
 import socket
+import threading
+import time
 
 import httpx
 import pytest
@@ -68,28 +82,69 @@ def _numbered_rss(count: int, prefix: str = "Item") -> str:
     ])
 
 
-class FakeResponse:
-    """httpx.Response 대역 (status_code/text/headers만 사용) / Stand-in for httpx.Response (status_code/text/headers only)."""
-
-    def __init__(self, text: str = "", status_code: int = 200, headers=None):
-        self.text = text
-        self.status_code = status_code
-        # 실제 httpx 헤더는 대소문자 무시 - 구현이 소문자로 조회하므로 소문자 키를 쓴다
-        # Real httpx headers are case-insensitive; the implementation reads lowercase keys
-        self.headers = headers or {}
-
-
-def _patch_get(monkeypatch, routes):
+def _resp(text: str = "", status_code: int = 200, headers=None) -> httpx.Response:
     """
-    `httpx.AsyncClient.get`을 URL->응답 매핑으로 대체하고 호출을 기록.
-    Replace `httpx.AsyncClient.get` with a URL->response mapping, recording every call.
+    고정 본문 응답 (진짜 `httpx.Response`) / A fixed-body response (a real `httpx.Response`).
 
-    값이 Exception이면 raise한다 (피드 실패 시나리오) / An Exception value is raised (feed-failure scenario).
+    명시한 헤더는 그대로 유지된다 (예: 거짓 `content-length`로 크기 가드를 시험한다).
+    Explicit headers are preserved as given (e.g. a lying `content-length` to exercise the size guard).
+    """
+    return httpx.Response(status_code, text=text, headers=headers)
+
+
+class _ChunkStream(httpx.AsyncByteStream):
+    """
+    본문을 고정 크기 청크로 흘리며 실제로 소비된 청크 수를 센다.
+    Streams a body in fixed-size chunks and counts how many chunks were actually consumed.
+
+    소비자가 상한에서 읽기를 끊었는지(= 남은 본문을 버퍼링하지 않았는지) 관측하는 유일한 방법이다.
+    This is the only way to observe that the consumer stopped at the cap instead of buffering the rest.
+    """
+
+    def __init__(self, payload: bytes, chunk_size: int) -> None:
+        self.payload = payload
+        self.chunk_size = chunk_size
+        self.chunks_pulled = 0
+
+    @property
+    def chunk_total(self) -> int:
+        """전체 청크 수 (올림) / Total number of chunks (ceiling division)."""
+        return -(-len(self.payload) // self.chunk_size)
+
+    async def __aiter__(self):
+        for start in range(0, len(self.payload), self.chunk_size):
+            self.chunks_pulled += 1
+            yield self.payload[start:start + self.chunk_size]
+
+
+def _streamed(stream: _ChunkStream, headers=None, status_code: int = 200) -> httpx.Response:
+    """청크 스트림을 본문으로 갖는 응답 / A response whose body is a chunked stream."""
+    return httpx.Response(status_code, headers=headers, stream=stream)
+
+
+def _patch_transport(monkeypatch, routes):
+    """
+    모든 `httpx.AsyncClient`에 URL->응답 매핑 `MockTransport`를 심고 요청을 기록.
+    Give every `httpx.AsyncClient` a `MockTransport` backed by a URL->response map, recording requests.
+
+    `_client()`가 넘기는 인자(타임아웃/헤더/`follow_redirects`)는 건드리지 않고 트랜스포트만 주입하므로,
+    리다이렉트 처리와 스트리밍은 실제 httpx 코드가 수행한다.
+    Only the transport is injected; the arguments `_client()` passes (timeout, headers,
+    `follow_redirects`) stay untouched, so redirects and streaming run on real httpx code.
+
+    값이 Exception이면 raise한다 (조회 실패 시나리오) / An Exception value is raised (fetch-failure scenario).
     """
     calls = []
 
-    async def fake_get(self, url, **kwargs):
-        calls.append({"url": url, "user_agent": self.headers.get("user-agent")})
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        # 요청을 먼저 기록한다: 예상 밖 URL이 구현의 `except Exception`에 삼켜져도 테스트에는 보인다
+        # Record first: an unexpected URL stays visible even if the implementation swallows the error
+        calls.append({
+            "url": url,
+            "user_agent": request.headers.get("user-agent"),
+            "accept_encoding": request.headers.get("accept-encoding"),
+        })
         if url not in routes:
             raise AssertionError(f"unexpected URL requested: {url}")
         outcome = routes[url]
@@ -97,7 +152,14 @@ def _patch_get(monkeypatch, routes):
             raise outcome
         return outcome
 
-    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    transport = httpx.MockTransport(handler)
+    original_init = httpx.AsyncClient.__init__
+
+    def patched_init(self, *args, **kwargs):
+        kwargs.setdefault("transport", transport)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_init)
     return calls
 
 
@@ -280,9 +342,9 @@ def test_parse_rss_does_not_read_local_files_for_xxe(caplog):
 
 async def test_fetch_news_skips_hostile_feed_and_keeps_others(monkeypatch, caplog):
     """적대적 피드는 skip하고 나머지 소스는 유지 / A hostile feed is skipped while the other sources survive."""
-    routes = {url: FakeResponse(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
-    routes[config.NEWS_FEEDS["yahoo"]] = FakeResponse(BILLION_LAUGHS)
-    _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    routes[config.NEWS_FEEDS["yahoo"]] = _resp(BILLION_LAUGHS)
+    _patch_transport(monkeypatch, routes)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         items = await news.fetch_news()
@@ -299,8 +361,8 @@ async def test_fetch_news_skips_hostile_feed_and_keeps_others(monkeypatch, caplo
 
 async def test_fetch_news_queries_every_configured_feed(monkeypatch):
     """NEWS_FEEDS 4종을 모두 조회하고 소스별 언어를 부여 / All four NEWS_FEEDS are queried, each with its own language."""
-    routes = {url: FakeResponse(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
-    calls = _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    calls = _patch_transport(monkeypatch, routes)
 
     items = await news.fetch_news()
 
@@ -314,8 +376,8 @@ async def test_fetch_news_queries_every_configured_feed(monkeypatch):
 
 async def test_fetch_news_sends_browser_user_agent(monkeypatch):
     """TUI와 동일한 User-Agent 헤더 전송 / Sends the same User-Agent header as the TUI."""
-    routes = {url: FakeResponse(_numbered_rss(1)) for url in config.NEWS_FEEDS.values()}
-    calls = _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(1)) for url in config.NEWS_FEEDS.values()}
+    calls = _patch_transport(monkeypatch, routes)
 
     await news.fetch_news()
 
@@ -324,8 +386,8 @@ async def test_fetch_news_sends_browser_user_agent(monkeypatch):
 
 async def test_fetch_news_caps_items_per_source(monkeypatch):
     """소스당 max_per_source개까지만 반환 / At most max_per_source items come back per source."""
-    routes = {url: FakeResponse(_numbered_rss(12)) for url in config.NEWS_FEEDS.values()}
-    _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(12)) for url in config.NEWS_FEEDS.values()}
+    _patch_transport(monkeypatch, routes)
 
     assert len(await news.fetch_news(max_per_source=3)) == 12   # 3 * 4 feeds
     assert len(await news.fetch_news()) == 40                   # 기본 10 * 4 / default 10 * 4
@@ -333,10 +395,10 @@ async def test_fetch_news_caps_items_per_source(monkeypatch):
 
 async def test_fetch_news_one_feed_fails_others_survive(monkeypatch, caplog):
     """피드 1개가 실패해도 나머지 3개 결과는 반환 + 경고 / One failing feed still returns the other three, with a warning."""
-    routes = {url: FakeResponse(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    routes = {url: _resp(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
     broken_url = config.NEWS_FEEDS["hankyung"]
     routes[broken_url] = httpx.ConnectTimeout("feed boom")
-    _patch_get(monkeypatch, routes)
+    _patch_transport(monkeypatch, routes)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         items = await news.fetch_news()
@@ -349,9 +411,9 @@ async def test_fetch_news_one_feed_fails_others_survive(monkeypatch, caplog):
 
 async def test_fetch_news_non_200_feed_is_skipped_with_warning(monkeypatch, caplog):
     """200이 아닌 피드는 skip + 경고 / A non-200 feed is skipped and warned about."""
-    routes = {url: FakeResponse(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
-    routes[config.NEWS_FEEDS["mk"]] = FakeResponse("", status_code=503)
-    _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(2, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    routes[config.NEWS_FEEDS["mk"]] = _resp("", status_code=503)
+    _patch_transport(monkeypatch, routes)
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         items = await news.fetch_news()
@@ -368,7 +430,7 @@ async def test_fetch_news_non_200_feed_is_skipped_with_warning(monkeypatch, capl
 async def test_fetch_company_news_us_uses_yahoo_headline_feed(monkeypatch):
     """US 심볼은 Yahoo headline RSS / A US symbol hits the Yahoo headline RSS feed."""
     url = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL&region=US&lang=en-US"
-    calls = _patch_get(monkeypatch, {url: FakeResponse(_numbered_rss(2))})
+    calls = _patch_transport(monkeypatch, {url: _resp(_numbered_rss(2))})
 
     items = await news.fetch_company_news("AAPL")
 
@@ -385,7 +447,7 @@ async def test_fetch_company_news_kr_uses_google_news_with_stock_name(monkeypatc
         "https://news.google.com/rss/search"
         "?q=Samsung+Electronics+%EC%A3%BC%EC%8B%9D&hl=ko&gl=KR&ceid=KR:ko"
     )
-    calls = _patch_get(monkeypatch, {url: FakeResponse(_numbered_rss(2))})
+    calls = _patch_transport(monkeypatch, {url: _resp(_numbered_rss(2))})
 
     items = await news.fetch_company_news("005930.KS")
 
@@ -400,7 +462,7 @@ async def test_fetch_company_news_kosdaq_suffix_also_uses_google(monkeypatch):
         "https://news.google.com/rss/search"
         "?q=Ecopro+BM+%EC%A3%BC%EC%8B%9D&hl=ko&gl=KR&ceid=KR:ko"
     )
-    calls = _patch_get(monkeypatch, {url: FakeResponse(_numbered_rss(1))})
+    calls = _patch_transport(monkeypatch, {url: _resp(_numbered_rss(1))})
 
     assert len(await news.fetch_company_news("247540.KQ")) == 1
     assert [c["url"] for c in calls] == [url]
@@ -409,7 +471,7 @@ async def test_fetch_company_news_kosdaq_suffix_also_uses_google(monkeypatch):
 async def test_fetch_company_news_caps_at_eight_items(monkeypatch):
     """종목 뉴스는 최대 8건 / Company news is capped at eight items."""
     url = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=MSFT&region=US&lang=en-US"
-    _patch_get(monkeypatch, {url: FakeResponse(_numbered_rss(20))})
+    _patch_transport(monkeypatch, {url: _resp(_numbered_rss(20))})
 
     assert len(await news.fetch_company_news("MSFT")) == 8
 
@@ -417,7 +479,7 @@ async def test_fetch_company_news_caps_at_eight_items(monkeypatch):
 async def test_fetch_company_news_failure_returns_empty_with_warning(monkeypatch, caplog):
     """조회 실패는 경고 + 빈 리스트 / A failed fetch warns and returns an empty list."""
     url = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=TSLA&region=US&lang=en-US"
-    _patch_get(monkeypatch, {url: httpx.ConnectError("company boom")})
+    _patch_transport(monkeypatch, {url: httpx.ConnectError("company boom")})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_company_news("TSLA") == []
@@ -450,7 +512,7 @@ async def test_fetch_article_content_extracts_from_article_tag(monkeypatch):
         "</body></html>"
     )
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(html)})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
 
     content = await news.fetch_article_content(ARTICLE_URL)
 
@@ -469,7 +531,7 @@ async def test_fetch_article_content_falls_back_to_body_class(monkeypatch):
         "</body></html>"
     )
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(html)})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
 
     content = await news.fetch_article_content(ARTICLE_URL)
 
@@ -493,17 +555,97 @@ async def test_fetch_article_content_falls_back_to_all_paragraphs_filtering_ads(
         "</body></html>"
     )
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(html)})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
 
     assert len(short) == 50
     assert await news.fetch_article_content(ARTICLE_URL) == keep
+
+
+async def test_fetch_article_content_keeps_paragraphs_after_a_nested_div(monkeypatch):
+    """
+    전략 2는 중첩 `<div>`에서 본문을 끊지 않는다 / Stage 2 does not stop the body at a nested `<div>`.
+
+    본문 컨테이너 안에 사진 캡션용 `<div>`가 들어가는 것은 흔한 마크업이다. 닫는 태그를 게으르게
+    찾던 옛 구현은 그 첫 `</div>`에서 기사를 잘라 뒤 단락을 모두 잃었다.
+    A caption `<div>` inside the body container is ordinary markup; the old lazy closing-tag search cut the
+    article at that first `</div>` and lost every later paragraph.
+    """
+    _patch_dns(monkeypatch)
+    html = (
+        "<html><body>"
+        '<div class="wrapper article-body">'
+        "<p>First body paragraph before the nested container element.</p>"
+        '<div class="photo-caption"><span>caption</span></div>'
+        "<p>Second body paragraph living after the nested container.</p>"
+        "</div></body></html>"
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    content = await news.fetch_article_content(ARTICLE_URL)
+
+    assert content == (
+        "First body paragraph before the nested container element.\n\n"
+        "Second body paragraph living after the nested container."
+    )
+
+
+async def test_fetch_article_content_extraction_is_linear_on_pathological_html(monkeypatch):
+    """
+    본문 클래스가 반복되는 적대적 HTML도 즉시 끝난다 / Hostile HTML repeating the body class finishes immediately.
+
+    입력은 `</div>`가 하나도 없는 `<div class="article-body">` 8000개(~200KB)다. 닫는 태그를 게으르게
+    찾던 옛 구현은 `<div` 출현마다 EOF까지 재스캔해 이 입력에서 9.7초가 걸렸다 (2026-08-02 측정,
+    같은 결함이 432KB 실제 기사에서는 42초였다). 시작 태그 + 고정 창 방식은 스캔이 한 번이라 밀리초
+    단위다. 여유를 크게 둔 1초 상한으로 회귀를 잡는다.
+    The input is 8000 `<div class="article-body">` tags (~200KB) with no `</div>` anywhere. The old lazy
+    closing-tag search rescanned to EOF per `<div` occurrence and took 9.7 seconds on this input (measured
+    2026-08-02; the same defect cost 42 seconds on a real 432KB article). The opening-tag-plus-window scan is
+    a single pass and finishes in milliseconds, so the generous one-second bound is what catches a regression.
+    """
+    _patch_dns(monkeypatch)
+    html = f'<div class="article-body"><p>{KEPT_PARAGRAPH}</p>' + '<div class="article-body">' * 8000
+    assert len(html) > 200_000
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    started = time.perf_counter()
+    content = await news.fetch_article_content(ARTICLE_URL)
+    elapsed = time.perf_counter() - started
+
+    assert content == KEPT_PARAGRAPH
+    assert elapsed < 1.0, f"extraction took {elapsed:.1f}s - the quadratic scan is back"
+
+
+async def test_paragraph_extraction_runs_off_the_event_loop(monkeypatch):
+    """
+    추출은 이벤트 루프 스레드에서 돌지 않는다 / Extraction never runs on the event-loop thread.
+
+    CPU 바운드 정규식 스캔이므로 루프에서 돌면 그 시간 동안 다른 모든 요청이 멈춘다.
+    It is a CPU-bound regex scan: on the loop it would stall every other request for its duration.
+    """
+    _patch_dns(monkeypatch)
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp("<article><p>Body paragraph that is long enough to keep.</p></article>"),
+    })
+    loop_thread = threading.get_ident()
+    seen = {}
+    original = news._extract_paragraphs
+
+    def spy(html):
+        seen["thread"] = threading.get_ident()
+        return original(html)
+
+    monkeypatch.setattr(news, "_extract_paragraphs", spy)
+
+    assert await news.fetch_article_content(ARTICLE_URL) == "Body paragraph that is long enough to keep."
+
+    assert seen["thread"] != loop_thread
 
 
 async def test_fetch_article_content_caps_at_25_paragraphs(monkeypatch):
     """최대 25개 단락까지만 결합 / At most 25 paragraphs are joined."""
     paras = "".join(f"<p>Paragraph number {i} is long enough to be kept.</p>" for i in range(40))
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(f"<article>{paras}</article>")})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(f"<article>{paras}</article>")})
 
     content = await news.fetch_article_content(ARTICLE_URL)
 
@@ -516,7 +658,7 @@ async def test_fetch_article_content_caps_at_25_paragraphs(monkeypatch):
 async def test_fetch_article_content_returns_empty_on_fetch_failure(monkeypatch, caplog):
     """조회 실패는 경고 + 빈 문자열 (라우트가 사용자 오류로 변환) / A failed fetch warns and returns "" (the route surfaces the error)."""
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: httpx.ReadTimeout("article boom")})
+    _patch_transport(monkeypatch, {ARTICLE_URL: httpx.ReadTimeout("article boom")})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -528,7 +670,7 @@ async def test_fetch_article_content_returns_empty_on_fetch_failure(monkeypatch,
 async def test_fetch_article_content_returns_empty_on_non_200(monkeypatch, caplog):
     """200이 아니면 경고 + 빈 문자열 / A non-200 status warns and returns ""."""
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse("<article><p>hidden</p></article>", status_code=403)})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp("<article><p>hidden</p></article>", status_code=403)})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -539,7 +681,7 @@ async def test_fetch_article_content_returns_empty_on_non_200(monkeypatch, caplo
 async def test_fetch_article_content_returns_empty_when_nothing_extractable(monkeypatch, caplog):
     """추출 실패도 조용히 넘기지 않는다 / An unextractable page warns instead of failing silently."""
     _patch_dns(monkeypatch)
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse("<html><body><div>no paragraphs</div></body></html>")})
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp("<html><body><div>no paragraphs</div></body></html>")})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -562,7 +704,7 @@ async def test_fetch_article_content_returns_empty_when_nothing_extractable(monk
 async def test_fetch_article_content_rejects_non_http_scheme(monkeypatch, caplog, url):
     """http/https 외 스킴과 호스트 없는 URL은 요청조차 하지 않는다 / Non-http(s) schemes and hostless URLs never reach a request."""
     _patch_dns(monkeypatch)
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(url) == ""
@@ -576,7 +718,7 @@ async def test_fetch_article_content_rejects_non_http_scheme(monkeypatch, caplog
 async def test_fetch_article_content_rejects_host_resolving_to_internal_address(monkeypatch, caplog, address):
     """내부망/메타데이터 주소로 해석되는 호스트는 거부 / A host resolving to an internal or metadata address is rejected."""
     lookups = _patch_dns(monkeypatch, {"example.com": address})
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -594,7 +736,7 @@ async def test_fetch_article_content_rejects_bare_internal_ip_url(monkeypatch, c
     # DNS는 공개 주소를 주도록 스텁 -> 그래도 거부되어야 한다 (IP 리터럴은 해석하지 않는다)
     # DNS is stubbed to a public address; rejection must still happen (IP literals skip resolution)
     lookups = _patch_dns(monkeypatch)
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(f"http://{address}/latest/meta-data/") == ""
@@ -613,7 +755,7 @@ async def test_fetch_article_content_rejects_bare_internal_ip_url(monkeypatch, c
 async def test_fetch_article_content_rejects_internal_ipv6_literals(monkeypatch, caplog, host):
     """IPv6 리터럴(IPv4-mapped 포함)도 내부망이면 거부 / Internal IPv6 literals, IPv4-mapped included, are rejected."""
     lookups = _patch_dns(monkeypatch)
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(f"http://{host}/") == ""
@@ -630,7 +772,7 @@ async def test_fetch_article_content_rejects_obfuscated_host_via_resolved_addres
     They do not parse as IP literals and therefore go through DNS, so the resolved-address check is the defense.
     """
     _patch_dns(monkeypatch, {"2130706433": "127.0.0.1", "0177.0.0.1": "127.0.0.1"})
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content("http://2130706433/admin") == ""
@@ -645,7 +787,7 @@ async def test_fetch_article_content_rejects_obfuscated_host_via_resolved_addres
 async def test_fetch_article_content_strips_userinfo_when_validating_host(monkeypatch, caplog):
     """`user@internal` 형태의 userinfo 위장도 실제 호스트로 검증 / A `user@internal` userinfo trick validates the real host."""
     lookups = _patch_dns(monkeypatch)
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content("http://example.com@169.254.169.254/latest/") == ""
@@ -657,7 +799,7 @@ async def test_fetch_article_content_strips_userinfo_when_validating_host(monkey
 async def test_fetch_article_content_rejects_when_any_address_is_internal(monkeypatch, caplog):
     """공개 주소와 내부 주소가 섞여 있으면 거부 (DNS rebinding 방어) / A mixed public/internal answer is rejected (DNS-rebinding defense)."""
     _patch_dns(monkeypatch, {"example.com": [PUBLIC_IP, "10.1.2.3"]})
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -670,7 +812,7 @@ async def test_fetch_article_content_rejects_when_any_address_is_internal(monkey
 async def test_fetch_article_content_rejects_unresolvable_host(monkeypatch, caplog):
     """호스트 해석 실패는 경고 + 빈 문자열 / A resolution failure warns and returns ""."""
     _patch_dns(monkeypatch, {"example.com": socket.gaierror("no such host")})
-    calls = _patch_get(monkeypatch, {})
+    calls = _patch_transport(monkeypatch, {})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == ""
@@ -685,7 +827,7 @@ async def test_fetch_article_content_public_host_proceeds(monkeypatch):
     """공개 주소로 해석되면 정상 추출 / A public address resolves and extraction proceeds."""
     lookups = _patch_dns(monkeypatch, {"example.com": PUBLIC_IP})
     html = "<article><p>Public article body paragraph that is long enough.</p></article>"
-    calls = _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(html)})
+    calls = _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
 
     content = await news.fetch_article_content(ARTICLE_URL)
 
@@ -698,8 +840,8 @@ async def test_fetch_article_content_revalidates_redirect_target(monkeypatch, ca
     """리다이렉트 대상도 다시 검증한다 - 내부망으로 유도하면 차단 / Redirect targets are re-validated; an internal hop is blocked."""
     internal_url = "http://169.254.169.254/latest/meta-data/"
     _patch_dns(monkeypatch, {"example.com": PUBLIC_IP})
-    calls = _patch_get(monkeypatch, {
-        ARTICLE_URL: FakeResponse("", status_code=302, headers={"location": internal_url}),
+    calls = _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp("", status_code=302, headers={"location": internal_url}),
     })
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
@@ -712,13 +854,41 @@ async def test_fetch_article_content_revalidates_redirect_target(monkeypatch, ca
                for p in payloads)
 
 
+async def test_fetch_article_content_never_requests_a_private_redirect_target(monkeypatch, caplog):
+    """
+    내부망으로 유도하는 302는 **요청 자체가 일어나지 않는다** / A 302 toward the internal network is never requested.
+
+    앞 테스트와 달리 내부 URL에 진짜 응답(메타데이터 토큰 흉내)을 등록해 둔다: 리다이렉트를 httpx에
+    맡겨(`follow_redirects=True`) 홉별 재검증이 사라지면 이 응답이 그대로 본문으로 흘러나온다.
+    Unlike the previous test, the internal URL is wired to a real response (a stand-in metadata token):
+    if redirects were delegated to httpx (`follow_redirects=True`) and the per-hop re-validation stopped
+    running, that body would come straight back as the article.
+    """
+    internal_url = "http://169.254.169.254/"
+    secret = "IMDS-CREDENTIAL-LEAK token that is long enough to survive extraction."
+    _patch_dns(monkeypatch, {"example.com": PUBLIC_IP})
+    calls = _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp("", status_code=302, headers={"location": internal_url}),
+        internal_url: _resp(f"<article><p>{secret}</p></article>"),
+    })
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        content = await news.fetch_article_content(ARTICLE_URL)
+
+    assert content == ""
+    assert secret not in content
+    assert [c["url"] for c in calls] == [ARTICLE_URL]   # 내부 홉은 트랜스포트에 닿지 못한다 / the internal hop never reaches the transport
+    assert any(p.get("event") == "article_url_rejected" and p.get("url") == internal_url
+               for p in _warning_payloads(caplog))
+
+
 async def test_fetch_article_content_follows_public_redirect(monkeypatch):
     """공개 호스트 리다이렉트는 따라간다 (상대 Location 포함) / Redirects to public hosts are followed (relative Location included)."""
     final_url = "https://example.com/story/final"
     _patch_dns(monkeypatch, {"example.com": PUBLIC_IP})
-    calls = _patch_get(monkeypatch, {
-        ARTICLE_URL: FakeResponse("", status_code=301, headers={"location": "/story/final"}),
-        final_url: FakeResponse("<article><p>Redirected article body, long enough to keep.</p></article>"),
+    calls = _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp("", status_code=301, headers={"location": "/story/final"}),
+        final_url: _resp("<article><p>Redirected article body, long enough to keep.</p></article>"),
     })
 
     content = await news.fetch_article_content(ARTICLE_URL)
@@ -730,8 +900,8 @@ async def test_fetch_article_content_follows_public_redirect(monkeypatch):
 async def test_fetch_article_content_stops_after_max_redirects(monkeypatch, caplog):
     """리다이렉트 루프는 상한에서 중단 / A redirect loop stops at the cap."""
     _patch_dns(monkeypatch, {"example.com": PUBLIC_IP})
-    calls = _patch_get(monkeypatch, {
-        ARTICLE_URL: FakeResponse("", status_code=302, headers={"location": ARTICLE_URL}),
+    calls = _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp("", status_code=302, headers={"location": ARTICLE_URL}),
     })
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
@@ -746,8 +916,8 @@ async def test_fetch_article_content_rejects_oversized_declared_length(monkeypat
     """content-length가 상한을 넘으면 본문을 쓰지 않는다 / An oversized declared content-length discards the body."""
     _patch_dns(monkeypatch)
     html = "<article><p>Body that would otherwise be extracted fine.</p></article>"
-    _patch_get(monkeypatch, {
-        ARTICLE_URL: FakeResponse(html, headers={"content-length": str(news.MAX_ARTICLE_SIZE + 1)}),
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp(html, headers={"content-length": str(news.MAX_ARTICLE_SIZE + 1)}),
     })
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
@@ -758,27 +928,114 @@ async def test_fetch_article_content_rejects_oversized_declared_length(monkeypat
                and p.get("declared") == news.MAX_ARTICLE_SIZE + 1 for p in payloads)
 
 
+KEPT_PARAGRAPH = "Kept paragraph that sits before the size cap and is long enough."
+
+
+def _oversized_body(multiple: int = 4) -> bytes:
+    """
+    상한을 훌쩍 넘는 본문 (content-length 없이 흘려보낼 용도) / A body well past the cap, for chunked streaming.
+
+    앞쪽에 살아남을 단락 하나, 뒤에 상한을 넘기는 filler와 버려질 단락을 둔다.
+    One surviving paragraph up front, then filler that crosses the cap and a paragraph that must be lost.
+    """
+    head = f"<article><p>{KEPT_PARAGRAPH}</p>"
+    filler = "<p>%s</p>" % ("x" * (news.MAX_ARTICLE_SIZE * multiple))
+    tail = "<p>Dropped paragraph living past the size cap boundary line.</p></article>"
+    return (head + filler + tail).encode()
+
+
 async def test_fetch_article_content_truncates_oversized_body(monkeypatch, caplog):
     """
     상한을 넘는 본문은 상한까지만 파싱한다 / An oversized body is parsed only up to the cap.
+
+    content-length 없이 청크로 흘려보낸다 (chunked 응답 = 선언 크기 사전 필터가 못 잡는 경우).
+    The body is streamed in chunks with no content-length: a chunked response, which the declared-size
+    pre-filter cannot catch.
 
     상한에서 잘리면 `</article>`도 사라져 전략 1이 실패하고 전략 3(50자 초과)이 처리한다.
     Truncation also cuts `</article>`, so stage 1 fails and stage 3 (over 50 chars) handles the rest.
     """
     _patch_dns(monkeypatch)
-    kept = "Kept paragraph that sits before the size cap and is long enough."
-    head = f"<article><p>{kept}</p>"
-    filler = "<p>%s</p>" % ("x" * news.MAX_ARTICLE_SIZE)
-    tail = "<p>Dropped paragraph living past the size cap boundary line.</p></article>"
-    _patch_get(monkeypatch, {ARTICLE_URL: FakeResponse(head + filler + tail)})
+    stream = _ChunkStream(_oversized_body(), chunk_size=16_384)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream)})
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         content = await news.fetch_article_content(ARTICLE_URL)
 
-    assert len(kept) > 50
-    assert content == kept          # 상한 앞의 본문은 살아남고 / the body before the cap survives
+    assert len(KEPT_PARAGRAPH) > 50
+    assert content == KEPT_PARAGRAPH    # 상한 앞의 본문은 살아남고 / the body before the cap survives
     assert "Dropped paragraph" not in content   # 상한 뒤는 버려진다 / everything past the cap is gone
     assert "xxx" not in content     # 잘린 filler 단락은 매칭되지 않는다 / the cut filler paragraph never matches
+    assert any(p.get("event") == "article_truncated" for p in _warning_payloads(caplog))
+
+
+async def test_fetch_article_content_stops_reading_at_the_cap(monkeypatch, caplog):
+    """
+    상한을 넘는 순간 읽기를 끊는다 - 남은 본문을 버퍼링하지 않는다.
+    Reading stops the moment the cap is crossed; the rest of the body is never buffered.
+
+    `response.text`처럼 전체를 먼저 메모리에 올리면 모든 청크가 소비되므로 이 단정이 깨진다
+    (= 크기 상한이 "다 읽은 뒤 자르기"로 퇴화했다는 신호).
+    Materializing the whole body first (as `response.text` does) consumes every chunk and breaks this
+    assertion - exactly the signal that the cap degenerated into "read everything, then trim".
+    """
+    _patch_dns(monkeypatch)
+    stream = _ChunkStream(_oversized_body(multiple=8), chunk_size=16_384)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream)})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert await news.fetch_article_content(ARTICLE_URL) == KEPT_PARAGRAPH
+
+    # 상한(256KB)을 덮는 청크 수 + 상한을 넘긴 마지막 1개까지만 소비된다 / cap-worth of chunks, plus the one that crossed it
+    expected = news.MAX_ARTICLE_SIZE // stream.chunk_size + 1
+    assert stream.chunks_pulled == expected
+    assert stream.chunks_pulled < stream.chunk_total // 4   # 전체의 4분의 1도 읽지 않았다 / far short of the whole body
+    assert any(p.get("event") == "article_truncated" for p in _warning_payloads(caplog))
+
+
+async def test_fetch_article_content_requests_identity_encoding(monkeypatch):
+    """
+    기사 조회는 압축을 요청하지 않는다 / Article fetches never ask for compression.
+
+    압축 해제 폭탄의 전제(작은 압축 본문 -> 거대한 실제 본문)를 요청 단계에서 없앤다.
+    This removes the premise of a decompression bomb (a small compressed body, a huge real one).
+    """
+    _patch_dns(monkeypatch)
+    html = "<article><p>Body long enough to be extracted from the article tag.</p></article>"
+    calls = _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL)
+
+    assert [c["accept_encoding"] for c in calls] == ["identity"]
+
+
+async def test_fetch_article_content_survives_a_gzip_decompression_bomb(monkeypatch, caplog):
+    """
+    압축 해제 폭탄이 크기 상한을 우회하지 못한다 / A decompression bomb cannot bypass the size cap.
+
+    20KB 남짓의 gzip 본문이 20MB로 부풀지만, 상한 검사는 **압축 해제된** 바이트를 세므로 첫 청크에서
+    끊긴다. 정직한 content-length(압축 크기 = 상한 이내)는 사전 필터를 통과하기 때문에, 이 방어선은
+    스트리밍 카운터뿐이다.
+    A ~20KB gzip body inflates to 20MB, but the cap counts *decompressed* bytes and so breaks on the first
+    chunk. The honest content-length (the compressed size, within the cap) sails through the pre-filter,
+    which leaves the streaming counter as the only defense.
+    """
+    _patch_dns(monkeypatch)
+    bomb = gzip.compress(f"<p>{KEPT_PARAGRAPH}</p>".encode() + b"x" * 20_000_000)
+    stream = _ChunkStream(bomb, chunk_size=1024)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream, headers={
+        "content-encoding": "gzip",
+        "content-length": str(len(bomb)),
+        "content-type": "text/html; charset=utf-8",
+    })})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        content = await news.fetch_article_content(ARTICLE_URL)
+
+    assert len(bomb) < news.MAX_ARTICLE_SIZE          # 선언 크기는 상한 이내다 / the declared size is within the cap
+    assert content == KEPT_PARAGRAPH
+    assert "xxx" not in content
+    assert stream.chunks_pulled <= 2                  # 압축 본문도 거의 읽지 않는다 / barely any compressed body is read
     assert any(p.get("event") == "article_truncated" for p in _warning_payloads(caplog))
 
 
@@ -786,8 +1043,8 @@ async def test_fetch_article_content_declared_length_within_cap_is_kept(monkeypa
     """상한 이내의 content-length는 정상 처리 / A content-length within the cap passes through."""
     _patch_dns(monkeypatch)
     html = "<article><p>Normal sized article body paragraph, long enough.</p></article>"
-    _patch_get(monkeypatch, {
-        ARTICLE_URL: FakeResponse(html, headers={"content-length": str(len(html))}),
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp(html, headers={"content-length": str(len(html))}),
     })
 
     assert await news.fetch_article_content(ARTICLE_URL) == "Normal sized article body paragraph, long enough."
@@ -795,8 +1052,8 @@ async def test_fetch_article_content_declared_length_within_cap_is_kept(monkeypa
 
 async def test_feed_fetches_are_unaffected_by_article_guard(monkeypatch):
     """피드 URL은 코드 고정이므로 DNS 스텁 없이도 동작해야 한다 / Feed URLs are code-fixed, so they work without any DNS stub."""
-    routes = {url: FakeResponse(_numbered_rss(1, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
-    _patch_get(monkeypatch, routes)
+    routes = {url: _resp(_numbered_rss(1, prefix=key)) for key, url in config.NEWS_FEEDS.items()}
+    _patch_transport(monkeypatch, routes)
 
     # getaddrinfo는 autouse 가드가 여전히 막고 있다 (기사 가드가 피드 경로에 새지 않았다는 증거)
     # getaddrinfo is still blocked by the autouse guard, proving the article guard did not leak here
