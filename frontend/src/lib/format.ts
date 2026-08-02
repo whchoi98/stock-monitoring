@@ -61,6 +61,37 @@ export function formatVolume(v: number): string {
   return group(v, 0)
 }
 
+/**
+ * 발행 시각 표기 — 목록용으로 짧게 "월. 일. 오전/오후 h:mm" (12시간제).
+ * Publication time, kept short for a list: "month. day." plus a 12-hour clock.
+ *
+ * ko-KR + `hour: '2-digit'`은 12시간제다 (풀 ICU 브라우저는 "8. 2. 오전 12:30", Node는 "8. 2. AM 12:30").
+ * F4가 남긴 주석의 "09:30" 예시는 실제 출력이 아니었다 — 여기 옮기면서 표기를 사실대로 고쳤고,
+ * 동작(24시간제 전환 등)은 바꾸지 않았다 (F4의 화면 회귀를 만들지 않기 위해).
+ * ko-KR with `hour: '2-digit'` is a 12-hour clock (a full-ICU browser renders "8. 2. 오전 12:30", Node
+ * "8. 2. AM 12:30"). The "09:30" example in F4's comment was never the real output; this move corrects the
+ * description without changing the behaviour (no switch to a 24-hour cycle), so F4's screens do not shift.
+ */
+const PUBLISHED_FORMAT = new Intl.DateTimeFormat('ko-KR', {
+  month: 'numeric',
+  day: 'numeric',
+  hour: '2-digit',
+  minute: '2-digit',
+})
+
+/**
+ * 뉴스 발행 시각 / A news item's publication time.
+ *
+ * 시장 뉴스(F4 `NewsFeed`)와 종목 뉴스(F6 `StockNews`)가 같은 표기를 써야 하므로 여기 둔다.
+ * 파싱할 수 없는 시각은 표기하지 않는다 (`null`) — 항목 자체는 그대로 보여준다.
+ * Shared by the market feed (F4's `NewsFeed`) and the per-stock feed (F6's `StockNews`) so both read the
+ * same way. An unparsable time yields `null` and is simply not shown; the item still renders.
+ */
+export function formatPublished(published: string): string | null {
+  const at = Date.parse(published)
+  return Number.isNaN(at) ? null : PUBLISHED_FORMAT.format(at)
+}
+
 /** 등락 화살표 — 보합(정확히 0)은 "-" / Up/down arrow; exactly 0 is flat "-" */
 export function arrow(change: number): '▲' | '▼' | '-' {
   if (change > 0) return '▲'

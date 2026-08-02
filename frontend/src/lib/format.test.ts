@@ -2,6 +2,7 @@ import {
   formatPrice,
   formatChange,
   formatMarketCap,
+  formatPublished,
   formatVolume,
   formatPct,
   arrow,
@@ -89,4 +90,31 @@ test("changeClass treats exactly 0 as flat", () => {
   expect(changeClass(0.5)).toBe("up");
   expect(changeClass(0)).toBe("flat");
   expect(changeClass(-0.5)).toBe("down");
+});
+
+// 뉴스 발행 시각 — F4 NewsFeed와 F6 StockNews가 공유하는 표기.
+// 절대 문자열을 못박지 않는다: 표기는 실행 환경의 시간대와 ICU 데이터에 따라 달라진다
+// (Node는 "8. 2. AM 12:30", 풀 ICU 브라우저는 "8. 2. 오전 12:30"). 계약은 "월. 일. + 시계"이므로
+// 같은 설정의 Intl 결과와 일치하는지, 그리고 파싱 실패가 null인지를 고정한다.
+// No absolute string is pinned: the wording depends on the host's zone and ICU data (Node gives
+// "8. 2. AM 12:30", a full-ICU browser "8. 2. 오전 12:30"). The contract is "month. day. + a clock", so what
+// is pinned is agreement with an identically configured Intl formatter, plus the null branch.
+test("formatPublished renders a short ko-KR month/day + clock", () => {
+  const at = new Date("2026-08-02T00:30:00Z");
+
+  expect(formatPublished(at.toISOString())).toBe(
+    new Intl.DateTimeFormat("ko-KR", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(at),
+  );
+  // 월/일과 분 단위 시계가 실제로 들어 있다 / The month, the day and a minute-resolution clock are really there
+  expect(formatPublished(at.toISOString())).toMatch(/\d+\. \d+\..*\d{1,2}:\d{2}/);
+});
+
+test("formatPublished returns null for an unparsable time", () => {
+  expect(formatPublished("")).toBeNull();
+  expect(formatPublished("어제")).toBeNull();
 });

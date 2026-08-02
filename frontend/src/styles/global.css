@@ -502,6 +502,458 @@ a {
   }
 }
 
+/*
+ * ── 종목 상세 / Stock detail ──
+ * 헤더(카드 밖) + 위젯 그리드 2열, 차트만 두 칸. 모바일은 1열 스택 (스펙 6.2 ② / 6.3).
+ * A header outside any card plus a two-column widget grid where only the chart spans both; mobile stacks
+ * into one column (spec 6.2 ② / 6.3).
+ */
+.detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  /* 카드가 행 높이에 맞춰 늘어나지 않게 한다 / Keep cards from stretching to the row's height */
+  align-items: start;
+}
+
+/* 두 칸을 차지하는 위젯 (차트) / A widget spanning both columns (the chart) */
+.detail-wide {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .detail-wide {
+    grid-column: auto;
+  }
+}
+
+/* ── 종목 헤더 / Stock header ── */
+.detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px 24px;
+  padding: 4px 4px 0;
+}
+
+.detail-name {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.detail-meta {
+  margin: 4px 0 0;
+  font-size: 13px;
+}
+
+.detail-quote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+}
+
+/* 현재가는 화면에서 가장 큰 숫자다 (스펙: 28px bold) / The price is the largest number on the page (spec: 28px bold) */
+.detail-price {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.detail-change {
+  margin: 0;
+  font-size: 14px;
+}
+
+/* ── 1일 / 52주 범위 게이지 / The 1-day and 52-week range gauges ── */
+.detail-gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  /* 좁아지면 헤더 폭을 다 쓰되 넓은 화면에서는 오른쪽에 붙는다 / Full width when narrow, right-aligned when wide */
+  flex: 1 1 320px;
+  max-width: 420px;
+}
+
+.range-gauge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.range-label {
+  flex-shrink: 0;
+  width: 32px;
+}
+
+.range-low,
+.range-high {
+  flex-shrink: 0;
+  color: var(--text-strong);
+}
+
+.range-track {
+  position: relative;
+  height: 4px;
+  flex: 1;
+  border-radius: 999px;
+  background: var(--card);
+}
+
+/*
+ * 현재가 표식 — `left`가 0%/100%일 때도 트랙 안에 남도록 자기 폭의 절반만큼 되돌린다.
+ * The price marker; a half-width pull-back keeps it inside the track even at 0% and 100%.
+ */
+.range-marker {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+}
+
+.range-empty {
+  color: var(--text);
+}
+
+/* ── 호가 / Order book ── */
+.orderbook {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.orderbook-row {
+  display: grid;
+  grid-template-columns: 84px 1fr 68px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+/* 가격은 그 행의 방향색을 상속한다 (행에 붙은 .up/.down) / The price inherits the row's direction colour (its .up/.down class) */
+.orderbook-price {
+  text-align: right;
+  font-weight: 700;
+}
+
+.orderbook-track {
+  overflow: hidden;
+  height: 12px;
+  border-radius: 4px;
+  background: var(--bg);
+}
+
+/*
+ * 막대는 양쪽 모두 왼쪽에서 자란다 — 시작점이 같아야 매도·매수 잔량의 길이를 눈으로 바로 비교할 수 있다
+ * (막대의 존재 이유다). 어느 쪽인지는 색과 두 블록 사이의 경계선이 이미 말해 준다.
+ * Both sides' bars grow from the left: a shared origin is what lets ask and bid depth be compared at a
+ * glance, which is the whole point of a bar. Which side a row belongs to is already said by its colour and
+ * by the rule between the two blocks.
+ */
+.orderbook-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+  opacity: 0.35;
+}
+
+.orderbook-qty {
+  color: var(--text);
+  text-align: right;
+}
+
+/*
+ * 매도 블록과 매수 블록 사이에 경계를 둔다 (체결가 위치). 인접 형제 선택자를 쓰므로 한쪽만 온 호가에는
+ * 경계가 생기지 않는다 — `:first-of-type`은 클래스가 아니라 요소 종류를 보므로 여기서는 쓸 수 없다.
+ * A rule between the ask and bid blocks marks the last price. The adjacent-sibling selector means one-sided
+ * data draws no rule; `:first-of-type` could not be used, as it looks at the element type, not the class.
+ */
+.orderbook-row-ask + .orderbook-row-bid {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--bg);
+}
+
+/* ── 투자자 동향 / Investor flows ── */
+.investor-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.investor-bar {
+  display: grid;
+  grid-template-columns: 52px 1fr 72px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.investor-name {
+  color: var(--text-strong);
+}
+
+.investor-track {
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.investor-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.investor-value {
+  text-align: right;
+  font-weight: 700;
+}
+
+.investor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.investor-caption {
+  margin-bottom: 6px;
+  color: var(--text);
+  text-align: left;
+  font-size: 12px;
+}
+
+.investor-table th {
+  padding: 0 8px 6px;
+  text-align: left;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.investor-table td {
+  padding: 5px 8px;
+  border-top: 1px solid var(--bg);
+  color: var(--text);
+  white-space: nowrap;
+}
+
+/*
+ * 순매수 셀만 방향색을 낸다. `.up`/`.down`(단일 클래스)은 위 `.investor-table td`보다 특정성이 낮아
+ * 지므로 여기서 다시 못박는다 — F4가 `.stock-table`에 쓴 방식과 같다.
+ * Only the net-flow cells take a direction colour. A bare `.up`/`.down` is less specific than
+ * `.investor-table td` above, so it is restated here, the same way F4 does for `.stock-table`.
+ */
+.investor-table td.up {
+  color: var(--up);
+}
+
+.investor-table td.down {
+  color: var(--down);
+}
+
+/*
+ * ── 핵심 지표 6장 / The six fundamentals ──
+ * 열 수를 명시한다 (auto-fit 금지): 이 그리드가 앉는 칸의 폭은 뷰포트에 따라 크게 달라지고
+ * (데스크톱 반폭 → 900px 이하 전폭), auto-fit이면 넓은 칸에서 5열이 되어 6장이 5+1로 쪼개진다.
+ * The column count is explicit, not auto-fit: the cell this grid sits in changes width sharply with the
+ * viewport (half-width on desktop, full width below 900px), and auto-fit turns the wide case into five
+ * columns, splitting the six cards into an ugly 5+1.
+ */
+.fundamental-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fundamental-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.fundamental-value {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+/* ── 기간수익률 / Period returns ── */
+.returns-row {
+  display: grid;
+  /* 4기간이 한 줄 (`.fundamental-grid`와 같은 이유로 열 수를 명시한다) / The four windows on one line; explicit for the same reason as `.fundamental-grid` */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.returns-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.returns-label {
+  font-size: 12px;
+}
+
+.returns-value {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+/*
+ * 아주 좁은 화면에서는 6장/4기간을 2열로 접는다 — 3~4열에 "▲+272.26%"나 "평균 거래량"이 들어가지 않는다.
+ * On a very narrow screen the six cards and the four windows fold to two columns: "▲+272.26%" and
+ * "평균 거래량" do not fit in three or four.
+ */
+@media (max-width: 560px) {
+  .fundamental-grid,
+  .returns-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ── AI 분석 / AI analysis ── */
+.ai-button {
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--text-strong);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ai-button:disabled {
+  background: var(--bg);
+  color: var(--text);
+  cursor: default;
+}
+
+.ai-pending {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/*
+ * 마크다운 본문 — 모델 출력이라 어떤 요소가 올지 모른다. 기본 여백만 정돈하고 색은 토큰으로 고정한다.
+ * The markdown body; being model output, the element mix is unknown. Only the default spacing is tidied and
+ * the colours are pinned to tokens.
+ */
+.markdown {
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown strong {
+  color: var(--text-strong);
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin: 20px 0 8px;
+  font-size: 15px;
+}
+
+.markdown p,
+.markdown ul,
+.markdown ol {
+  margin: 0 0 12px;
+}
+
+.markdown ul,
+.markdown ol {
+  padding-left: 20px;
+}
+
+.markdown li {
+  margin-bottom: 4px;
+}
+
+.markdown code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.markdown pre {
+  overflow-x: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.markdown pre code {
+  padding: 0;
+  background: none;
+}
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown th,
+.markdown td {
+  padding: 6px 8px;
+  border-top: 1px solid var(--bg);
+  text-align: left;
+}
+
+.markdown blockquote {
+  margin: 0 0 12px;
+  padding-left: 12px;
+  border-left: 2px solid var(--bg);
+}
+
 /* ── 뉴스 피드 / News feed ── */
 .news-list {
   display: flex;
@@ -536,6 +988,16 @@ a {
 
 .news-meta {
   font-size: 11px;
+}
+
+/*
+ * 상세 페이지의 종목 뉴스는 사이드바가 아니라 그리드 칸 안에 있으므로 뷰포트 기준 높이 제한을 쓰지 않는다
+ * (최대 8건이라 목록이 길어지지 않는다).
+ * The detail page's news sits in a grid cell rather than the sidebar, so the viewport-relative cap does not
+ * apply (at most eight items, so the list never grows long).
+ */
+.news-list-inline {
+  max-height: none;
 }
 
 @media (max-width: 900px) {

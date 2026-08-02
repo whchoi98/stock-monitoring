@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Candle, CrossSignal } from '../../api/types.ts'
-import { toCandleSeries, toChartTime, toLineSeries, toMarkers } from './chartData.ts'
+import { priceFormatFor, toCandleSeries, toChartTime, toLineSeries, toMarkers } from './chartData.ts'
 
 /** 일봉 캔들 하나 / One daily candle */
 const DAILY: Candle = {
@@ -150,5 +150,21 @@ describe('toMarkers', () => {
 
   it('시각을 해석할 수 없는 신호는 버린다 / drops a signal whose time cannot be read', () => {
     expect(toMarkers([{ time: 'oops', kind: 'dead' }], COLORS)).toEqual([])
+  })
+})
+
+describe('priceFormatFor', () => {
+  it('KRW은 소수점을 없앤다 / KRW drops the decimals', () => {
+    // 기본값(2자리)이면 삼성전자 가격축이 `262500.00`으로 찍힌다 — Global Constraints 위반
+    // The default (two decimals) would print Samsung's axis as `262500.00`, against the Global Constraints
+    expect(priceFormatFor('KRW')).toEqual({ type: 'price', precision: 0, minMove: 1 })
+  })
+
+  it('USD는 소수 2자리다 / USD keeps two decimals', () => {
+    expect(priceFormatFor('USD')).toEqual({ type: 'price', precision: 2, minMove: 0.01 })
+  })
+
+  it('통화를 모르면 옵션을 만들지 않는다 (라이브러리 기본값 유지) / with no currency it produces no option, leaving the library default', () => {
+    expect(priceFormatFor(undefined)).toBeUndefined()
   })
 })

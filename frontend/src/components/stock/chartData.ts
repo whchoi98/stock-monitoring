@@ -10,12 +10,14 @@
 import type {
   CandlestickData,
   LineData,
+  PriceFormat,
   SeriesMarker,
   Time,
   UTCTimestamp,
 } from 'lightweight-charts'
 
 import type { Candle, CrossSignal } from '../../api/types.ts'
+import type { Currency } from '../../lib/format.ts'
 
 /** 마커 색 — 실제 값은 `PriceChart`가 CSS 토큰에서 읽어 넘긴다 / Marker colours, read from the CSS tokens by `PriceChart` */
 export interface MarkerColors {
@@ -122,4 +124,23 @@ export function toMarkers(signals: CrossSignal[], colors: MarkerColors): SeriesM
     )
   }
   return markers
+}
+
+/**
+ * 통화별 가격축 형식 / The price-axis format for a currency.
+ *
+ * 기본값(precision 2 / minMove 0.01)은 KRW에 틀리다 — Global Constraints의 "KR 통화 소수점 없음"과
+ * 어긋나 삼성전자의 가격축이 `262500.00`으로 찍힌다 (F5가 인계한 사항).
+ * 차트 엔드포인트는 통화를 담지 않으므로 `PriceChart`는 통화를 프롭으로 받고, 이 함수가 그 값을
+ * 라이브러리 옵션으로 바꾼다. `undefined`를 돌려주면 호출부가 옵션을 넘기지 않아 라이브러리 기본값이 남는다.
+ * The default (precision 2, minMove 0.01) is wrong for KRW: it contradicts the Global Constraints' "no
+ * decimals for KR currency" and prints Samsung's axis as `262500.00` (handed over by F5). The chart endpoint
+ * carries no currency, so `PriceChart` takes one as a prop and this function turns it into the library's
+ * option. Returning `undefined` makes the caller omit the option and keeps the library default.
+ */
+export function priceFormatFor(currency: Currency | undefined): PriceFormat | undefined {
+  if (currency === undefined) return undefined
+  return currency === 'KRW'
+    ? { type: 'price', precision: 0, minMove: 1 }
+    : { type: 'price', precision: 2, minMove: 0.01 }
 }

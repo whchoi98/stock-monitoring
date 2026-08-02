@@ -28,11 +28,12 @@ import { useEffect, useRef, useState } from 'react'
 
 import { useChart } from '../../api/queries.ts'
 import type { Period } from '../../api/types.ts'
+import type { Currency } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { Card } from '../common/Card.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-import { toCandleSeries, toLineSeries, toMarkers } from './chartData.ts'
+import { priceFormatFor, toCandleSeries, toLineSeries, toMarkers } from './chartData.ts'
 
 /** 기간 탭 — 라벨은 대문자 관례, 값은 백엔드 `Period` / The period tabs; uppercase labels over the backend's `Period` */
 const PERIODS: { value: Period; label: string }[] = [
@@ -130,9 +131,20 @@ interface ChartHandle {
 export interface PriceChartProps {
   /** 종목 심볼 — 그대로 F2 훅에 넘긴다 / The symbol, handed straight to the F2 hook */
   symbol: string
+  /**
+   * 가격축 통화 — KRW면 소수점을 없앤다 (`priceFormatFor`). 생략하면 라이브러리 기본값(2자리)이 남는다.
+   *
+   * 차트 엔드포인트는 통화를 담지 않으므로 통화를 아는 화면이 넘겨준다 (상세 페이지는 `StockDetail.currency`를
+   * 갖고 있다). 심볼 접미사로 추측하지 않는다 — 그건 백엔드의 시장 분류 규칙을 프론트에 복제하는 일이다.
+   * The price axis's currency; KRW drops the decimals (see `priceFormatFor`). Omitted, the library default
+   * (two decimals) stands. The chart endpoint carries no currency, so the screen that knows it passes it in
+   * (the detail page holds `StockDetail.currency`). It is never guessed from the symbol's suffix, which would
+   * copy the backend's market classification into the frontend.
+   */
+  currency?: Currency
 }
 
-export function PriceChart({ symbol }: PriceChartProps) {
+export function PriceChart({ symbol, currency }: PriceChartProps) {
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD)
   const { data, asOf, isLoading, error } = useChart(symbol, period)
   const theme = useThemeAttribute()
@@ -218,6 +230,13 @@ export function PriceChart({ symbol }: PriceChartProps) {
       localization: { locale: 'ko-KR' },
     })
 
+    /*
+     * `priceFormat`은 시리즈 생성 시에만 정해지므로 통화가 이 이펙트의 의존성에 들어간다
+     * (아래 데이터 이펙트에도 같이 넣어야 재생성 후 데이터가 다시 채워진다 — 테마와 같은 구조다).
+     * `priceFormat` is fixed at series creation, which puts the currency in this effect's dependencies (and
+     * in the data effect's below, so a rebuild gets refilled — the same shape as the theme dependency).
+     */
+    const priceFormat = priceFormatFor(currency)
     const candles = chart.addCandlestickSeries({
       upColor: styles.up,
       downColor: styles.down,
@@ -225,6 +244,7 @@ export function PriceChart({ symbol }: PriceChartProps) {
       borderDownColor: styles.down,
       wickUpColor: styles.up,
       wickDownColor: styles.down,
+      ...(priceFormat === undefined ? {} : { priceFormat }),
     })
 
     /** MA 라인은 보조선이다 — 가격축 라벨/기준선을 만들지 않는다 / The MAs are guides: no axis label, no price line */
@@ -267,7 +287,7 @@ export function PriceChart({ symbol }: PriceChartProps) {
       chart.remove()
       handleRef.current = null
     }
-  }, [showChart, theme])
+  }, [showChart, theme, currency])
 
   /*
    * 데이터 반영 — 폴링·기간 변경은 `setData`로만 처리한다. 위 이펙트가 먼저 선언되어 있으므로
@@ -301,7 +321,7 @@ export function PriceChart({ symbol }: PriceChartProps) {
       handle.chart.timeScale().fitContent()
       fittedRef.current = fitKey
     }
-  }, [data, showChart, theme])
+  }, [data, showChart, theme, currency])
 
   return (
     <Card

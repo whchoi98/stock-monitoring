@@ -17,24 +17,11 @@ import { Link } from 'react-router-dom'
 
 import { useNews } from '../../api/queries.ts'
 import type { NewsItem } from '../../api/types.ts'
+import { formatPublished } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { Card } from '../common/Card.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-
-/** 발행 시각 표기 — 목록에서는 "8. 2. 09:30"처럼 짧게 / Publication time, kept short for a list */
-const PUBLISHED_FORMAT = new Intl.DateTimeFormat('ko-KR', {
-  month: 'numeric',
-  day: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-})
-
-/** 파싱할 수 없는 시각은 표기하지 않는다 (항목은 그대로 보여준다) / An unparsable time is simply not shown */
-function formatPublished(published: string): string | null {
-  const at = Date.parse(published)
-  return Number.isNaN(at) ? null : PUBLISHED_FORMAT.format(at)
-}
 
 /** 기사 분석 화면 링크 / The link to the article analysis screen */
 function articleHref(item: NewsItem): string {

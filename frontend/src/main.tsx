@@ -49,16 +49,18 @@ const queryClient = new QueryClient({
  * 라우트 테이블 — 점진적으로 추가한다 / The route table, added to incrementally.
  *
  * 존재하지 않는 페이지 파일을 미리 import하면 빌드가 깨지므로, 각 태스크가 자기 페이지 파일을 만들 때
- * 아래 `children`에 lazy 라우트를 추가한다. F4가 index(`/` Dashboard)를 연결했고,
- * F6(`/stocks/:symbol` StockDetail)·F7(`/articles` ArticleAnalysis)이 같은 형식으로 이어 붙인다:
+ * 아래 `children`에 lazy 라우트를 추가한다. F4가 index(`/` Dashboard), F6이 `/stocks/:symbol`
+ * (StockDetail)을 연결했고, F7(`/articles` ArticleAnalysis)이 같은 형식으로 이어 붙인다:
  *
  *   { path: 'articles', lazy: async () => ({ Component: (await import('./pages/Articles.tsx')).default }) }
  *
- * lazy 라우트는 페이지 코드를 첫 진입 때 내려받게 해 초기 번들을 셸로 유지한다.
+ * lazy 라우트는 페이지 코드를 첫 진입 때 내려받게 해 초기 번들을 셸로 유지한다
+ * (상세 페이지는 lightweight-charts와 react-markdown을 끌고 오므로 특히 그렇다).
  * Importing a page file that does not exist yet would break the build, so each task appends its lazy route
- * to `children` when its page file lands. F4 wired the index route (`/` Dashboard); F6 (`/stocks/:symbol`)
- * and F7 (`/articles`) follow the same shape. A lazy route keeps the initial bundle down to the shell by
- * fetching the page's code on first entry.
+ * to `children` when its page file lands. F4 wired the index route (`/` Dashboard) and F6 `/stocks/:symbol`
+ * (StockDetail); F7 (`/articles`) follows the same shape. A lazy route keeps the initial bundle down to the
+ * shell by fetching the page's code on first entry — which matters here, as the detail page pulls in both
+ * lightweight-charts and react-markdown.
  */
 const router = createBrowserRouter([
   {
@@ -68,6 +70,16 @@ const router = createBrowserRouter([
       {
         index: true,
         lazy: async () => ({ Component: (await import('./pages/Dashboard.tsx')).default }),
+      },
+      {
+        /*
+         * 심볼은 yfinance 티커 그대로다 (`AAPL`, `005930.KS`) — 점이 들어가도 한 세그먼트이므로
+         * `:symbol` 하나로 받는다. F4의 시세 표가 `navigate(`/stocks/${symbol}`)`로 여기 들어온다.
+         * The symbol is the yfinance ticker as-is (`AAPL`, `005930.KS`); a dot stays inside one segment, so a
+         * single `:symbol` captures it. F4's quote table arrives here via `navigate(`/stocks/${symbol}`)`.
+         */
+        path: 'stocks/:symbol',
+        lazy: async () => ({ Component: (await import('./pages/StockDetail.tsx')).default }),
       },
     ],
   },
