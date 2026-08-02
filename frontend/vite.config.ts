@@ -15,5 +15,10 @@ export default defineConfig({
   },
   test: {
     environment: 'jsdom',
+    // @testing-library/react의 자동 cleanup은 전역 afterEach가 있을 때만 등록된다.
+    // globals가 false면 컴포넌트 테스트끼리 DOM이 누적되어 조용히 서로를 오염시킨다.
+    // @testing-library/react only registers its auto-cleanup when a global afterEach exists; with
+    // globals disabled the DOM accumulates across component tests and they silently pollute each other.
+    globals: true,
   },
 })
