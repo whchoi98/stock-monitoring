@@ -28,12 +28,14 @@ FAST_INFO = {
 }
 
 # 기본 info / Baseline info payload
+# `dividendYield`는 퍼센트 스케일이다 (라이브 Yahoo: AAPL 0.35 = 0.35%) - 원시 분수가 아니다.
+# `dividendYield` is percent-scale (live Yahoo: AAPL 0.35 = 0.35%), not a raw fraction.
 INFO = {
     "trailingPE": 30.5,
     "trailingEps": 6.1,
     "beta": 1.2,
     "priceToBook": 45.0,
-    "dividendYield": 0.0044,
+    "dividendYield": 0.35,
 }
 
 
@@ -181,7 +183,41 @@ def test_fetch_detail_ratios_from_info(monkeypatch):
     assert out.eps == pytest.approx(6.1)
     assert out.beta == pytest.approx(1.2)
     assert out.pbr == pytest.approx(45.0)
-    assert out.dividend_yield == pytest.approx(0.0044)
+    # 변환 없이 그대로 통과한다 (퍼센트 스케일) / carried through unconverted (percent scale)
+    assert out.dividend_yield == pytest.approx(0.35)
+
+
+def test_fetch_detail_warns_when_dividend_yield_leaves_the_percent_scale(monkeypatch, caplog):
+    """
+    비상식적으로 큰 배당수익률은 경고로 드러낸다 (스케일 변화 감지) / An absurd dividend yield is logged (scale-change detector).
+
+    yfinance가 퍼센트에서 원시 분수로(또는 그 반대로) 바뀌면 화면 숫자만 조용히 100배 틀어진다.
+    임계값을 넘으면 경고를 남기되 값은 그대로 통과시킨다 (데이터 오류로 페이지를 죽이지 않는다).
+    If yfinance flipped between percent and raw fraction, only the rendered number would be silently off
+    by 100x. Crossing the threshold logs a warning while the value still passes through, so a data glitch
+    never takes the page down.
+    """
+    _patch_ticker(monkeypatch, info={**INFO, "dividendYield": 45.0})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = fundamentals.fetch_detail("AAPL")
+
+    assert out.dividend_yield == pytest.approx(45.0)   # 하드 실패 금지 / never a hard failure
+    payloads = _warning_payloads(caplog)
+    assert any(p.get("event") == "detail_dividend_yield_out_of_range"
+               and p.get("symbol") == "AAPL" and p.get("dividend_yield") == 45.0
+               for p in payloads), payloads
+
+
+def test_fetch_detail_does_not_warn_for_a_plausible_dividend_yield(monkeypatch, caplog):
+    """정상 범위의 배당수익률은 경고하지 않는다 / A plausible dividend yield stays silent."""
+    _patch_ticker(monkeypatch, info={**INFO, "dividendYield": fundamentals.DIVIDEND_YIELD_SANITY_MAX})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        fundamentals.fetch_detail("AAPL")
+
+    assert not [p for p in _warning_payloads(caplog)
+                if p.get("event") == "detail_dividend_yield_out_of_range"]
 
 
 def test_fetch_detail_missing_pe_is_none_not_zero(monkeypatch):

@@ -124,11 +124,19 @@ export interface ChartData {
 /**
  * 종목 상세 (백엔드 `StockDetailResponse`) / Stock detail (the backend's `StockDetailResponse`).
  *
- * **단위 주의 — 두 필드의 스케일이 다르다 / Unit asymmetry, two different scales:**
- * - `returns`의 값과 `change_pct`/`day_change_pct`는 **퍼센트 스케일**이다 (1.5 === +1.5%).
- * - `dividend_yield`는 **원시 분수**다 (0.0044 === 0.44%).
- * 즉 `returns`는 그대로 표시하고, `dividend_yield`만 100을 곱한다 — 이중 변환 금지.
- * So render `returns` as-is and multiply only `dividend_yield` by 100; never convert twice.
+ * **단위 — 퍼센트 계열 필드는 모두 퍼센트 스케일이다 / Units: every percent-like field is percent-scale:**
+ * - `returns`의 값과 `change_pct`/`day_change_pct`: **퍼센트 스케일** (1.5 === +1.5%).
+ * - `dividend_yield`: **퍼센트 스케일** (0.35 === 0.35%).
+ * 어느 필드도 100을 곱하지 않는다 — 곱하면 배당수익률이 100배로 부풀어 표시된다.
+ * None of them is multiplied by 100; doing so would inflate the dividend yield a hundredfold.
+ *
+ * *(정정 2026-08-02: 원문은 `dividend_yield`가 "원시 분수(0.0044 === 0.44%)"라며 ×100을 지시했다.
+ * 라이브 Yahoo 응답 확인 결과 yfinance는 퍼센트 값을 준다 — AAPL `dividendYield` = 0.35 = 0.35%.
+ * 그대로 곱했다면 0.35%가 35%로 표시됐다. 백엔드는 값을 변환하지 않고 그대로 전달한다.)*
+ * *(Correction 2026-08-02: this used to call `dividend_yield` a raw fraction (0.0044 === 0.44%) and
+ * mandate a x100. Live Yahoo data says otherwise - yfinance reports percent: AAPL `dividendYield` = 0.35,
+ * i.e. 0.35%. Following the old note would have rendered 0.35% as 35%. The backend passes the value
+ * through unchanged.)*
  *
  * 가격 계열(`price`/`change`/`change_pct`/`volume`)은 요청 시점에 45초 시세 캐시에서 덮어써진다.
  * `day_change`/`day_change_pct`는 `change`/`change_pct`의 미러 필드다 (TUI 호환).
@@ -164,7 +172,7 @@ export interface StockDetail {
   /** 펀더멘털은 yfinance 부분 실패 시 결측 / Fundamentals are absent when yfinance partially fails */
   pe_ratio: number | null
   eps: number | null
-  /** 원시 분수 (0.0044 === 0.44%) / Raw fraction (0.0044 === 0.44%) */
+  /** 퍼센트 스케일 (0.35 === 0.35%) — ×100 금지 / Percent scale (0.35 === 0.35%); never multiply by 100 */
   dividend_yield: number | null
   beta: number | null
   pbr: number | null

@@ -40,6 +40,11 @@ AVG_VOLUME_BARS = 10
 # 한국 종목 접미사 / Korean ticker suffixes
 KR_SUFFIXES = (".KS", ".KQ")
 
+# 배당수익률 경고 임계값(%) - 이보다 크면 스케일이 변했다는 신호다 (실 배당수익률은 25%를 넘지 않는다)
+# Dividend-yield warning threshold (%): anything above it signals a scale change, since real yields
+# do not exceed 25%.
+DIVIDEND_YIELD_SANITY_MAX = 25.0
+
 # info 키 -> 응답 필드 / info key -> response field
 _RATIO_KEYS = {
     "pe_ratio": "trailingPE",
@@ -103,6 +108,30 @@ def _ratio(info: dict, key: str) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return None if math.isnan(number) else number
+
+
+def _check_dividend_scale(symbol: str, dividend_yield: Optional[float]) -> None:
+    """
+    배당수익률이 퍼센트 스케일인지 감시 (값은 바꾸지 않는다) / Watch the dividend-yield scale, without changing the value.
+
+    yfinance는 `dividendYield`를 퍼센트로 준다 (AAPL 0.35 = 0.35%). 라이브러리가 원시 분수로
+    바뀌면 값이 100분의 1이 되는데, 그건 조용히 잘못된 화면으로만 드러난다. 반대로 프론트에
+    ×100이 다시 들어오거나 소스가 분수→퍼센트로 또 바뀌면 값이 비상식적으로 커진다.
+    yfinance reports `dividendYield` in percent (AAPL 0.35 = 0.35%). If the library switched to a raw
+    fraction the value would silently shrink a hundredfold; conversely a re-introduced x100 anywhere
+    upstream would make it absurdly large.
+
+    25%를 넘는 배당수익률은 현실적으로 거의 불가능하므로 경고를 남긴다 (스케일이 변했다는 신호).
+    실패로 처리하지는 않는다: 특별배당·데이터 오류로 진짜 큰 값이 오는 종목도 있고, 화면을 못 그리는
+    것보다 이상한 숫자를 보여주고 로그를 남기는 편이 낫다.
+    A yield above 25% is practically impossible, so it is logged as a signal that the scale moved. It is
+    never treated as a failure: special dividends and upstream data errors do produce genuinely large
+    values, and showing an odd number with a log beats refusing to render the page.
+    """
+    if dividend_yield is not None and dividend_yield > DIVIDEND_YIELD_SANITY_MAX:
+        _warn("detail_dividend_yield_out_of_range", symbol=symbol,
+              dividend_yield=dividend_yield, expected_max=DIVIDEND_YIELD_SANITY_MAX,
+              hint="dividendYield is expected on a percent scale (0.35 = 0.35%)")
 
 
 def _market_and_currency(symbol: str) -> tuple:
@@ -254,6 +283,7 @@ def fetch_detail(symbol: str) -> StockDetailResponse:
     week52_high, week52_low = _week52_range(hist, fast_info)
     market, currency = _market_and_currency(symbol)
     ratios = {field: _ratio(info, key) for field, key in _RATIO_KEYS.items()}
+    _check_dividend_scale(symbol, ratios["dividend_yield"])
 
     return StockDetailResponse(
         symbol=symbol,

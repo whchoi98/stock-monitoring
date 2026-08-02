@@ -3,10 +3,12 @@
  * Period returns: one week, one month, three months and one year (spec 6.2 ②).
  *
  * **단위 주의**: `StockDetail.returns`의 값은 이미 **퍼센트 스케일**이다 (1.5 === +1.5%) — 100을 곱하면
- * 안 된다. 같은 응답의 `dividend_yield`만 원시 분수인데, 그 필드는 이 화면에 없다 (`api/types.ts`).
+ * 안 된다. 같은 응답의 퍼센트 계열 필드(`change_pct`/`day_change_pct`/`dividend_yield`)도 모두 퍼센트
+ * 스케일이다 (`api/types.ts`의 2026-08-02 정정 참고).
  * **Unit note**: the values in `StockDetail.returns` are already on a **percent scale** (1.5 === +1.5%) and
- * must not be multiplied by 100. Only `dividend_yield` in the same response is a raw fraction, and that
- * field does not appear on this screen (see `api/types.ts`).
+ * must not be multiplied by 100. Every other percent-like field in the same response
+ * (`change_pct`/`day_change_pct`/`dividend_yield`) is percent-scale too (see the 2026-08-02 correction in
+ * `api/types.ts`).
  *
  * **`ChangeText`를 쓰지 않는다**: 그 컴포넌트의 `value`는 *금액*이라 `formatChange`로 통화 포맷된다.
  * 기간수익률에는 금액이 없고 퍼센트만 있으므로, F4의 `SectorBars`가 세운 선례대로

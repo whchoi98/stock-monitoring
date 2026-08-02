@@ -14,10 +14,11 @@
  * `market_cap` is a 0.0 sentinel rather than null (see `api/types.ts`). Either way an em dash is rendered;
  * a 0 never appears as a market cap of zero.
  *
- * `dividend_yield`는 6장에 들어가지 않으므로 표시하지 않는다 — 그 필드만 원시 분수(0.0044 === 0.44%)라
- * 100을 곱해야 하는데, 표시하지 않으면 이중 변환의 위험도 없다.
- * `dividend_yield` is not one of the six and so is not rendered: it is the one field on a raw-fraction scale
- * (0.0044 === 0.44%) needing a x100, and not showing it removes any chance of converting twice.
+ * `dividend_yield`는 6장에 들어가지 않으므로 표시하지 않는다. 표시하게 되면 그 값도 퍼센트 스케일
+ * (0.35 === 0.35%)이므로 100을 곱하지 말 것 (`api/types.ts`의 2026-08-02 정정 참고).
+ * `dividend_yield` is not one of the six and so is not rendered. Should it ever be, note that it is on a
+ * percent scale (0.35 === 0.35%) and must not be multiplied by 100 (see the 2026-08-02 correction in
+ * `api/types.ts`).
  */
 import { useQueryClient } from '@tanstack/react-query'
 

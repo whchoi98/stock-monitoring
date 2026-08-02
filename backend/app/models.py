@@ -117,6 +117,14 @@ class StockDetailResponse(BaseModel):
     day_change: float = 0.0
     day_change_pct: float = 0.0
     eps: Optional[float] = None
+    # 배당수익률 (%) - yfinance `dividendYield`를 변환 없이 그대로 담는다. 퍼센트 스케일이다
+    # (AAPL 0.35 = 0.35%), 원시 분수가 아니다. 프론트에서 100을 곱하면 100배로 부풀어 표시된다.
+    # (정정 2026-08-02: 이전 주석/타입 문서는 "원시 분수 0.0044 = 0.44%"라며 ×100을 지시했다.
+    #  라이브 응답으로 반증됨. `fundamentals._check_dividend_scale`가 스케일 변화를 감시한다.)
+    # Dividend yield (%) - yfinance's `dividendYield`, carried through unconverted. It is percent-scale
+    # (AAPL 0.35 = 0.35%), not a raw fraction; multiplying by 100 in the UI inflates it a hundredfold.
+    # (Correction 2026-08-02: earlier notes called it a raw fraction (0.0044 = 0.44%) and demanded a x100;
+    #  live data disproved that. `fundamentals._check_dividend_scale` watches for a scale change.)
     dividend_yield: Optional[float] = None
     beta: Optional[float] = None
     sector: str = ""
