@@ -104,6 +104,13 @@ a {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
+  /*
+   * 좁은 화면에서 제목과 액션(탭·뱃지)이 한 줄에 못 들어가면 액션을 아래 줄로 내린다 —
+   * 제목이 글자 단위로 쪼개지는 것(한글은 어디서나 줄바꿈된다)보다 낫다.
+   * When the title and the action (tabs, badges) cannot share a line, the action drops to the next one,
+   * which beats breaking the title mid-word — Korean wraps between any two characters.
+   */
+  flex-wrap: wrap;
 }
 
 .card-title {
@@ -111,12 +118,17 @@ a {
   color: var(--text-strong);
   font-size: 15px;
   font-weight: 700;
+  /* 제목은 줄이지 않는다 (위 wrap이 동작하는 전제) / The title never shrinks, which is what makes the wrap above happen */
+  flex-shrink: 0;
 }
 
 .card-action {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* 기간 탭 4개 + 뱃지가 좁은 화면에서 제목을 밀어내지 않게 접힌다 / Four period tabs plus a badge wrap instead of shoving the title */
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 /* ── 버튼 / Buttons ── */
@@ -469,6 +481,25 @@ a {
 
 .th-sort:hover {
   color: var(--text-strong);
+}
+
+/*
+ * ── 가격 차트 / Price chart ──
+ * lightweight-charts는 컨테이너의 박스를 읽어 캔버스를 만들므로 높이는 CSS가 정해야 한다
+ * (폭은 ResizeObserver가 따라간다). 색은 canvas라 CSS가 닿지 않는다 — PriceChart가 토큰을 읽어 넘긴다.
+ * lightweight-charts sizes its canvas from the container's box, so CSS must give it a height (a
+ * ResizeObserver follows the width). Colours are out of CSS's reach on a canvas: PriceChart reads the
+ * tokens and passes them in.
+ */
+.price-chart {
+  width: 100%;
+  height: 360px;
+}
+
+@media (max-width: 900px) {
+  .price-chart {
+    height: 280px;
+  }
 }
 
 /* ── 뉴스 피드 / News feed ── */
