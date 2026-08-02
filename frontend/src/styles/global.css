@@ -954,6 +954,69 @@ a {
   border-left: 2px solid var(--bg);
 }
 
+/*
+ * ── 기사 AI 분석 화면 / Article AI analysis screen ──
+ * 읽는 화면이라 폭을 제한한다 — 1280px 전폭으로 늘어난 본문은 한 줄이 너무 길어 눈이 되돌아오지 못한다.
+ * A reading screen, so the column is capped: at the shell's full 1280px a line runs too long to track back.
+ */
+.article {
+  max-width: 860px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.article-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.article-title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.4;
+  /* 긴 URL이 제목 자리에 올 수 있다 (title 파라미터가 없을 때) / A long URL can stand in for the title */
+  overflow-wrap: anywhere;
+}
+
+.article-source {
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+/*
+ * 진행 블록이 세 줄이라 스피너를 첫 줄에 맞춘다 (AIPanel은 한 줄이라 가운데 정렬이 맞다).
+ * The block runs three lines here, so the spinner aligns to the first (AIPanel's single line wants centring).
+ */
+.article .ai-pending {
+  align-items: flex-start;
+}
+
+/* 진행 단계 — 번호는 문구에 이미 있으므로(`[1/2]`) 목록 마커는 끈다 / The numbers are in the text already (`[1/2]`), so no list marker */
+.article-steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.article-steps-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+}
+
+/* 안내 카드의 홈 링크 (잘못된 접근 / 404 / 에러 경계) / The home link on a notice card (bad entry, 404, error boundary) */
+.notice-back {
+  margin: 12px 0 0;
+  font-size: 13px;
+}
+
 /* ── 뉴스 피드 / News feed ── */
 .news-list {
   display: flex;

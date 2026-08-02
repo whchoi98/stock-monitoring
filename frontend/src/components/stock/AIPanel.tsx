@@ -10,43 +10,21 @@
  * `dangerouslySetInnerHTML` matters: model output sits outside the trust boundary, and react-markdown does not
  * pass raw HTML through by default (absent a plugin such as rehype-raw).
  *
- * **오류 분기는 `ApiError.status`로 갈린다** (`api/client.ts`가 status + detail을 함께 노출한다):
- * - **429** `rate_limited` — 분당 한도(백엔드 `AI_RATE_PER_MIN`)를 넘었다. 기다리면 풀리므로 재시도를 남긴다.
- * - **503** `ai_unavailable` — 자격 증명/모델 접근이 없다. 스펙 7의 "graceful degradation": 이 패널만
- *   안내 문구가 되고 나머지 화면은 그대로 산다.
- * - 그 외(500 `ai_failed`, 네트워크 실패 등) — 일반 문구.
- * **The error branches key off `ApiError.status`** (`api/client.ts` exposes status alongside detail):
- * - **429** `rate_limited`: the per-minute budget (the backend's `AI_RATE_PER_MIN`) is spent; waiting clears
- *   it, so the retry stays.
- * - **503** `ai_unavailable`: no credentials or model access. Spec 7's graceful degradation — this panel
- *   becomes a notice while the rest of the page lives on.
- * - anything else (500 `ai_failed`, a network failure): the generic wording.
+ * **오류 문구는 `lib/aiMessages.ts`가 갖는다** — 기사 분석 화면(F7)과 같은 표를 써야 사용자가 같은
+ * 실패를 두 사건으로 읽지 않는다 (429 → "잠시 후 다시 시도해주세요", 503 → "AI 기능을 사용할 수 없습니다",
+ * 그 외 → 일반 문구). 503은 스펙 7의 "graceful degradation": 이 패널만 안내 문구가 되고 나머지 화면은 산다.
+ * **The error wording lives in `lib/aiMessages.ts`**, shared with F7's article screen so one failure never
+ * reads as two different events. The 503 case is spec 7's graceful degradation: this panel becomes a notice
+ * while the rest of the page lives on.
  */
 import Markdown from 'react-markdown'
 
-import { ApiError } from '../../api/client.ts'
 import { useStockAI } from '../../api/queries.ts'
+import { aiErrorMessage } from '../../lib/aiMessages.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { Card } from '../common/Card.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-
-/** 레이트리밋(429) 문구 — 브리프 지정 / The rate-limit (429) wording, as the brief specifies */
-const RATE_LIMITED = '잠시 후 다시 시도해주세요'
-
-/** AI 사용 불가(503) 문구 — 브리프 지정 / The unavailable (503) wording, as the brief specifies */
-const UNAVAILABLE = 'AI 기능을 사용할 수 없습니다'
-
-/** 그 외 실패 문구 / The wording for any other failure */
-const FAILED = 'AI 분석에 실패했습니다'
-
-/** 오류를 사용자 문구로 / An error as user-facing wording */
-function messageFor(error: Error): string {
-  if (!(error instanceof ApiError)) return FAILED
-  if (error.status === 429) return RATE_LIMITED
-  if (error.status === 503) return UNAVAILABLE
-  return FAILED
-}
 
 export interface AIPanelProps {
   /** 종목 심볼 — 그대로 F2 훅에 넘긴다 / The symbol, handed straight to the F2 hook */
@@ -84,7 +62,7 @@ export function AIPanel({ symbol }: AIPanelProps) {
           <p className="empty">분석 중입니다…</p>
         </div>
       ) : error !== null ? (
-        <ErrorCard onRetry={run} message={messageFor(error)} />
+        <ErrorCard onRetry={run} message={aiErrorMessage(error)} />
       ) : data === undefined ? (
         <p className="empty">버튼을 누르면 이 종목에 대한 AI 분석을 생성합니다</p>
       ) : (

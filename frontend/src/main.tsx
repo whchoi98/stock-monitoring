@@ -9,7 +9,7 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom'
 
 import './styles/global.css'
 import { ApiError } from './api/client.ts'
-import App from './App.tsx'
+import App, { NotFound, RouteError } from './App.tsx'
 
 /**
  * 기본 재시도/신선도 정책 / The default retry and freshness policy.
@@ -46,26 +46,25 @@ const queryClient = new QueryClient({
 })
 
 /**
- * 라우트 테이블 — 점진적으로 추가한다 / The route table, added to incrementally.
+ * 라우트 테이블 — F7에서 완성됐다 / The route table, completed in F7.
  *
- * 존재하지 않는 페이지 파일을 미리 import하면 빌드가 깨지므로, 각 태스크가 자기 페이지 파일을 만들 때
- * 아래 `children`에 lazy 라우트를 추가한다. F4가 index(`/` Dashboard), F6이 `/stocks/:symbol`
- * (StockDetail)을 연결했고, F7(`/articles` ArticleAnalysis)이 같은 형식으로 이어 붙인다:
+ * 세 페이지 모두 lazy 라우트다 — 페이지 코드를 첫 진입 때 내려받게 해 초기 번들을 셸로 유지한다
+ * (상세는 lightweight-charts, 상세·기사 화면은 react-markdown을 끌고 온다).
+ * All three pages are lazy routes, keeping the initial bundle down to the shell by fetching a page's code on
+ * first entry (the detail page pulls in lightweight-charts, and both it and the article screen react-markdown).
  *
- *   { path: 'articles', lazy: async () => ({ Component: (await import('./pages/Articles.tsx')).default }) }
- *
- * lazy 라우트는 페이지 코드를 첫 진입 때 내려받게 해 초기 번들을 셸로 유지한다
- * (상세 페이지는 lightweight-charts와 react-markdown을 끌고 오므로 특히 그렇다).
- * Importing a page file that does not exist yet would break the build, so each task appends its lazy route
- * to `children` when its page file lands. F4 wired the index route (`/` Dashboard) and F6 `/stocks/:symbol`
- * (StockDetail); F7 (`/articles`) follows the same shape. A lazy route keeps the initial bundle down to the
- * shell by fetching the page's code on first entry — which matters here, as the detail page pulls in both
- * lightweight-charts and react-markdown.
+ * 죽은 링크와 렌더 예외에도 사용자에게 react-router 기본 화면(스택 트레이스)을 보이지 않는다:
+ * 셸 라우트의 `errorElement`가 예외를 받고(스펙 7 "ErrorBoundary로 전체 붕괴 방지"), 셸 **안쪽**의
+ * `*` 자식 라우트가 매칭 실패를 받는다 — 후자는 네비·티커를 살려 둔 채 페이지 영역만 안내로 바꾼다.
+ * Neither a dead link nor a render-time exception shows react-router's default screen: the shell route's
+ * `errorElement` catches the exception (spec 7's "an ErrorBoundary prevents total collapse") while a `*` child
+ * *inside* the shell catches the no-match, swapping only the page area and leaving the nav and ticker alive.
  */
 const router = createBrowserRouter([
   {
     path: '/',
     element: <App />,
+    errorElement: <RouteError />,
     children: [
       {
         index: true,
@@ -80,6 +79,23 @@ const router = createBrowserRouter([
          */
         path: 'stocks/:symbol',
         lazy: async () => ({ Component: (await import('./pages/StockDetail.tsx')).default }),
+      },
+      {
+        /*
+         * 기사 식별 정보(url/title/language)는 경로가 아니라 **쿼리 파라미터**로 온다 — 기사 URL 자체를
+         * 경로에 넣을 수 없고, 쿼리로 실어야 새로고침·공유가 동작한다 (스펙 6.2 ③).
+         * 뉴스 목록(F4 `NewsFeed`, F6 `StockNews`)의 링크가 이 라우트로 들어온다.
+         * The article's identity (url/title/language) arrives as **query parameters**, not path segments: an
+         * article URL cannot live in a path, and the query is what makes a refresh or a shared link work
+         * (spec 6.2 ③). The news lists' links (F4's `NewsFeed`, F6's `StockNews`) land here.
+         */
+        path: 'articles',
+        lazy: async () => ({ Component: (await import('./pages/ArticleAnalysis.tsx')).default }),
+      },
+      {
+        // 매칭 실패 — 셸 안에서 안내한다 / A no-match, explained inside the shell
+        path: '*',
+        element: <NotFound />,
       },
     ],
   },

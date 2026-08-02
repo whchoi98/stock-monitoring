@@ -7,9 +7,10 @@
  * The route table lives in `main.tsx`, next to RouterProvider: this file must export components only
  * (oxlint's `react/only-export-components`, which preserves HMR), so the routes are not defined here.
  */
-import { Link, NavLink, Outlet } from 'react-router-dom'
+import { Link, NavLink, Outlet, useRouteError } from 'react-router-dom'
 
 import { useOverview } from './api/queries.ts'
+import { Card } from './components/common/Card.tsx'
 import { ThemeToggle } from './components/common/ThemeToggle.tsx'
 import { TickerBar } from './components/common/TickerBar.tsx'
 
@@ -43,6 +44,66 @@ export default function App() {
       </main>
 
       <TickerBar indicators={data?.indicators ?? []} />
+    </div>
+  )
+}
+
+/**
+ * 매칭되는 라우트가 없을 때 (`main.tsx`의 `*` 자식 라우트) / No route matched (`main.tsx`'s `*` child route).
+ *
+ * react-router의 기본 no-match 화면("Unexpected Application Error"…)을 사용자에게 보이지 않는 것이 목적이다.
+ * 셸의 **자식**으로 두었으므로 네비·티커 바는 그대로 살아 있고 페이지 영역만 안내로 바뀐다 — 즉 죽은 링크
+ * 하나가 앱 전체를 내려앉히지 않는다 (스펙 7).
+ * The point is that react-router's default no-match screen ("Unexpected Application Error"…) never reaches a
+ * user. Sitting as a **child** of the shell, it leaves the nav and ticker alive and swaps only the page area,
+ * so one dead link never brings the app down (spec 7).
+ */
+export function NotFound() {
+  return (
+    <Card title="페이지를 찾을 수 없습니다">
+      <p className="empty">요청한 주소에 해당하는 화면이 없습니다.</p>
+      <p className="notice-back">
+        <Link to="/">대시보드로 이동</Link>
+      </p>
+    </Card>
+  )
+}
+
+/**
+ * 셸 레벨 에러 경계 (`main.tsx`의 `errorElement`) — 스펙 7 "ErrorBoundary로 전체 붕괴 방지".
+ * The shell-level error boundary (`main.tsx`'s `errorElement`); spec 7's "an ErrorBoundary prevents total
+ * collapse".
+ *
+ * 렌더 중 예외나 lazy 라우트 로딩 실패가 여기로 올라온다. 기본 화면은 스택 트레이스를 그대로 보여주므로
+ * 대신 안내 + 홈 링크 + 새로고침을 준다. **오류 메시지는 감추지 않는다**(조용한 실패 금지) — 다만 문구를
+ * 앞세우고 원문은 보조 정보로 둔다.
+ * A render-time exception or a failed lazy route arrives here. The default screen would print a stack trace, so
+ * this offers wording, a link home and a reload instead. **The message is not hidden** (no silent failures); it
+ * simply sits behind the human-readable line.
+ */
+export function RouteError() {
+  const error = useRouteError()
+  const detail =
+    error instanceof Error ? error.message : typeof error === 'string' ? error : null
+
+  return (
+    <div className="app">
+      <header className="app-nav">
+        <Link className="app-brand" to="/">
+          stock-monitoring
+        </Link>
+      </header>
+      <main className="app-main">
+        <Card title="화면을 표시할 수 없습니다">
+          <p className="empty">
+            예기치 않은 오류가 발생했습니다. 새로고침해도 계속되면 대시보드로 돌아가 주세요.
+          </p>
+          {detail !== null && <p className="empty">{detail}</p>}
+          <p className="notice-back">
+            <Link to="/">대시보드로 이동</Link>
+          </p>
+        </Card>
+      </main>
     </div>
   )
 }
