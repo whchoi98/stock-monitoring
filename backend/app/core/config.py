@@ -259,7 +259,16 @@ L2_TTL = 86400               # 24시간 / 24 hours
 
 # 환경변수 설정 (기본값 포함) / Environment variable settings (with defaults)
 CACHE_TABLE = os.environ.get("CACHE_TABLE", "stock-monitoring-cache")
-BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
+# 모델 ID는 **크로스리전 추론 프로필**이다 — 접두사가 곧 라우팅 범위이고, 프로필은 리전마다 존재 여부가
+# 다르다. `ap-northeast-2`에는 `us.` 접두사의 sonnet-4-6이 없어(2026-08-02 실측: list-inference-profiles에
+# 미존재) 호출이 `ValidationException: The provided model identifier is invalid`로 죽는다. 이 리전에서
+# 유효한 sonnet-4-6은 `global.` 프로필뿐이라 그것을 기본값으로 쓴다 (같은 날 converse 실호출로 확인).
+# The model id is a **cross-region inference profile**: the prefix is the routing scope, and a profile's
+# existence differs per region. `ap-northeast-2` has no `us.`-prefixed sonnet-4-6 (verified 2026-08-02 against
+# list-inference-profiles), so such a call dies with `ValidationException: The provided model identifier is
+# invalid`. The only sonnet-4-6 profile valid in this region is the `global.` one, confirmed the same day with
+# a live converse call, so that is the default.
+BEDROCK_MODEL_ID = os.environ.get("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-6")
 BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-2")
 
 # AI rate limiting 설정 / AI rate limiting settings

@@ -25,7 +25,7 @@ cache and multiply the Bedrock concurrency cap; scale with containers, not worke
 | --- | --- | --- |
 | `CACHE_TABLE` | `stock-monitoring-cache` | L2 DynamoDB 테이블. 접근 불가면 경고만 남기고 L1만으로 기동한다 / unreachable table only warns; the app starts with L1 only |
 | `AWS_REGION` | `ap-northeast-2` | DynamoDB 리전 / DynamoDB region |
-| `BEDROCK_MODEL_ID` | `us.anthropic.claude-sonnet-4-6` | AI 분석 모델 / AI analysis model |
+| `BEDROCK_MODEL_ID` | `global.anthropic.claude-sonnet-4-6` | AI 분석 모델. 접두사는 크로스리전 추론 프로필의 라우팅 범위이며 리전마다 존재 여부가 다르다 — `ap-northeast-2`에는 `us.` 프로필이 없다 / AI analysis model; the prefix is the inference profile's routing scope and profiles differ per region (`ap-northeast-2` has no `us.` profile) |
 | `BEDROCK_REGION` | `ap-northeast-2` | Bedrock 리전 / Bedrock region |
 | `STATIC_DIR` | `backend/static` | frontend 빌드 산출물. 없으면 정적 서빙을 건너뛴다 / skipped when absent |
 

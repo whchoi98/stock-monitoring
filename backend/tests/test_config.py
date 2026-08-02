@@ -97,8 +97,12 @@ def test_environment_variables():
     assert config.CACHE_TABLE == "stock-monitoring-cache", \
         f"CACHE_TABLE default should be 'stock-monitoring-cache', got '{config.CACHE_TABLE}'"
 
+    # `global.` 접두사가 계약이다 — `ap-northeast-2`에 `us.` sonnet-4-6 프로필이 없어서 기본값을 그것으로
+    # 되돌리면 AI 두 엔드포인트가 ValidationException으로 죽는다 (2026-08-02 정정).
+    # The `global.` prefix is the contract: `ap-northeast-2` has no `us.` sonnet-4-6 profile, so reverting the
+    # default would kill both AI endpoints with a ValidationException (corrected 2026-08-02).
     assert hasattr(config, "BEDROCK_MODEL_ID"), "BEDROCK_MODEL_ID not found"
-    assert config.BEDROCK_MODEL_ID == "us.anthropic.claude-sonnet-4-6", \
+    assert config.BEDROCK_MODEL_ID == "global.anthropic.claude-sonnet-4-6", \
         f"BEDROCK_MODEL_ID default incorrect, got '{config.BEDROCK_MODEL_ID}'"
 
     assert hasattr(config, "BEDROCK_REGION"), "BEDROCK_REGION not found"
