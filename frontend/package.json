@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:deploy": "vite build --outDir ../backend/static --emptyOutDir",
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview"

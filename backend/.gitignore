@@ -40,3 +40,6 @@ htmlcov/
 # OS
 .DS_Store
 *.db
+
+# Frontend build output (`make build` = vite build --outDir ../backend/static)
+/static/
