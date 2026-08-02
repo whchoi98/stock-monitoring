@@ -115,18 +115,26 @@ FAKE_NEWS = [
 ]
 
 
+# 종가가 전일보다 내려가는 날 - 수급 방향(하락)이 실제로 계산되는지 구분하기 위한 딥
+# The one day whose close drops below the previous one, so a "down" investor direction is observable
+DIP_DAY = 3
+
+
 def _fake_candles() -> list[Candle]:
-    return [
-        Candle(
-            time=f"2026-07-{day:02d}",
-            open=100.0 + day,
-            high=101.0 + day,
-            low=99.0 + day,
-            close=100.0 + day,
-            volume=1_000 * day,
+    candles = []
+    for day in range(1, CHART_CANDLES + 1):
+        close = 100.0 + day - (5.0 if day == DIP_DAY else 0.0)
+        candles.append(
+            Candle(
+                time=f"2026-07-{day:02d}",
+                open=close,
+                high=close + 1.0,
+                low=close - 1.0,
+                close=close,
+                volume=1_000 * day,
+            )
         )
-        for day in range(1, CHART_CANDLES + 1)
-    ]
+    return candles
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +198,14 @@ class FakeServices:
             volume=1_234,
             sector=config.STOCK_SECTORS.get(symbol, ""),
             returns={"1w": 1.0, "1m": 2.0, "3m": 3.0, "1y": 4.0},
+            # 느린 펀더멘털 - 실시간 시세 오버레이가 덮어쓰지 않아야 하는 필드
+            # Slow fundamentals: the live-quote overlay must leave these alone
+            pe_ratio=28.5,
+            eps=6.1,
+            beta=1.2,
+            week52_high=200.0,
+            week52_low=150.0,
+            market_cap=3.0e12,
         )
 
     # --- news (비동기 / async) ---
