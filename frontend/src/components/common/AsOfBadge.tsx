@@ -5,13 +5,33 @@
  * 신선할 때는(60초 미만) 아무것도 렌더하지 않는다 — 정상 상태를 장식하지 않고 이상만 알린다.
  * While fresh (under 60s) it renders nothing: the normal state needs no decoration, only staleness does.
  *
- * 별도 타이머를 두지 않는다 — 시세 훅이 45초마다 리페치하며 부모를 다시 렌더하므로 그때 갱신된다.
- * It keeps no timer of its own: the quote hooks refetch every 45s and re-render the parent, which is
- * when this recomputes.
+ * **왜 자체 타이머가 필요한가**: 부모의 재렌더에 기댈 수 없다. TanStack Query v5는 기본
+ * `structuralSharing: true` + 프롭 트래킹이라, 리페치 결과가 deep-equal이면 같은 참조를 돌려주고
+ * 옵저버에게 알리지 않는다. 쿼리 훅의 `unwrap`은 `data`/`isLoading`/`error`만 읽으므로(성공 상태에서
+ * `isLoading`은 계속 false) 백엔드가 stale 데이터를 계속 서빙하는 동안 재렌더가 한 번도 일어나지 않는다.
+ * 즉 정확히 stale일 때 뱃지가 침묵한다. 그래서 30초마다 자기 자신만 다시 렌더하는 UI 클럭을 둔다.
+ * Global Constraints의 "수동 setInterval 금지"는 **데이터 폴링**("폴링: … 항상 TanStack Query로")에
+ * 대한 규칙이며, 표시 시각 갱신용 클럭은 데이터를 가져오지 않으므로 그 규칙의 대상이 아니다.
+ *
+ * **Why it needs its own timer**: a parent re-render cannot be relied on. TanStack Query v5 defaults to
+ * `structuralSharing: true` with prop tracking, so a refetch whose result is deep-equal hands back the
+ * same reference and notifies no observer. The query hooks' `unwrap` reads only `data`/`isLoading`/`error`
+ * (and `isLoading` stays false once loaded), so while the backend keeps serving stale data not a single
+ * re-render happens — the badge would stay silent exactly when it matters. Hence a UI clock that
+ * re-renders only this component every 30s. The "no manual setInterval" constraint targets *data
+ * polling* ("always via TanStack Query"); a display clock fetches nothing and is out of its scope.
  */
+import { useEffect, useState } from 'react'
 
 /** 이 시간 이상 경과하면 뱃지를 노출한다 / Past this age the badge appears */
 const STALE_AFTER_MS = 60_000
+
+/**
+ * UI 클럭 주기 — 임계(60초)의 절반이라 뱃지는 늦어도 age 90초에는 나타나고 표기도 그 간격으로 갱신된다.
+ * The UI clock period; being half the 60s threshold, the badge appears by age 90s at the latest and its
+ * wording refreshes at the same cadence.
+ */
+const TICK_MS = 30_000
 
 const MINUTE_MS = 60_000
 
@@ -24,6 +44,20 @@ export interface AsOfBadgeProps {
 }
 
 export function AsOfBadge({ asOf }: AsOfBadgeProps) {
+  // 값이 아니라 재렌더만 필요하다 — 경과 시간은 렌더 시점의 Date.now()로 계산해야 항상 최신이다.
+  // Only a re-render is needed, not a value: the age is computed from Date.now() at render time so it
+  // can never lag behind.
+  const [, setTick] = useState(0)
+
+  useEffect(() => {
+    // asOf가 없으면 계산할 나이도 없다 — 값이 도착하면 이 이펙트가 다시 돌며 클럭을 시작한다.
+    // With no asOf there is no age to compute; when one arrives this effect re-runs and starts the clock.
+    if (asOf === undefined) return
+
+    const id = setInterval(() => setTick((n) => n + 1), TICK_MS)
+    return () => clearInterval(id)
+  }, [asOf])
+
   if (asOf === undefined) return null
 
   const at = Date.parse(asOf)
