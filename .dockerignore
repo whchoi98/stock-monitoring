@@ -3,5 +3,13 @@
 **/__pycache__
 backend/static
 docs
+# Dockerfile은 frontend/와 backend/만 COPY한다. 아래 디렉터리들이 컨텍스트에 남아 있으면
+# 문서·인프라 코드만 고쳐도 DockerImageAsset 콘텐츠 해시가 바뀌어 매 배포마다 이미지가
+# 재빌드·재푸시되고 태스크 정의 리비전이 올라간다.
+# The Dockerfile only COPYs frontend/ and backend/. Leaving these in the context makes the
+# DockerImageAsset content hash churn on doc/infra-only edits, forcing an image rebuild+push
+# and a task-definition revision on every deploy.
+infra
+.superpowers
 infra/cdk.out
 .git
