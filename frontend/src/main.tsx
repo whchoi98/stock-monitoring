@@ -48,21 +48,28 @@ const queryClient = new QueryClient({
 /**
  * 라우트 테이블 — 점진적으로 추가한다 / The route table, added to incrementally.
  *
- * 존재하지 않는 페이지 파일을 미리 import하면 빌드가 깨지므로 F3은 자리표시자 index 라우트만 둔다.
- * F4(`/` Dashboard)·F6(`/stocks/:symbol` StockDetail)·F7(`/articles` ArticleAnalysis)이 각자
- * 페이지 파일을 만들 때 아래 `children`에 lazy 라우트를 추가한다:
+ * 존재하지 않는 페이지 파일을 미리 import하면 빌드가 깨지므로, 각 태스크가 자기 페이지 파일을 만들 때
+ * 아래 `children`에 lazy 라우트를 추가한다. F4가 index(`/` Dashboard)를 연결했고,
+ * F6(`/stocks/:symbol` StockDetail)·F7(`/articles` ArticleAnalysis)이 같은 형식으로 이어 붙인다:
  *
- *   { index: true, lazy: async () => ({ Component: (await import('./pages/Dashboard.tsx')).default }) }
+ *   { path: 'articles', lazy: async () => ({ Component: (await import('./pages/Articles.tsx')).default }) }
  *
- * Importing a page file that does not exist yet would break the build, so F3 leaves only a
- * placeholder index route; F4 (`/`), F6 (`/stocks/:symbol`) and F7 (`/articles`) each append their
- * lazy route to `children` when their page file lands.
+ * lazy 라우트는 페이지 코드를 첫 진입 때 내려받게 해 초기 번들을 셸로 유지한다.
+ * Importing a page file that does not exist yet would break the build, so each task appends its lazy route
+ * to `children` when its page file lands. F4 wired the index route (`/` Dashboard); F6 (`/stocks/:symbol`)
+ * and F7 (`/articles`) follow the same shape. A lazy route keeps the initial bundle down to the shell by
+ * fetching the page's code on first entry.
  */
 const router = createBrowserRouter([
   {
     path: '/',
     element: <App />,
-    children: [{ index: true, element: <p>대시보드 준비 중입니다.</p> }],
+    children: [
+      {
+        index: true,
+        lazy: async () => ({ Component: (await import('./pages/Dashboard.tsx')).default }),
+      },
+    ],
   },
 ])
 

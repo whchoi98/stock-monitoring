@@ -186,6 +186,333 @@ a {
   }
 }
 
+/* ── 빈 상태 문구 / Empty-state wording ── */
+.empty {
+  margin: 0;
+  font-size: 13px;
+}
+
+/*
+ * ── 대시보드 레이아웃 / Dashboard layout ──
+ * 데스크톱은 본문 + 320px 뉴스 사이드바, 모바일은 1열 스택 (스펙 6.2 / 6.3).
+ * Desktop is content plus a 320px news sidebar; mobile stacks into one column (spec 6.2 / 6.3).
+ */
+.dashboard {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  align-items: start;
+}
+
+.dashboard-main,
+.dashboard-quotes {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  /* 그리드 자식은 기본 min-width auto라서 넓은 표가 열을 밀어낸다 / A grid child defaults to min-width auto, which a wide table would stretch */
+  min-width: 0;
+}
+
+.dashboard-duo {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+/* 사이드바는 스크롤해도 따라온다 (하단 티커 바 높이만큼 여유) / The sidebar follows the scroll, minus the ticker's height */
+.dashboard-side {
+  position: sticky;
+  top: 76px;
+  min-width: 0;
+}
+
+@media (max-width: 900px) {
+  .dashboard,
+  .dashboard-duo {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-side {
+    position: static;
+  }
+}
+
+/* ── 섹션 머리 (카드 밖 제목 + 뱃지) / Section header: a title outside any card ── */
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+/* ── 지수 카드 / Index cards ── */
+.index-grid {
+  display: grid;
+  /* 5장이 한 줄에 들어가되 좁아지면 자동으로 줄바꿈 / Five per row, wrapping automatically when narrow */
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.index-name {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+
+.index-value {
+  margin: 0 0 4px;
+  color: var(--text-strong);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+/* ── 시장 요약 / Market summary ── */
+.breadth {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.breadth-bar {
+  overflow: hidden;
+  height: 6px;
+  margin: 8px 0 16px;
+  border-radius: 999px;
+  /* 색은 .up/.down 클래스가 정하고 여기서 currentColor로 칠한다 / .up/.down set the colour; currentColor paints it */
+  background: currentColor;
+}
+
+.breadth-fill {
+  display: block;
+  height: 100%;
+  background: currentColor;
+}
+
+.leader-lists {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.leader-label {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.leader-items {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.leader-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.leader-name {
+  overflow: hidden;
+  color: var(--text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 섹터 등락 / Sector bars ── */
+.sector-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sector-row {
+  display: grid;
+  grid-template-columns: 92px 1fr 64px 52px;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.sector-name {
+  overflow: hidden;
+  color: var(--text-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sector-track {
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--bg);
+}
+
+.sector-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.sector-value {
+  text-align: right;
+  font-weight: 700;
+}
+
+.sector-count {
+  text-align: right;
+  font-size: 12px;
+}
+
+/* ── 시장 탭 / Market tabs ── */
+.tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.tab {
+  padding: 6px 16px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text-strong);
+}
+
+.tab-active {
+  background: var(--accent);
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+/* ── 시세 표 / Quote table ── */
+.table-scroll {
+  overflow-x: auto;
+}
+
+.stock-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.stock-table th {
+  padding: 0 8px 8px;
+  text-align: left;
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.stock-table td {
+  padding: 8px;
+  /*
+   * 행에 붙은 .up/.down 클래스는 색을 상속시키므로 셀에서 본문색으로 되돌린다 —
+   * 등락 셀만 아래 규칙으로 다시 물들인다 (행 전체가 빨강/파랑이 되는 것을 막는다).
+   * A row's .up/.down class would tint every cell, so cells reset to the body colour and only the
+   * change cells are re-tinted below; this keeps whole rows from turning red or blue.
+   */
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.stock-table tbody tr {
+  border-top: 1px solid var(--bg);
+  cursor: pointer;
+}
+
+.stock-table tbody tr:hover,
+.stock-table tbody tr:focus-visible {
+  background: var(--bg);
+  outline: none;
+}
+
+.cell-number {
+  text-align: right;
+}
+
+.stock-table td.cell-symbol,
+.stock-table td.cell-price,
+.stock-table td.cell-name {
+  color: var(--text-strong);
+}
+
+.stock-table tbody tr.up td.cell-signed {
+  color: var(--up);
+}
+
+.stock-table tbody tr.down td.cell-signed {
+  color: var(--down);
+}
+
+/* 정렬 헤더는 버튼이다 (키보드 접근) / A sortable header is a button, for keyboard access */
+.th-sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.th-sort:hover {
+  color: var(--text-strong);
+}
+
+/* ── 뉴스 피드 / News feed ── */
+.news-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* 사이드바가 화면보다 길어지지 않게 목록 안에서만 스크롤 / Scroll inside the list so the sidebar never outgrows the viewport */
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.news-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.news-item:hover {
+  background: var(--bg);
+}
+
+.news-title {
+  color: var(--text-strong);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.news-meta {
+  font-size: 11px;
+}
+
+@media (max-width: 900px) {
+  .news-list {
+    max-height: none;
+  }
+}
+
 /* ── 하단 경제지표 티커 바 / Bottom economic-indicator ticker ── */
 .ticker-bar {
   position: fixed;
