@@ -179,11 +179,22 @@ export function PriceChart({ symbol }: PriceChartProps) {
     const chart = createChart(container, {
       width: container.clientWidth,
       height: container.clientHeight,
+      /*
+       * `attributionLogo`는 기본값(true)을 그대로 둔다 — 끄지 말 것.
+       * lightweight-charts 라이선스는 TradingView를 제작자로 밝히고 https://www.tradingview.com/ 링크를
+       * 사용자에게 보이는 화면에 두라고 요구하며(`node_modules/lightweight-charts/README.md`),
+       * 이 옵션이 그 링크 요구를 충족시키는 공식 수단이다. 패키지에 NOTICE 파일이 없고 프로젝트
+       * 어디에도 TradingView 표기가 없으므로, 이 옵션을 끄면 대체 표기가 사라진다.
+       * Leave `attributionLogo` at its default (true) — do not switch it off. The lightweight-charts
+       * licence requires naming TradingView as the creator and putting a link to
+       * https://www.tradingview.com/ on a page visible to users (see the package README), and this option
+       * is the official way to satisfy that link requirement. The package ships no NOTICE file and the
+       * project carries no TradingView attribution anywhere else, so disabling it would leave none.
+       */
       layout: {
         background: { color: styles.background },
         textColor: styles.text,
         fontFamily: styles.fontFamily,
-        attributionLogo: false,
       },
       grid: {
         vertLines: { color: styles.grid },

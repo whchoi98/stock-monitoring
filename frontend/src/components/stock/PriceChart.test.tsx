@@ -20,6 +20,8 @@ import type { QueryResult } from '../../api/queries.ts'
 import { useChart } from '../../api/queries.ts'
 import type { ChartData } from '../../api/types.ts'
 import { PriceChart } from './PriceChart.tsx'
+// Vite의 `?raw`로 구현 파일 원문을 읽는다 (아래 라이선스 가드용) / The implementation's own text via Vite's `?raw`, for the licence guard below
+import priceChartSource from './PriceChart.tsx?raw'
 
 vi.mock('../../api/queries.ts', () => ({ useChart: vi.fn() }))
 
@@ -115,5 +117,31 @@ describe('PriceChart', () => {
     // The tabs survive a failure, so another window is still reachable
     fireEvent.click(screen.getByRole('button', { name: '3M' }))
     expect(vi.mocked(useChart)).toHaveBeenLastCalledWith('005930.KS', '3m')
+  })
+
+  /*
+   * 라이선스 회귀 가드 — 동작 테스트가 아니라 컴플라이언스 가드다.
+   * lightweight-charts 라이선스는 TradingView 표기 + https://www.tradingview.com/ 링크를 사용자에게
+   * 보이는 화면에 요구하고, `attributionLogo`(기본 true)가 그 요구를 충족시키는 공식 수단이다.
+   * 패키지에 NOTICE 파일이 없고 프로젝트에 대체 표기도 없어서, 이 옵션을 끄면 조용히 비준수가 된다.
+   * 차트 생성 경로는 canvas가 없는 jsdom에서 실행할 수 없으므로(그래서 링크 자체는 실제 브라우저에서
+   * 확인했다) 소스에 그 한 줄이 되살아나는 것만 여기서 막는다.
+   * A licence regression guard rather than a behaviour test. The lightweight-charts licence requires a
+   * TradingView credit and a link to https://www.tradingview.com/ on a user-visible page, and
+   * `attributionLogo` (true by default) is the official way to satisfy it. The package ships no NOTICE
+   * file and the project credits TradingView nowhere else, so switching it off is silent
+   * non-compliance. The chart-creation path cannot run under jsdom (which is why the link itself was
+   * verified in a real browser), so what is guarded here is that one line coming back.
+   */
+  it('TradingView 어트리뷰션 로고를 끄지 않는다 (라이선스) / never disables the TradingView attribution logo, per the licence', () => {
+    // 원문 전체를 단언에 넘기면 실패 메시지가 파일 하나를 그대로 토해낸다 — 불리언으로 좁힌다
+    // Asserting on the whole text would vomit the entire file into the failure message; narrow it to a boolean
+    const disabled = priceChartSource.replace(/\s/g, '').includes('attributionLogo:false')
+
+    expect(
+      disabled,
+      'attributionLogo를 끄면 TradingView 링크가 사라져 lightweight-charts 라이선스를 위반한다 (대체 표기 없음) / ' +
+        'disabling attributionLogo drops the TradingView link and breaks the lightweight-charts licence (nothing else credits it)',
+    ).toBe(false)
   })
 })
