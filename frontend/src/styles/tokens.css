@@ -1,0 +1,46 @@
+/*
+ * 디자인 토큰 (Toss Invest 실측 값) — 테마는 <html data-theme="dark|light">로만 전환한다.
+ * 컴포넌트에서 색상 하드코딩 금지, 항상 이 변수를 사용.
+ * Design tokens; theme switches only via <html data-theme="dark|light">.
+ * Never hardcode colors in components — always use these variables.
+ */
+
+/* 다크(기본) / Dark (default) */
+:root[data-theme='dark'] {
+  --bg: #101013;
+  --card: #17171C;
+  --up: #F5445A;
+  --down: #4391FF;
+  --accent: #3485FA;
+  --text: #C3C3C6;
+  --text-strong: #FFFFFF;
+  --radius: 16px;
+  color-scheme: dark;
+}
+
+/* 라이트 / Light */
+:root[data-theme='light'] {
+  --bg: #F4F5F8;
+  --card: #FBFCFD;
+  --up: #DE2B39;
+  --down: #2272EB;
+  --accent: #3182F6;
+  --text: #4E5968;
+  --text-strong: #191F28;
+  --radius: 16px;
+  color-scheme: light;
+}
+
+/* 등락 색 — 한국 관례(상승 빨강/하락 파랑), 보합(정확히 0)은 본문색 */
+/* Korean convention: up red / down blue; flat (exactly 0) uses body color. */
+.up {
+  color: var(--up);
+}
+
+.down {
+  color: var(--down);
+}
+
+.flat {
+  color: var(--text);
+}

@@ -1,0 +1,45 @@
+/*
+ * 전역 스타일 — Pretendard는 CDN 대신 npm 패키지(@fontsource)로 번들해 오프라인/CSP에 안전.
+ * @import는 반드시 다른 규칙보다 먼저 와야 한다.
+ * Global styles; Pretendard is bundled from npm (@fontsource), not a CDN, for offline/CSP safety.
+ * @import rules must precede all other rules.
+ */
+/*
+ * @fontsource/pretendard는 subset 분할(unicode-range)이 없어 굵기당 파일이 ~770KB다.
+ * 따라서 본문(400)과 강조(700) 두 굵기만 로드한다. 추가 굵기가 필요하면 여기서 한 줄 추가.
+ * Each weight is a ~770KB file (no unicode-range subsets), so only 400/700 are loaded.
+ */
+@import '@fontsource/pretendard/400.css';
+@import '@fontsource/pretendard/700.css';
+@import './tokens.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: Pretendard, 'Noto Sans KR', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* 카드 컨테이너 / Card container */
+.card {
+  background: var(--card);
+  border-radius: var(--radius);
+  padding: 16px;
+}
