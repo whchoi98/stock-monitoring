@@ -85,21 +85,62 @@ BOILERPLATE_MARKERS = (
     "copyright", "privacy policy", "terms of",
 )
 
-_ARTICLE_TAG_RE = re.compile(r"<article[^>]*>(.*?)</article>", re.DOTALL)
-_PARAGRAPH_RE = re.compile(r"<p[^>]*>(.*?)</p>", re.DOTALL)
+# ---------------------------------------------------------------------------
+# 추출 정규식 - 백트래킹 상한이 load-bearing이다 / Extraction regexes: the backtracking bounds are load-bearing
+#
+# 태그 내부를 훑는 클래스는 모두 `[^<>]{0,MAX_TAG_SCAN}` 형태다. 두 가지가 동시에 필요하다:
+#   1. `<`를 클래스에서 제외 -> 후보 시작 위치마다 스캔이 "다음 `<`까지"로 끝난다. `[^>]*`는 닫는
+#      `>`가 없는 입력에서 매 후보마다 EOF까지 훑어 입력 길이의 제곱이 된다.
+#   2. 길이 상한 -> 한 후보가 소비할 수 있는 문자 수 자체를 못박는다 (2중 방어).
+# 실측(262KB = MAX_ARTICLE_SIZE, 2026-08-02): `"<div "` 반복 39.4s -> 0.01s 미만,
+# `"<p>"` 반복 136.1s -> 0.03s, `"<article>"` 반복 43.4s -> 0.01s 미만, 단락 안 `"<"` 반복 34.2s -> 0.01s 미만.
+# Every class that scans inside a tag is `[^<>]{0,MAX_TAG_SCAN}`. Both parts matter:
+#   1. excluding `<` ends each candidate's scan at the next `<`, whereas `[^>]*` rescans to EOF per
+#      candidate when no closing `>` exists - quadratic in the input length;
+#   2. the length bound caps what a single candidate can consume at all (defense in depth).
+# Measured at 262KB (= MAX_ARTICLE_SIZE) on 2026-08-02: repeated `"<div "` 39.4s -> under 0.01s,
+# repeated `"<p>"` 136.1s -> 0.03s, repeated `"<article>"` 43.4s -> under 0.01s, repeated `"<"` inside a
+# paragraph 34.2s -> under 0.01s.
+#
+# 이 상한들이 보장하는 것: 어떤 입력이든 추출 시간이 문서 길이에 선형이라는 것이 아니라,
+# **후보 시작 위치당 작업량이 상수로 묶인다**는 것 (문서는 이미 256KB로 제한되어 있다).
+# What the bounds guarantee: not that extraction is linear for every conceivable input, but that the
+# work per candidate start position is constant-bounded (and the document is already capped at 256KB).
+# ---------------------------------------------------------------------------
+
+# 태그 하나 안에서 훑을 수 있는 최대 문자 수 / Maximum characters scanned inside a single tag
+MAX_TAG_SCAN = 1000
+
+# 전략 1: `<article>` 시작 태그. 본문 끝은 정규식이 아니라 `str.find`로 찾는다 (아래 `_body_window`).
+# Stage 1: the `<article>` opening tag; the body end is located with `str.find`, not a regex (`_body_window`).
+_ARTICLE_OPEN_RE = re.compile(rf"<article[^<>]{{0,{MAX_TAG_SCAN}}}>")
+ARTICLE_CLOSE_TAG = "</article>"
+
+# 단락은 시작/종료 태그를 한 번에 훑고 짝을 맞춘다 (`(.*?)</p>` 게으른 스캔 금지).
+# `<p ...>(.*?)</p>`는 `</p>`가 없으면 `<p` 출현마다 EOF까지 훑는다 - 262KB에서 136초를 측정했다.
+# Paragraphs come from one pass over both tags, paired up afterwards (no `(.*?)</p>` lazy scan).
+# `<p ...>(.*?)</p>` rescans to EOF per `<p` when no `</p>` exists - 136 seconds measured at 262KB.
+_P_TAG_RE = re.compile(rf"<p[^<>]{{0,{MAX_TAG_SCAN}}}>|</p>")
 
 # 전략 2: 본문 컨테이너의 **시작 태그만** 찾는다 (닫는 태그까지 게으르게 훑지 않는다).
-# `<div ...>(.*?)</div>` 형태는 `<div` 출현마다 EOF까지 재스캔해 입력 길이의 제곱이 되고,
-# 중첩 `<div>`가 있는 정상 기사에서는 첫 내부 `</div>`에서 본문이 끊긴다. 둘 다 시작 태그 +
-# 고정 창(`ARTICLE_BODY_WINDOW`) 방식으로 해결된다.
-# Stage 2 matches only the container's *opening tag*. A `<div ...>(.*?)</div>` pattern rescans to EOF
-# for every `<div` occurrence (quadratic in the input) and, on a legitimate article containing a nested
-# `<div>`, truncates the body at the first inner `</div>`. An opening-tag match plus a fixed forward
-# window (`ARTICLE_BODY_WINDOW`) fixes both.
+# `<div ...>(.*?)</div>` 형태는 중첩 `<div>`가 있는 정상 기사에서 첫 내부 `</div>`에서 본문을 끊고,
+# `</div>`가 없으면 이차 스캔이 된다. 시작 태그 + 고정 창(`ARTICLE_BODY_WINDOW`)이 둘 다 없앤다.
+# Stage 2 matches only the container's *opening tag*. A `<div ...>(.*?)</div>` pattern truncates a
+# legitimate article at the first nested `</div>` and degenerates into a quadratic scan when no `</div>`
+# exists; an opening-tag match plus a fixed forward window (`ARTICLE_BODY_WINDOW`) removes both.
 _BODY_CLASS_RES = tuple(
-    re.compile(rf'<div[^>]*class="[^"]*{css_class}[^"]*"[^>]*>')
+    re.compile(
+        rf'<div[^<>]{{0,{MAX_TAG_SCAN}}}class="[^"<>]{{0,{MAX_TAG_SCAN}}}{css_class}'
+        rf'[^"<>]{{0,{MAX_TAG_SCAN}}}"[^<>]{{0,{MAX_TAG_SCAN}}}>'
+    )
     for css_class in ARTICLE_BODY_CLASSES
 )
+
+# `_clean_html`용 - 태그/엔티티 제거도 같은 상한을 받는다 (단락 본문은 적대적일 수 있다).
+# For `_clean_html`: tag and entity stripping take the same bounds (a paragraph body can be hostile too).
+_HTML_TAG_RE = re.compile(rf"<[^<>]{{0,{MAX_TAG_SCAN}}}>")
+_HTML_ENTITY_RE = re.compile(r"&[a-zA-Z]{1,32};")
+_WHITESPACE_RE = re.compile(r"\s+")
 
 # 기사 조회 가드 - URL이 클라이언트에서 오므로 SSRF/과대응답을 막는다 (피드 URL은 코드 고정이라 무관)
 # Article fetch guards - the URL is client-supplied, so SSRF and oversized bodies must be blocked
@@ -134,9 +175,9 @@ def _warn(event: str, **fields: Any) -> None:
 
 def _clean_html(text: str) -> str:
     """HTML 태그·엔티티를 제거하고 공백을 정리 / Strip HTML tags and entities, then normalize whitespace."""
-    clean = re.sub(r"<[^>]+>", "", text)        # HTML 태그 제거 / remove HTML tags
-    clean = re.sub(r"&[a-zA-Z]+;", " ", clean)  # HTML 엔티티 제거 / remove HTML entities
-    clean = re.sub(r"\s+", " ", clean)          # 연속 공백 정리 / collapse whitespace
+    clean = _HTML_TAG_RE.sub("", text)          # HTML 태그 제거 / remove HTML tags
+    clean = _HTML_ENTITY_RE.sub(" ", clean)     # HTML 엔티티 제거 / remove HTML entities
+    clean = _WHITESPACE_RE.sub(" ", clean)      # 연속 공백 정리 / collapse whitespace
     return clean.strip()
 
 
@@ -305,10 +346,53 @@ async def fetch_company_news(symbol: str) -> list[NewsItem]:
 # 기사 본문 추출 / Article content extraction
 # ---------------------------------------------------------------------------
 
+def _paragraph_bodies(html: str):
+    """
+    `<p>`/`</p>` 태그를 한 번만 훑어 단락 본문을 순서대로 내놓는다 / Yield paragraph bodies from a single pass over the tags.
+
+    정규식이 태그 짝을 맞추게 하지 않고(`(.*?)</p>` = 이차 스캔의 근원) 태그 목록을 상태 기계로 짝짓는다.
+    본문 길이에는 상한을 두지 않는다: 문서 자체가 `MAX_ARTICLE_SIZE`로 제한되고 스캔이 한 번뿐이라
+    성능상 필요가 없으며, 기사 전체가 `<p>` 하나인 실제 사이트가 존재하므로 긴 단락을 버리면
+    추출이 실패한다.
+    The regex no longer pairs the tags (`(.*?)</p>` is what made it quadratic); a state machine pairs the
+    tag stream instead. Body length is deliberately unbounded: the document is already capped at
+    `MAX_ARTICLE_SIZE` and the scan happens once, so no bound is needed for performance, while real sites
+    do put an entire article in a single `<p>` - dropping long bodies would break extraction.
+
+    짝이 맞지 않는 태그는 옛 정규식과 같은 방식으로 처리한다: 여는 태그가 이미 열려 있으면 무시하고
+    (`<p>a<p>b</p>` -> 본문 `a<p>b`), 짝 없는 닫는 태그도 무시한다.
+    Unpaired tags behave as the old regex did: an opening tag while one is already open is ignored
+    (`<p>a<p>b</p>` -> body `a<p>b`), and an unmatched closing tag is ignored.
+    """
+    open_at = None
+    for tag in _P_TAG_RE.finditer(html):
+        if tag.group().startswith("</"):
+            if open_at is not None:
+                yield html[open_at:tag.start()]
+                open_at = None
+        elif open_at is None:
+            open_at = tag.end()
+
+
+def _body_window(html: str, start: int, closing: str = "") -> str:
+    """
+    `start`부터 닫는 태그까지, 없으면 고정 창까지 잘라 낸다 / Slice from `start` to the closing tag, else to the fixed window.
+
+    닫는 태그는 정규식이 아니라 `str.find`로 창 안에서만 찾는다 (C 레벨 검색 + 위치당 상한).
+    The closing tag is located with `str.find` inside the window only - a C-level search with a bounded span.
+    """
+    stop = start + ARTICLE_BODY_WINDOW
+    if closing:
+        end = html.find(closing, start, stop)
+        if end != -1:
+            return html[start:end]
+    return html[start:stop]
+
+
 def _paragraphs(html: str, min_len: int, drop_boilerplate: bool = False) -> list[str]:
     """<p> 태그 본문을 정리해 최소 길이 이상만 남긴다 / Clean <p> bodies, keeping those above the minimum length."""
     kept = []
-    for raw in _PARAGRAPH_RE.findall(html):
+    for raw in _paragraph_bodies(html):
         clean = _clean_html(raw)
         if len(clean) <= min_len:
             continue
@@ -322,7 +406,9 @@ def _extract_paragraphs(html: str) -> list[str]:
     """
     3단계 전략으로 기사 단락 추출 / Extract article paragraphs with a three-stage strategy.
 
-    1. `<article>` 태그 안의 `<p>` (가장 신뢰할 수 있다) / `<p>` inside `<article>` (most reliable).
+    1. 첫 `<article>` 시작 태그 뒤 `</article>`까지(없으면 고정 창) 안의 `<p>` (가장 신뢰할 수 있다)
+       / `<p>` between the first `<article>` opening tag and `</article>` (or the fixed window when it is
+       absent) - the most reliable source.
     2. 대표적인 본문 CSS 클래스 `<div>` **시작 태그 뒤 고정 창** 안의 `<p>` / `<p>` inside a fixed window
        after a well-known article-body `<div>`'s opening tag.
     3. 페이지 전체 `<p>` + 광고·약관 필터 (마지막 폴백) / every `<p>` on the page with an ad/boilerplate filter.
@@ -333,9 +419,11 @@ def _extract_paragraphs(html: str) -> list[str]:
     block the event loop.
     """
     # 전략 1 / Stage 1
-    article_match = _ARTICLE_TAG_RE.search(html)
-    if article_match:
-        found = _paragraphs(article_match.group(1), MIN_PARAGRAPH_LEN)
+    article_open = _ARTICLE_OPEN_RE.search(html)
+    if article_open:
+        found = _paragraphs(
+            _body_window(html, article_open.end(), ARTICLE_CLOSE_TAG), MIN_PARAGRAPH_LEN,
+        )
         if found:
             return found
 
@@ -344,8 +432,9 @@ def _extract_paragraphs(html: str) -> list[str]:
     for pattern in _BODY_CLASS_RES:
         opening = pattern.search(html)
         if opening:
-            window = html[opening.end():opening.end() + ARTICLE_BODY_WINDOW]
-            found = _paragraphs(window, MIN_PARAGRAPH_LEN)
+            # 닫는 `</div>`는 찾지 않는다: 중첩 div가 흔해서 첫 `</div>`는 본문의 끝이 아니다
+            # No `</div>` search: nested divs are common, so the first one is not the body's end
+            found = _paragraphs(_body_window(html, opening.end()), MIN_PARAGRAPH_LEN)
             if found:
                 return found
 

@@ -589,22 +589,80 @@ async def test_fetch_article_content_keeps_paragraphs_after_a_nested_div(monkeyp
     )
 
 
-async def test_fetch_article_content_extraction_is_linear_on_pathological_html(monkeypatch):
-    """
-    본문 클래스가 반복되는 적대적 HTML도 즉시 끝난다 / Hostile HTML repeating the body class finishes immediately.
+def _repeated_to_cap(unit: str) -> str:
+    """상한(`MAX_ARTICLE_SIZE`)을 꽉 채우도록 `unit`을 반복 / Repeat `unit` to fill the cap exactly."""
+    return unit * (news.MAX_ARTICLE_SIZE // len(unit))
 
-    입력은 `</div>`가 하나도 없는 `<div class="article-body">` 8000개(~200KB)다. 닫는 태그를 게으르게
-    찾던 옛 구현은 `<div` 출현마다 EOF까지 재스캔해 이 입력에서 9.7초가 걸렸다 (2026-08-02 측정,
-    같은 결함이 432KB 실제 기사에서는 42초였다). 시작 태그 + 고정 창 방식은 스캔이 한 번이라 밀리초
-    단위다. 여유를 크게 둔 1초 상한으로 회귀를 잡는다.
-    The input is 8000 `<div class="article-body">` tags (~200KB) with no `</div>` anywhere. The old lazy
-    closing-tag search rescanned to EOF per `<div` occurrence and took 9.7 seconds on this input (measured
-    2026-08-02; the same defect cost 42 seconds on a real 432KB article). The opening-tag-plus-window scan is
-    a single pass and finishes in milliseconds, so the generous one-second bound is what catches a regression.
+
+# 닫는 짝이 없는 태그가 반복되는 형태들 - 추출 정규식이 후보 시작 위치마다 EOF까지 훑던 입력들이다.
+# 각 항목: (id, 상한을 채운 입력, 수정 전 실측 초). 2026-08-02 측정, 262 144바이트(= 상한) 기준.
+# Shapes that repeat an unclosed tag - the inputs that made an extraction regex rescan to EOF per
+# candidate start. Each entry: (id, input filling the cap, seconds measured before the fix), taken
+# 2026-08-02 at 262,144 bytes (= the cap).
+UNCLOSED_TAG_SHAPES = [
+    # `<div ...>` 후보 (전략 2). 앞에 `class="..."`를 붙이면 정규식이 일찍 실패해 느려지지 않으므로
+    # 재현에는 순수 반복 형태를 써야 한다 / stage-2 body-class candidates. A leading `class="..."` makes the
+    # regex fail early and stay fast, so the pure repeated shape is what actually reproduces it.
+    ("unclosed_div_tag", _repeated_to_cap("<div "), 39.4),
+    # `<p ...>` 후보 (모든 전략의 단락 스캔) / paragraph scan used by every stage
+    ("unclosed_p_tag", _repeated_to_cap("<p>"), 136.1),
+    # `<article ...>` 후보 (전략 1) / stage-1 article candidates
+    ("unclosed_article_tag", _repeated_to_cap("<article>"), 43.4),
+    # 단락 본문 안의 태그 제거 (`_clean_html`) / tag stripping inside a paragraph body (`_clean_html`)
+    ("unclosed_tag_inside_paragraph", "<p>" + _repeated_to_cap("<a ")[:news.MAX_ARTICLE_SIZE - 10] + "</p>", 34.2),
+]
+
+
+@pytest.mark.parametrize(
+    "html,seconds_before",
+    [pytest.param(html, before, id=shape_id) for shape_id, html, before in UNCLOSED_TAG_SHAPES],
+)
+async def test_fetch_article_content_bounds_backtracking_on_unclosed_tag_shapes(
+    monkeypatch, html, seconds_before,
+):
+    """
+    닫히지 않은 태그가 반복되는 입력에서 추출이 즉시 끝난다 / Extraction finishes immediately on repeated unclosed tags.
+
+    보장하는 것은 "모든 입력에 선형"이 아니라 **후보 시작 위치당 작업량이 상수로 묶인다**는 것이다
+    (`[^<>]{0,MAX_TAG_SCAN}` + 단락 짝맞추기 1패스 + `str.find` 창). 그래서 각 형태를 개별적으로
+    시간 상한으로 묶는다 - 한 형태만 재보면 다른 형태의 회귀를 놓친다.
+    The guarantee is not "linear for every input" but that the work per candidate start position is
+    constant-bounded (`[^<>]{0,MAX_TAG_SCAN}`, a single pairing pass for paragraphs, and a `str.find`
+    window). Each shape therefore gets its own time bound: measuring one shape would miss a regression in
+    another.
+
+    수정 전 실측치는 파라미터로 들어온다 (39.4s / 136.1s / 43.4s / 34.2s @262KB). 수정 후에는 모두
+    0.03초 미만이므로, 여유를 크게 둔 1초 상한이 회귀를 명확히 잡는다.
+    The pre-fix measurement rides along as a parameter (39.4s / 136.1s / 43.4s / 34.2s at 262KB). After the
+    fix every shape is under 0.03s, so a generous one-second bound catches a regression unambiguously.
+    """
+    _patch_dns(monkeypatch)
+    assert len(html) >= news.MAX_ARTICLE_SIZE - 16      # 상한을 꽉 채운 입력 / the input fills the cap
+    assert seconds_before > 30                          # 수정 전에는 30초를 넘었다 / it exceeded 30s before the fix
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    started = time.perf_counter()
+    content = await news.fetch_article_content(ARTICLE_URL)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, (
+        f"extraction took {elapsed:.1f}s (was {seconds_before}s before the bounds) "
+        "- unbounded backtracking is back"
+    )
+    assert isinstance(content, str)   # 추출 실패는 ""다 (예외를 던지지 않는다) / a failed extraction is "", never a raise
+
+
+async def test_fetch_article_content_still_extracts_around_a_pathological_tail(monkeypatch):
+    """
+    적대적 꼬리가 붙어도 앞쪽 본문은 정상 추출 / A hostile tail does not stop the real body from being extracted.
+
+    시간 상한만 보면 "아무것도 추출하지 않는" 구현도 통과하므로, 같은 형태에 진짜 단락을 섞어
+    결과까지 확인한다.
+    A time bound alone would also pass for an implementation that extracts nothing, so the same shape is
+    mixed with a real paragraph and the result is asserted too.
     """
     _patch_dns(monkeypatch)
     html = f'<div class="article-body"><p>{KEPT_PARAGRAPH}</p>' + '<div class="article-body">' * 8000
-    assert len(html) > 200_000
     _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
 
     started = time.perf_counter()
@@ -612,7 +670,7 @@ async def test_fetch_article_content_extraction_is_linear_on_pathological_html(m
     elapsed = time.perf_counter() - started
 
     assert content == KEPT_PARAGRAPH
-    assert elapsed < 1.0, f"extraction took {elapsed:.1f}s - the quadratic scan is back"
+    assert elapsed < 1.0, f"extraction took {elapsed:.1f}s"
 
 
 async def test_paragraph_extraction_runs_off_the_event_loop(monkeypatch):
@@ -952,8 +1010,10 @@ async def test_fetch_article_content_truncates_oversized_body(monkeypatch, caplo
     The body is streamed in chunks with no content-length: a chunked response, which the declared-size
     pre-filter cannot catch.
 
-    상한에서 잘리면 `</article>`도 사라져 전략 1이 실패하고 전략 3(50자 초과)이 처리한다.
-    Truncation also cuts `</article>`, so stage 1 fails and stage 3 (over 50 chars) handles the rest.
+    상한에서 잘리면 `</article>`도 사라지므로 전략 1은 시작 태그 뒤 고정 창을 훑고, 그 안에서 짝이
+    맞는 `<p>`는 첫 단락뿐이다 (상한을 넘긴 filler 단락은 `</p>`가 함께 잘렸다).
+    Truncation also cuts `</article>`, so stage 1 scans the fixed window after the opening tag, where the
+    only properly paired `<p>` is the first paragraph - the filler that crossed the cap lost its `</p>` too.
     """
     _patch_dns(monkeypatch)
     stream = _ChunkStream(_oversized_body(), chunk_size=16_384)
