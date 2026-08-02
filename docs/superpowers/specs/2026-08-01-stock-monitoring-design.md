@@ -135,7 +135,14 @@ backend/app/
 - 모든 시세 응답에 `asOf`(데이터 시각) + `marketOpen`(장중 여부) 포함.
 - `{symbol}` 형식은 yfinance 티커로 통일: US는 `AAPL`, KR은 `005930.KS`/`247540.KQ`.
   URL/캐시 키/프론트 라우트 전부 동일 형식 사용.
-- AI rate limit: CloudFront `X-Forwarded-For` 첫 IP 기준 분당 3회 + 전역 동시 2건, 초과 시 429.
+- AI rate limit: CloudFront가 생성하는 `CloudFront-Viewer-Address`(`ip:port`에서 포트 제거, IPv6는
+  마지막 콜론에서 분리) 기준 분당 3회 + 전역 동시 2건, 초과 시 429. 이 헤더가 없으면(로컬 개발/직접 호출)
+  `X-Forwarded-For` 첫 항목 → 소켓 주소로 폴백한다. CloudFront origin request policy가 이 헤더를
+  화이트리스트해야 오리진에 도달한다(관리형 `ALL_VIEWER_EXCEPT_HOST_HEADER`는 CloudFront 생성 헤더를
+  전달하지 못한다).
+  *(정정 2026-08-02, 사용자 결정: 원문은 "`X-Forwarded-For` 첫 IP 기준"이었다. CloudFront 뒤에서
+  XFF 첫 항목은 클라이언트가 위조 가능함을 라이브로 실증했고 — 요청마다 값을 바꾸면 한도가 무한히
+  갱신된다 — 위조 불가한 `CloudFront-Viewer-Address` 우선으로 변경했다.)*
 - 단일 uvicorn 워커 (L1 일관성, asyncio 동시성).
 
 ### 5.3 데이터 소스 변경 (TUI 대비)

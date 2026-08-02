@@ -17,6 +17,7 @@ import time
 import httpx
 import pytest
 
+from app.api import ai
 from app.api.ratelimit import SlidingWindowLimiter
 from app.core import config
 from app.main import create_app
@@ -39,6 +40,9 @@ XFF_FIRST = "1.2.3.4"
 XFF = f"{XFF_FIRST}, 10.0.0.1"
 XFF_SAME_CLIENT_OTHER_HOP = f"{XFF_FIRST}, 172.16.0.9"
 XFF_OTHER_CLIENT = f"5.6.7.8, {XFF_FIRST}"
+
+# CloudFront가 붙이는 뷰어 주소의 IP 부분 ("ip:port"에서 포트를 뗀 값) / IP part of the CloudFront viewer address
+VIEWER_IP = "198.51.100.20"
 
 # 한도(3)보다 많은 심볼: 캐시 히트가 아닌 진짜 200을 만들기 위해 요청마다 다른 심볼을 쓴다
 # More symbols than the limit (3): each request uses its own symbol so every 200 is a real analysis
@@ -188,8 +192,11 @@ def test_cache_hits_still_spend_the_rate_limit_budget(client, bedrock):
     assert len(bedrock.stock_calls) == 1  # 2·3번째는 캐시 히트 / calls two and three were cache hits
 
 
-def test_rate_limit_keys_on_the_first_forwarded_ip(client, bedrock):
-    """X-Forwarded-For 첫 항목이 제한 기준이다 / The first X-Forwarded-For entry is the limiter key."""
+def test_rate_limit_falls_back_to_the_first_forwarded_ip_without_a_viewer_address(client, bedrock):
+    """
+    CloudFront-Viewer-Address가 없으면 X-Forwarded-For 첫 항목이 기준이다 (로컬 개발 경로).
+    Without CloudFront-Viewer-Address the first X-Forwarded-For entry keys the limit (the local-dev path).
+    """
     for symbol in SYMBOLS[:config.AI_RATE_PER_MIN]:
         assert client.post(f"/api/ai/stocks/{symbol}", headers={"X-Forwarded-For": XFF}).status_code == 200
 
@@ -203,6 +210,91 @@ def test_rate_limit_keys_on_the_first_forwarded_ip(client, bedrock):
     assert blocked.status_code == 429
     assert allowed.status_code == 200
     assert len(bedrock.stock_calls) == config.AI_RATE_PER_MIN + 1
+
+
+def test_forged_forwarded_for_cannot_rotate_the_budget_behind_cloudfront(client, bedrock):
+    """
+    CloudFront-Viewer-Address가 있으면 위조된 X-Forwarded-For로 예산을 새로 딸 수 없다.
+    With CloudFront-Viewer-Address present, a forged X-Forwarded-For cannot buy a fresh budget.
+
+    요청마다 XFF 첫 항목을 바꿔도 (예전 구현이라면 매번 새 예산) 뷰어 주소가 같으면 4번째는 429다.
+    Every request rotates the first XFF entry - which used to mint a new budget each time - yet the same
+    viewer address makes the fourth request a 429.
+    """
+    viewer = {"CloudFront-Viewer-Address": f"{VIEWER_IP}:53210"}
+    for index, symbol in enumerate(SYMBOLS[:config.AI_RATE_PER_MIN]):
+        forged = {"X-Forwarded-For": f"203.0.113.{index}", **viewer}
+        assert client.post(f"/api/ai/stocks/{symbol}", headers=forged).status_code == 200
+
+    blocked = client.post(
+        f"/api/ai/stocks/{SYMBOLS[3]}",
+        headers={"X-Forwarded-For": "203.0.113.99", **viewer},
+    )
+
+    assert blocked.status_code == 429
+    assert blocked.json() == {"detail": "rate_limited", "retryAfter": 60}
+    assert len(bedrock.stock_calls) == config.AI_RATE_PER_MIN
+
+
+def test_viewer_address_is_keyed_without_its_port(client, bedrock):
+    """
+    포트는 키에서 제거된다 - 같은 IP의 다른 포트는 같은 예산이다 / The port is stripped: another port is the same budget.
+
+    포트를 남기면 커넥션마다 키가 달라져 한도가 사실상 사라진다.
+    Keeping the port would give every connection its own key, which effectively removes the limit.
+    """
+    for index, symbol in enumerate(SYMBOLS[:config.AI_RATE_PER_MIN]):
+        headers = {"CloudFront-Viewer-Address": f"{VIEWER_IP}:{40000 + index}"}
+        assert client.post(f"/api/ai/stocks/{symbol}", headers=headers).status_code == 200
+
+    blocked = client.post(
+        f"/api/ai/stocks/{SYMBOLS[3]}",
+        headers={"CloudFront-Viewer-Address": f"{VIEWER_IP}:59999"},
+    )
+
+    assert blocked.status_code == 429
+    # 리미터가 실제로 쓴 키가 포트 없는 IP다 / The key the limiter actually used is the port-free IP
+    assert set(client.app.state.ai_limiter._hits) == {VIEWER_IP}
+
+
+def test_ipv6_viewer_address_parses_at_the_last_colon(client, bedrock):
+    """
+    IPv6 뷰어 주소는 마지막 콜론에서만 잘린다 / An IPv6 viewer address splits only at its last colon.
+
+    IPv6 주소 자체가 콜론을 포함하므로 첫 콜론에서 자르면 `2001`처럼 뭉개져 서로 다른 클라이언트가
+    한 예산을 공유해버린다.
+    An IPv6 address contains colons, so splitting at the first one would collapse it to `2001` and make
+    unrelated clients share a single budget.
+    """
+    first = "2001:db8::1"
+    second = "2001:db8::2"
+    for symbol in SYMBOLS[:config.AI_RATE_PER_MIN]:
+        headers = {"CloudFront-Viewer-Address": f"{first}:53210"}
+        assert client.post(f"/api/ai/stocks/{symbol}", headers=headers).status_code == 200
+
+    blocked = client.post(
+        f"/api/ai/stocks/{SYMBOLS[3]}", headers={"CloudFront-Viewer-Address": f"{first}:40000"}
+    )
+    other = client.post(
+        f"/api/ai/stocks/{SYMBOLS[4]}", headers={"CloudFront-Viewer-Address": f"{second}:40000"}
+    )
+
+    assert blocked.status_code == 429
+    assert other.status_code == 200      # 다른 IPv6는 별도 예산 / a different IPv6 gets its own budget
+    assert set(client.app.state.ai_limiter._hits) == {first, second}
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("203.0.113.7:53210", "203.0.113.7"),
+    ("2001:db8::1:53210", "2001:db8::1"),
+    ("[2001:db8::1]:53210", "2001:db8::1"),   # 대괄호 표기도 허용 / a bracketed form is accepted
+    ("  203.0.113.7:80  ", "203.0.113.7"),
+    ("203.0.113.7", "203.0.113.7"),           # 포트가 없으면 그대로 / no port, taken as-is
+    ("", ""),                                 # 빈 값은 폴백을 태운다 / an empty value falls through
+])
+def test_viewer_ip_parsing(value, expected):
+    """뷰어 주소 파싱 표 / The viewer-address parsing table."""
+    assert ai.viewer_ip(value) == expected
 
 
 def test_rate_limit_budget_is_shared_by_both_ai_endpoints(client, bedrock):

@@ -46,6 +46,13 @@ CLOUDFRONT_PREFIX_LIST_ID = "pl-22a6434b"
 CONTAINER_PORT = 8000
 BEDROCK_REGION = "ap-northeast-2"
 ORIGIN_VERIFY_HEADER = "X-Origin-Verify"
+# CloudFront가 TCP 연결에서 생성하는 뷰어 주소 헤더("ip:port"). AI 레이트리밋 키의 1순위이며,
+# origin request policy가 명시적으로 화이트리스트해야 오리진까지 전달된다.
+# 백엔드 상수: `backend/app/api/ai.py` VIEWER_ADDRESS_HEADER.
+# The CloudFront-generated viewer address ("ip:port"): the primary AI rate-limit key, forwarded to the
+# origin only because the origin request policy whitelists it explicitly.
+# Backend counterpart: VIEWER_ADDRESS_HEADER in `backend/app/api/ai.py`.
+VIEWER_ADDRESS_HEADER = "CloudFront-Viewer-Address"
 
 # 이미지 빌드 컨텍스트는 리포지토리 루트다 (루트 Dockerfile이 frontend+backend를 함께 빌드).
 # 프로세스 CWD가 아니라 이 파일 위치에서 계산한다: stacks/ -> infra/ -> repo root.
@@ -288,15 +295,38 @@ class StockMonitoringStack(cdk.Stack):
         # ALB에 인증서가 없으므로 오리진은 HTTP_ONLY, 뷰어는 redirect-to-https다.
         # origin request policy가 필수다: CloudFront는 기본적으로 쿼리스트링과 대부분의
         # 헤더를 오리진에 전달하지 않는다. `?market=`, `?period=`와 POST의 Content-Type이
-        # 사라지면 API가 깨진다. ALL_VIEWER_EXCEPT_HOST_HEADER는 Host를 ALB 도메인으로
-        # 유지하면서 나머지를 그대로 넘긴다. 오리진 커스텀 헤더는 뷰어가 같은 이름을 보내도
+        # 사라지면 API가 깨진다. 오리진 커스텀 헤더는 뷰어가 같은 이름을 보내도
         # CloudFront가 덮어쓰므로 검증 헤더는 위조되지 않는다.
         # The ALB has no certificate, so the origin is HTTP_ONLY and viewers are redirected to
         # https. An origin request policy is mandatory: by default CloudFront forwards neither
         # query strings nor most headers, which would break `?market=`, `?period=` and the POST
-        # Content-Type. ALL_VIEWER_EXCEPT_HOST_HEADER forwards everything but keeps the ALB Host.
-        # A viewer cannot forge the verification header: custom origin headers always overwrite it.
+        # Content-Type. A viewer cannot forge the verification header: custom origin headers
+        # always overwrite it.
+        #
+        # 관리형 ALL_VIEWER_EXCEPT_HOST_HEADER를 쓰지 않는다 (2026-08-02 사용자 결정): 그 정책은
+        # `allExcept` 동작이라 **CloudFront가 생성한 헤더를 하나도 전달하지 못한다**. AI 레이트리밋이
+        # 위조 불가한 `CloudFront-Viewer-Address`를 키로 쓰므로(`backend/app/api/ai.py`), 그 헤더를
+        # 화이트리스트에 넣을 수 있는 `allViewerAndWhitelistCloudFront` 동작이 필요하다.
+        # 대가는 Host다: 이제 오리진에 뷰어 Host(CloudFront 도메인)가 전달된다. ALB는 Host 기반
+        # 라우팅을 쓰지 않고(리스너 조건은 X-Origin-Verify 헤더뿐) 백엔드도 Host를 보지 않으므로
+        # 동작은 동일하다.
+        # The managed ALL_VIEWER_EXCEPT_HOST_HEADER is deliberately not used (user ruling, 2026-08-02):
+        # it is an `allExcept` behavior and therefore forwards *no* CloudFront-generated header. The AI
+        # rate limit keys on the unforgeable `CloudFront-Viewer-Address` (`backend/app/api/ai.py`), which
+        # needs the `allViewerAndWhitelistCloudFront` behavior to whitelist that header. The cost is the
+        # Host header: the origin now receives the viewer Host (the CloudFront domain). Nothing depends on
+        # it - the ALB does no host-based routing (its only listener condition is X-Origin-Verify) and the
+        # backend never reads Host - so behavior is unchanged.
         # -------------------------------------------------------------------
+        origin_request_policy = cloudfront.OriginRequestPolicy(
+            self,
+            "OriginRequestPolicy",
+            origin_request_policy_name=f"{PREFIX}-all-viewer-and-viewer-address",
+            comment="All viewer headers plus the CloudFront-generated viewer address",
+            header_behavior=cloudfront.OriginRequestHeaderBehavior.all(VIEWER_ADDRESS_HEADER),
+            query_string_behavior=cloudfront.OriginRequestQueryStringBehavior.all(),
+            cookie_behavior=cloudfront.OriginRequestCookieBehavior.all(),
+        )
         origin = origins.HttpOrigin(
             alb.load_balancer_dns_name,
             protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
@@ -310,7 +340,7 @@ class StockMonitoringStack(cdk.Stack):
                 origin=origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 cache_policy=cloudfront.CachePolicy.CACHING_DISABLED,
-                origin_request_policy=cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+                origin_request_policy=origin_request_policy,
                 allowed_methods=cloudfront.AllowedMethods.ALLOW_ALL,
                 compress=True,
             ),

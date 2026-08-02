@@ -46,6 +46,14 @@ SOURCE_BEDROCK = "bedrock"
 
 # 레이트리밋 윈도우(초) - 429 본문의 retryAfter와 같은 값 / Rate-limit window in seconds; also the 429 body's retryAfter
 RATE_WINDOW_SEC = 60
+
+# CloudFront가 생성하는 뷰어 주소 헤더("ip:port") - 레이트리밋 키의 1순위 (위조 불가)
+# CloudFront-generated viewer address ("ip:port"): the primary rate-limit key, and unforgeable.
+# CDK가 origin request policy에 이 헤더를 화이트리스트로 넣어야 오리진까지 도달한다
+# (`infra/stacks/stock_monitoring_stack.py`).
+# It only reaches the origin because the CDK origin request policy whitelists it
+# (see `infra/stacks/stock_monitoring_stack.py`).
+VIEWER_ADDRESS_HEADER = "cloudfront-viewer-address"
 RATE_LIMITED_BODY = {"detail": "rate_limited", "retryAfter": RATE_WINDOW_SEC}
 
 # 클라이언트에 내보내는 고정 오류 문구 (예외 문자열은 절대 넣지 않는다)
@@ -105,18 +113,53 @@ class ArticleRequest(BaseModel):
 # 레이트리밋 / Rate limiting
 # ---------------------------------------------------------------------------
 
+def viewer_ip(viewer_address: str) -> str:
+    """
+    `CloudFront-Viewer-Address`("ip:port")에서 IP만 떼어낸다 / Take the IP out of `CloudFront-Viewer-Address` ("ip:port").
+
+    IPv6 주소 자체가 콜론을 포함하므로 **마지막 콜론**에서만 자른다 (`2001:db8::1:53210` -> `2001:db8::1`).
+    대괄호로 감싼 형태도 받아 준다.
+    An IPv6 address contains colons itself, so only the *last* colon splits off the port
+    (`2001:db8::1:53210` -> `2001:db8::1`). A bracketed form is accepted too.
+
+    Returns:
+        IP 문자열, 값이 비어 있으면 "" / The IP string, or "" when the value is empty.
+    """
+    address = viewer_address.strip()
+    if not address:
+        return ""
+    head, colon, _port = address.rpartition(":")
+    return (head if colon else address).strip().strip("[]")
+
+
 def client_ip(request: Request) -> str:
     """
     레이트리밋 기준 IP / The IP the rate limit keys on.
 
-    CloudFront -> ALB를 거치므로 `X-Forwarded-For`의 **첫 항목**이 클라이언트다 (뒤쪽은 중간 홉).
-    Behind CloudFront and the ALB the *first* `X-Forwarded-For` entry is the client; later entries are hops.
+    **`CloudFront-Viewer-Address`를 우선한다.** 이 헤더는 CloudFront가 TCP 연결에서 직접 만들어
+    붙이는 값이라 뷰어가 위조할 수 없다 (뷰어가 같은 이름을 보내도 CloudFront가 덮어쓴다).
+    반면 `X-Forwarded-For`의 첫 항목은 클라이언트가 임의로 채워 넣을 수 있고 CloudFront는 그 뒤에
+    실제 IP를 덧붙이기만 하므로, 첫 항목을 키로 쓰면 요청마다 다른 값을 보내 한도를 무한히 우회할 수
+    있다 (2026-08-02 라이브 실증 -> 사용자 결정).
+    **`CloudFront-Viewer-Address` wins.** CloudFront generates it from the TCP connection, so a viewer
+    cannot forge it (a viewer-supplied header of the same name is overwritten). The first
+    `X-Forwarded-For` entry, by contrast, is whatever the client wrote: CloudFront only appends the real
+    address behind it, so keying on the first entry lets a caller rotate the value per request and evade
+    the limit entirely (demonstrated live on 2026-08-02, hence the ruling).
 
-    첫 항목은 클라이언트가 위조할 수 있다(CloudFront는 기존 헤더에 뒤로 덧붙인다). 그래서 비용 방어는
-    이 한도 하나에 기대지 않는다 - 결과 캐시와 전역 동시 실행 제한이 함께 상한을 만든다.
-    A client can forge that first entry (CloudFront appends to an existing header), so cost defense does
-    not rest on this limit alone: the result cache and the global concurrency cap bound it as well.
+    폴백은 기존 XFF 첫 항목 -> 소켓 주소 순서다. CloudFront를 거치지 않는 로컬 개발/직접 호출에서만
+    쓰이며, 그 환경에는 위조 위험이 없다.
+    The fallback chain stays "first XFF entry, then the socket address". It only applies off CloudFront
+    (local development, direct calls), where forgery is not a concern.
+
+    비용 방어는 이 한도 하나에 기대지 않는다 - 결과 캐시와 전역 동시 실행 제한이 함께 상한을 만든다.
+    Cost defense still does not rest on this limit alone: the result cache and the global concurrency cap
+    bound it as well.
     """
+    viewer = viewer_ip(request.headers.get(VIEWER_ADDRESS_HEADER, ""))
+    if viewer:
+        return viewer
+
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         first = forwarded.split(",")[0].strip()

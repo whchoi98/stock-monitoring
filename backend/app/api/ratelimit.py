@@ -45,7 +45,8 @@ class SlidingWindowLimiter:
         요청을 허용할지 판정하고, 허용하면 기록한다 / Decide whether to allow a request, recording it when allowed.
 
         Args:
-            ip: 클라이언트 IP (X-Forwarded-For 첫 항목) / Client IP (first X-Forwarded-For entry).
+            ip: 클라이언트 IP (`ai.client_ip`: CloudFront-Viewer-Address 우선, XFF 첫 항목 폴백)
+                / Client IP (`ai.client_ip`: CloudFront-Viewer-Address first, first XFF entry as fallback).
 
         Returns:
             True면 허용(카운트됨), False면 한도 초과 / True when allowed (and counted), False when over the limit.
@@ -70,10 +71,12 @@ class SlidingWindowLimiter:
         """
         윈도우당 최대 한 번 유휴 IP 항목을 제거한다 / Drop idle IP entries at most once per window.
 
-        `allow`는 요청된 IP의 deque만 정리하므로, 한 번 등장한 IP는 그대로 남는다. 클라이언트가
-        X-Forwarded-For를 위조하면 맵이 계속 커질 수 있어 주기적으로 훑어 비운다 (윈도우당 O(IP 수)).
-        `allow` only prunes the requested IP's deque, so every IP ever seen would linger. A client can
-        forge X-Forwarded-For and grow the map, hence this periodic pass (O(#IPs) once per window).
+        `allow`는 요청된 IP의 deque만 정리하므로, 한 번 등장한 IP는 그대로 남는다. CloudFront 뒤에서는
+        키가 위조 불가한 뷰어 주소지만 로컬/직접 호출에서는 여전히 XFF 폴백이라 맵이 계속 커질 수 있어
+        주기적으로 훑어 비운다 (윈도우당 O(IP 수)).
+        `allow` only prunes the requested IP's deque, so every IP ever seen would linger. Behind CloudFront
+        the key is the unforgeable viewer address, but the XFF fallback still applies off CloudFront and can
+        grow the map, hence this periodic pass (O(#IPs) once per window).
         """
         if now - self._last_sweep < self.window_sec:
             return
