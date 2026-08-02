@@ -89,6 +89,64 @@ async def test_concurrent_same_key_fetches_once(cache):
     assert sources.count("l1") == 4
 
 
+async def test_key_lock_entries_do_not_outlive_the_fetch(cache):
+    """
+    The lock map must not retain a key once nobody is fetching it.
+
+    Not every key comes from a finite universe: `ai:article:{sha1(url)}` is derived from a
+    client-supplied URL, so retaining one lock per key ever seen would be an unbounded leak.
+    """
+    async def fetcher():
+        return "v"
+
+    await cache.get_or_fetch("k", 60, fetcher)
+    assert cache._locks == {}
+
+    # A cache hit takes no lock at all, and a failing fetch must not leave one behind either
+    await cache.get_or_fetch("k", 60, fetcher)
+    assert cache._locks == {}
+
+    async def boom():
+        raise RuntimeError("upstream down")
+
+    with pytest.raises(RuntimeError):
+        await cache.get_or_fetch("cold", 60, boom)
+    assert cache._locks == {}
+
+
+async def test_concurrent_callers_share_one_lock_entry_then_release_it(cache):
+    """Callers queued on one key share a single entry (single flight) which is dropped afterwards."""
+    entries_while_in_flight = []
+
+    async def fetcher():
+        entries_while_in_flight.append(len(cache._locks))
+        await asyncio.sleep(0.01)
+        return "fresh"
+
+    await asyncio.gather(*(cache.get_or_fetch("k", 60, fetcher) for _ in range(5)))
+
+    assert entries_while_in_flight == [1]  # one fetch, one shared entry
+    assert cache._locks == {}
+
+
+def test_l1_reclaims_expired_write_once_keys_on_later_writes(monkeypatch):
+    """
+    Expired entries must be reclaimed even if their key is never read again.
+
+    `get` expires lazily per key, so a write-once key (an AI article analysis, keyed by a client
+    URL) would stay in the store forever. Writes sweep instead.
+    """
+    monkeypatch.setattr(MemoryCache, "SWEEP_INTERVAL_SEC", 0)  # sweep on every write
+    l1 = MemoryCache()
+    as_of = "2026-08-01T00:00:00Z"
+
+    l1.set("live", "v", 300, as_of)
+    l1.set("write-once", "v", 0, as_of)  # TTL already elapsed, never read again
+    l1.set("later", "v", 300, as_of)
+
+    assert sorted(l1.store) == ["later", "live"]
+
+
 async def test_concurrent_distinct_keys_are_not_serialized(cache):
     """Distinct keys must not block each other: each key fetches independently."""
     calls = []

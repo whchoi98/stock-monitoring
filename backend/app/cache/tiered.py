@@ -1,10 +1,21 @@
 import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional, Tuple
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+class _KeyLock:
+    """A per-key lock plus the number of callers holding or waiting for it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
 
 
 class TieredCache:
@@ -21,18 +32,34 @@ class TieredCache:
         self.l1 = l1
         self.l2 = l2
         # Per-key locks so concurrent callers of the same cold key trigger only one
-        # upstream fetch. The map grows with the number of distinct keys seen and is
-        # never evicted; that is bounded by the cache key universe
-        # (symbol universe x endpoint), so it stays small at this scale.
-        self._locks: dict[str, asyncio.Lock] = {}
+        # upstream fetch. An entry lives only while a call holds or waits for that key
+        # (see `_key_lock`), so the map is bounded by the number of in-flight fetches
+        # rather than by the number of distinct keys ever seen. The distinction matters
+        # because not every key comes from a finite universe: the AI routes derive
+        # `ai:article:{sha1(url)}` from a client-supplied URL.
+        self._locks: dict[str, _KeyLock] = {}
 
-    def _lock_for(self, key: str) -> asyncio.Lock:
-        """Return the lock for a key, creating it on demand (single event loop, no race)."""
-        lock = self._locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            self._locks[key] = lock
-        return lock
+    @asynccontextmanager
+    async def _key_lock(self, key: str) -> AsyncIterator[None]:
+        """
+        Hold the lock for one key, dropping the entry once nobody is using it.
+
+        Every caller registers (`users += 1`) before awaiting the lock, so all callers
+        queued on a key share one entry and the last one to leave removes it. The counter
+        is never touched across an await, so the event loop cannot interleave two updates.
+        """
+        entry = self._locks.get(key)
+        if entry is None:
+            entry = _KeyLock()
+            self._locks[key] = entry
+        entry.users += 1
+        try:
+            async with entry.lock:
+                yield
+        finally:
+            entry.users -= 1
+            if entry.users <= 0:
+                self._locks.pop(key, None)
 
     async def get_or_fetch(
         self,
@@ -67,7 +94,7 @@ class TieredCache:
             value, as_of = l1_result
             return (value, as_of, "l1")
 
-        async with self._lock_for(key):
+        async with self._key_lock(key):
             # Double-checked: a concurrent caller may have populated L1 while we waited
             l1_result = self.l1.get(key)
             if l1_result is not None:

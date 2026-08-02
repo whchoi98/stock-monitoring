@@ -80,8 +80,8 @@ def test_unknown_symbol_is_404_and_creates_no_cache_key(client, state):
     ):
         assert client.get(path).status_code == 404, path
 
-    # 락 맵은 검증된 심볼 유니버스로 제한된다 / The lock map stays bounded by the validated universe
-    assert not [key for key in state.cache._locks if UNKNOWN_SYMBOL in key]
+    # 캐시 키는 검증된 심볼 유니버스로 제한된다 (키별 락은 조회 중에만 존재하므로 L1이 관측 지점이다)
+    # Cache keys stay bounded by the validated universe (a key lock lives only during a fetch, so L1 is the observable)
     assert not [key for key in state.cache.l1.store if UNKNOWN_SYMBOL in key]
 
 
@@ -172,4 +172,4 @@ def test_symbol_is_normalized_to_the_universe_form(client, state, services):
     assert client.get(f"/api/stocks/{US_SYMBOL}").status_code == 200
 
     assert services.calls["fetch_detail"] == 1
-    assert list(state.cache._locks) == [f"detail:{US_SYMBOL}"]
+    assert list(state.cache.l1.store) == [f"detail:{US_SYMBOL}"]

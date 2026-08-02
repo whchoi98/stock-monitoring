@@ -291,6 +291,24 @@ def test_article_without_extractable_body_is_502_and_skips_bedrock(client, bedro
     assert state.cache.l1.get(ARTICLE_KEY) is None
 
 
+def test_article_requests_retain_nothing_per_url(client, bedrock, state):
+    """
+    기사 캐시 키는 클라이언트 URL에서 나오므로 URL당 영구 잔존물이 없어야 한다.
+    Article cache keys come from client URLs, so nothing may be retained per URL.
+
+    성공은 분석 하나(TTL 만료 후 회수)만 남기고, 실패(502)는 아무것도 남기지 않는다.
+    A success leaves only its analysis (reclaimed once the TTL elapses); a 502 leaves nothing.
+    """
+    assert client.post("/api/ai/articles", json=ARTICLE_BODY).status_code == 200
+    bedrock.content = ""
+    rejected = client.post("/api/ai/articles", json={**ARTICLE_BODY, "url": "https://example.com/news/2"})
+
+    assert rejected.status_code == 502
+    # 키별 락은 조회 중에만 존재한다 (URL마다 락이 쌓이면 무한 증가) / A key lock lives only during a fetch
+    assert state.cache._locks == {}
+    assert list(state.cache.l1.store) == [ARTICLE_KEY]
+
+
 def test_article_body_is_validated(client, bedrock):
     """url 누락/미지원 language는 422 / A missing url or unsupported language is 422."""
     assert client.post("/api/ai/articles", json={"title": "t", "language": "ko"}).status_code == 422
