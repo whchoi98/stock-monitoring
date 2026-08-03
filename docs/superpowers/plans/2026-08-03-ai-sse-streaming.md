@@ -607,6 +607,122 @@ git commit -m "feat(frontend): live streaming AI panels with remark-gfm markdown
 - [ ] **Step 5:** 회귀 — `cd backend && .venv/bin/pytest -q` + `cd frontend && npx vitest run` 전체 그린. uvicorn 종료.
 - [ ] **Step 6:** 발견 문제 수정이 있었으면 커밋, 없으면 "검증 결과만 보고".
 
+### Task 6: 분석 불가 뉴스 링크는 원문 새 탭으로 (KR 종목뉴스 라이브 버그)
+
+**Files:**
+- Create: `frontend/src/lib/articleLink.ts` / Test: `frontend/src/lib/articleLink.test.ts`
+- Modify: `frontend/src/components/stock/StockNews.tsx`, `frontend/src/components/market/NewsFeed.tsx`
+- Test: 신규 `frontend/src/components/stock/StockNews.test.tsx` (또는 두 컴포넌트 공용 테스트)
+
+**배경 (라이브 재현, 2026-08-03):** KR 종목뉴스는 `_company_feed`가 Google News 검색 RSS를 쓰므로
+링크가 `news.google.com/rss/articles/<opaque>?oc=5` 래퍼다. 이 URL은 실기사가 아니라 Google JS
+셸로 302되어(브라우저 확인) 본문 추출이 빈 결과 → `POST /api/ai/articles`가 502
+`article_unavailable`. 화면은 "기사 본문을 가져올 수 없습니다"만 남아 사용자에겐 "응답 없음"으로
+보인다. US(Yahoo 직접 URL)·시장 뉴스 대부분은 정상. 이 태스크는 SSE와 무관하지만 같은 화면군의
+프론트 수정이라 이 브랜치 배포에 함께 태운다.
+
+**사용자 결정 (2026-08-03):** 분석 불가 링크는 `/articles`로 라우팅하지 않고 **원문을 새 탭으로
+열고** 짧은 안내를 보인다 (외부 의존·백엔드 변경 없음).
+
+**Interfaces:**
+- Consumes: `NewsItem`(`api/types.ts` — `link`/`title`/`language`/`source`).
+- Produces: `isAnalyzable(item: NewsItem): boolean` (원문 URL을 직접 얻을 수 있어 분석 가능한지),
+  `articleHref(item): string` (분석 화면 링크 — 기존 두 컴포넌트의 중복 함수를 여기로 통합).
+
+- [ ] **Step 1: 실패하는 테스트** — `articleLink.test.ts`:
+
+```ts
+import { describe, expect, it } from 'vitest'
+import { isAnalyzable, articleHref } from './articleLink.ts'
+import type { NewsItem } from '../api/types.ts'
+
+const item = (over: Partial<NewsItem>): NewsItem => ({
+  id: 'x', title: '제목', link: 'https://example.com/a', source: 'Yahoo',
+  published: '', language: 'en', ...over,
+})
+
+describe('isAnalyzable', () => {
+  it('직접 기사 URL은 분석 가능 / a direct article URL is analyzable', () => {
+    expect(isAnalyzable(item({ link: 'https://finance.yahoo.com/news/x.html' }))).toBe(true)
+  })
+  it('Google News 래퍼는 분석 불가 / a Google News wrapper is not analyzable', () => {
+    expect(isAnalyzable(item({ link: 'https://news.google.com/rss/articles/CBMiabc?oc=5' }))).toBe(false)
+  })
+  it('news.google.com 하위 도메인/경로 변형도 불가 / other news.google.com shapes are excluded too', () => {
+    expect(isAnalyzable(item({ link: 'https://news.google.com/articles/abc' }))).toBe(false)
+  })
+  it('잘못된 URL은 분석 불가 (throw 금지) / a malformed URL is not analyzable and does not throw', () => {
+    expect(isAnalyzable(item({ link: 'not a url' }))).toBe(false)
+  })
+})
+
+describe('articleHref', () => {
+  it('url·title·language를 쿼리로 싣는다 / carries url, title and language as query params', () => {
+    const href = articleHref(item({ link: 'https://x.com/a', title: 'T', language: 'ko' }))
+    const q = new URL(href, 'http://h').searchParams
+    expect([q.get('url'), q.get('title'), q.get('language')]).toEqual(['https://x.com/a', 'T', 'ko'])
+  })
+})
+```
+
+- [ ] **Step 2: 실패 확인** — `npx vitest run src/lib/articleLink.test.ts` → 모듈 없음 FAIL.
+
+- [ ] **Step 3: 구현** — `articleLink.ts`:
+
+```ts
+/**
+ * 뉴스 링크 유틸 — 분석 가능 판정 + 분석 화면 링크. StockNews·NewsFeed가 공유한다.
+ * News-link helpers: the analyzable test and the analysis-screen link, shared by StockNews and NewsFeed.
+ *
+ * KR 종목뉴스는 Google News 검색 RSS라 링크가 `news.google.com/...` 래퍼다 — 실기사가 아니라
+ * Google JS 셸로 리다이렉트되어 본문 추출이 불가능하다 (백엔드가 502 article_unavailable). 그래서
+ * 이런 링크는 분석 화면 대신 원문 새 탭으로 연다 (2026-08-03 라이브 버그 수정).
+ * KR per-symbol news comes from Google News search RSS, so its links are `news.google.com/...` wrappers
+ * that redirect to a Google JS shell rather than the real article — extraction cannot work (the backend
+ * returns 502 article_unavailable). Such links open the source in a new tab instead of the analysis
+ * screen (live-bug fix 2026-08-03).
+ */
+import type { NewsItem } from '../api/types.ts'
+
+/** 본문 추출이 불가능한 호스트 / Hosts whose links cannot be extracted */
+const UNANALYZABLE_HOSTS = new Set(['news.google.com'])
+
+export function isAnalyzable(item: NewsItem): boolean {
+  try {
+    return !UNANALYZABLE_HOSTS.has(new URL(item.link).hostname)
+  } catch {
+    return false   // URL 파싱 실패 = 분석 대상 아님 / an unparseable URL is not analyzable
+  }
+}
+
+export function articleHref(item: NewsItem): string {
+  const params = new URLSearchParams({ url: item.link, title: item.title, language: item.language })
+  return `/articles?${params.toString()}`
+}
+```
+
+- [ ] **Step 4: 컴포넌트 적용** — `StockNews.tsx`·`NewsFeed.tsx`의 로컬 `articleHref`를 삭제하고
+  `articleLink.ts`에서 import. 목록 항목 렌더를 분기: `isAnalyzable(item)`이면 기존 `<Link
+  to={articleHref(item)}>`, 아니면 원문 새 탭 `<a href={item.link} target="_blank"
+  rel="noreferrer">` + 같은 `.news-item` 스타일 + 분석 불가 안내 표식(예: `news-meta`에 "원문 보기"
+  추가). 시각·접근성은 기존 항목과 동일 클래스 재사용.
+
+- [ ] **Step 5: 컴포넌트 테스트** — `StockNews.test.tsx`: `useStockNews`를 모킹해 ① Google News 링크
+  항목은 `<a target="_blank" rel="noreferrer" href={원문}>`로 렌더되고 `/articles` `<Link>`가 아님
+  ② 직접 URL 항목은 기존대로 `/articles` 링크. (NewsFeed도 같은 패턴이면 한 파일에서 함께 검증하거나
+  별도 파일 — 구현자 판단, 단 두 컴포넌트의 분기가 실제로 테스트되어야 한다.)
+
+- [ ] **Step 6: 전체 프론트 테스트 + 린트 + 타입 체크** — `npx vitest run`, `npx oxlint`, `npx tsc -b` 클린.
+
+- [ ] **Step 7: 커밋**
+
+```bash
+git add frontend/src/lib/articleLink.ts frontend/src/lib/articleLink.test.ts frontend/src/components/stock/StockNews.tsx frontend/src/components/stock/StockNews.test.tsx frontend/src/components/market/NewsFeed.tsx
+git commit -m "fix(frontend): open unanalyzable (Google News) links in a new tab instead of the analysis screen"
+```
+
+---
+
 ## 완료 후 (플랜 밖, 컨트롤러 몫)
 
 최종 브랜치 리뷰 → 사용자 배포(`cdk deploy`는 이미지 재빌드 포함) → 라이브 SSE 검증(CloudFront 경유 `curl -N`으로 delta 흐름·30초 초과 스트림 생존 확인).
