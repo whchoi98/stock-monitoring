@@ -2,8 +2,11 @@
 Bedrock AI 서비스 테스트 - boto3 client를 FakeClient로 대체 (실제 bedrock-runtime 호출 없음)
 Bedrock AI service tests - boto3 client replaced by a FakeClient (no real bedrock-runtime calls).
 """
+import asyncio
 import json
 import logging
+import threading
+import time
 
 import boto3
 import pytest
@@ -49,6 +52,41 @@ class FakeClient:
         if self.error is not None:
             raise self.error
         return {"body": FakeBody(self.payload)}
+
+
+class _FakeStreamClient:
+    """converse_stream 이벤트 시퀀스를 재생하는 페이크 / A fake replaying a converse_stream event sequence."""
+
+    def __init__(self, events=None, error=None):
+        self.events = [] if events is None else events
+        self.error = error
+        self.calls = []
+
+    def converse_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return {"stream": iter(self.events)}
+
+
+def _delta(text):
+    """텍스트 델타 이벤트 / A text delta event."""
+    return {"contentBlockDelta": {"delta": {"text": text}}}
+
+
+def _stop(reason):
+    """메시지 종료 이벤트 / A message stop event."""
+    return {"messageStop": {"stopReason": reason}}
+
+
+def _prompt_of(stream_client):
+    """페이크가 받은 converse_stream 프롬프트 / The prompt the fake received via converse_stream."""
+    return stream_client.calls[0]["messages"][0]["content"][0]["text"]
+
+
+def _pump_threads():
+    """살아 있는 스트림 펌프 스레드 / Stream pump threads still alive."""
+    return [t for t in threading.enumerate() if t.name == "bedrock-stream" and t.is_alive()]
 
 
 class _FrozenCreds:
@@ -126,6 +164,17 @@ def client(monkeypatch, creds):
     fake = FakeClient()
     fake.created = _install_client(monkeypatch, fake)
     return fake
+
+
+@pytest.fixture
+def stream_client(monkeypatch, creds):
+    """converse_stream 페이크를 설치하는 팩토리 / Factory installing a converse_stream fake."""
+    def _install(events=None, error=None):
+        fake = _FakeStreamClient(events=events, error=error)
+        fake.created = _install_client(monkeypatch, fake)
+        return fake
+
+    return _install
 
 
 STOCK_ARGS = dict(
@@ -442,3 +491,198 @@ def test_bad_input_without_credentials_still_raises_unavailable(monkeypatch, no_
     # 조립 성공 → _get_client에서 Unavailable / assembly succeeds, then _get_client raises Unavailable
     with pytest.raises(BedrockUnavailableError):
         analyze_stock(**STOCK_ARGS)
+
+
+# ---------------------------------------------------------------------------
+# 스트리밍 / Streaming (converse_stream + 스레드 브리지 / thread-to-queue bridge)
+# ---------------------------------------------------------------------------
+
+async def test_stream_invoke_yields_deltas_in_order(stream_client):
+    """contentBlockDelta가 순서대로 yield된다 / Deltas come out in order."""
+    fake = stream_client([_delta("안"), _delta("녕"), _stop("end_turn")])
+
+    out = [chunk async for chunk in bedrock_ai.stream_invoke("p", 100)]
+
+    assert out == ["안", "녕"]
+    call = fake.calls[0]
+    assert call["modelId"] == config.BEDROCK_MODEL_ID
+    assert call["inferenceConfig"] == {"maxTokens": 100}
+    assert call["messages"] == [{"role": "user", "content": [{"text": "p"}]}]
+
+
+async def test_stream_invoke_uses_bedrock_runtime_in_configured_region(stream_client):
+    """스트리밍도 같은 _get_client 경로를 쓴다 / Streaming goes through the same _get_client path."""
+    fake = stream_client([_stop("end_turn")])
+
+    assert [c async for c in bedrock_ai.stream_invoke("p", 10)] == []
+
+    assert fake.created["service"] == "bedrock-runtime"
+    assert fake.created["kwargs"] == {"region_name": config.BEDROCK_REGION}
+
+
+async def test_stream_invoke_skips_empty_and_non_text_events(stream_client):
+    """빈 델타·다른 이벤트는 yield하지 않는다 / Empty deltas and other events are not yielded."""
+    fake = stream_client([
+        {"messageStart": {"role": "assistant"}},
+        _delta(""),
+        _delta("x"),
+        {"contentBlockStop": {"contentBlockIndex": 0}},
+        {"metadata": {"usage": {"outputTokens": 1}}},
+        _stop("end_turn"),
+    ])
+
+    assert [c async for c in bedrock_ai.stream_invoke("p", 10)] == ["x"]
+    assert len(fake.calls) == 1
+
+
+async def test_stream_invoke_warns_on_max_tokens_stop(stream_client, caplog):
+    """stopReason max_tokens는 절단 시그널로 경고된다 / A max_tokens stop is warned as a truncation signal."""
+    stream_client([_delta("x"), _stop("max_tokens")])
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert [c async for c in bedrock_ai.stream_invoke("p", 5)] == ["x"]
+
+    payloads = _error_payloads(caplog)
+    assert [p["event"] for p in payloads] == ["ai_stream_truncated"]
+    assert payloads[0]["stop_reason"] == "max_tokens"
+    assert payloads[0]["max_tokens"] == 5
+
+
+async def test_stream_invoke_does_not_warn_on_normal_stop(stream_client, caplog):
+    """정상 종료(end_turn)는 경고하지 않는다 / A normal end_turn stop logs nothing."""
+    stream_client([_delta("x"), _stop("end_turn")])
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert [c async for c in bedrock_ai.stream_invoke("p", 5)] == ["x"]
+
+    assert _error_payloads(caplog) == []
+
+
+async def test_stream_invoke_maps_client_errors(stream_client, caplog):
+    """스트림 도중 ClientError는 기존 타입 예외로 매핑된다 / A mid-stream ClientError maps to the typed error."""
+    stream_client(error=ClientError({"Error": {"Code": "AccessDeniedException"}}, "ConverseStream"))
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        with pytest.raises(BedrockUnavailableError):
+            _ = [c async for c in bedrock_ai.stream_invoke("p", 5)]
+
+    payloads = _error_payloads(caplog)
+    assert payloads and payloads[0]["event"] == "ai_stream_failed"
+
+
+async def test_stream_invoke_maps_other_errors_to_call_error(stream_client):
+    """그 외 실패는 BedrockCallError / Any other failure maps to BedrockCallError."""
+    stream_client(error=RuntimeError("boom"))
+
+    with pytest.raises(BedrockCallError) as excinfo:
+        _ = [c async for c in bedrock_ai.stream_invoke("p", 5)]
+
+    assert "boom" in str(excinfo.value)
+
+
+async def test_stream_invoke_error_after_partial_deltas_raises_out_of_generator(monkeypatch, creds):
+    """델타 일부 뒤 실패해도 예외는 제너레이터 밖으로 나온다 / A late failure still leaves the generator."""
+    class _BrokenStream(_FakeStreamClient):
+        def converse_stream(self, **kwargs):
+            self.calls.append(kwargs)
+
+            def _events():
+                yield _delta("a")
+                raise RuntimeError("mid-stream")
+
+            return {"stream": _events()}
+
+    _install_client(monkeypatch, _BrokenStream())
+
+    seen = []
+    with pytest.raises(BedrockCallError):
+        async for chunk in bedrock_ai.stream_invoke("p", 5):
+            seen.append(chunk)
+
+    assert seen == ["a"]
+
+
+async def test_stream_invoke_raises_unavailable_without_credentials(monkeypatch, no_creds):
+    """자격 증명 없음 → 제너레이터에서 BedrockUnavailableError / No credentials raise Unavailable."""
+    created = _install_client(monkeypatch, _FakeStreamClient([_stop("end_turn")]))
+
+    with pytest.raises(BedrockUnavailableError):
+        _ = [c async for c in bedrock_ai.stream_invoke("p", 5)]
+
+    assert created["count"] == 0
+
+
+async def test_stream_invoke_thread_ends_when_consumer_stops_early(stream_client):
+    """소비를 중단해도 펌프 스레드는 남지 않는다 / The pump thread does not linger when the consumer stops early."""
+    stream_client([_delta("a"), _delta("b"), _stop("end_turn")])
+
+    agen = bedrock_ai.stream_invoke("p", 10)
+    assert await agen.__anext__() == "a"
+    await agen.aclose()
+
+    deadline = time.monotonic() + 2.0
+    while _pump_threads() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert _pump_threads() == []
+
+
+# ---------------------------------------------------------------------------
+# 스트리밍 variant / Streaming variants — 프롬프트는 블로킹 버전과 동일해야 한다
+# The prompts must stay identical to the blocking versions
+# ---------------------------------------------------------------------------
+
+async def test_analyze_stock_stream_matches_blocking_prompt_and_token_cap(monkeypatch, creds):
+    """종목 스트리밍: 프롬프트 동일 + maxTokens 1024 / Stock stream: same prompt, 1024 maxTokens."""
+    blocking = FakeClient()
+    _install_client(monkeypatch, blocking)
+    analyze_stock(**STOCK_ARGS)
+    expected = _bodies(blocking)[0]["messages"][0]["content"]
+
+    fake = _FakeStreamClient([_delta("s"), _stop("end_turn")])
+    _install_client(monkeypatch, fake)
+
+    assert [c async for c in bedrock_ai.analyze_stock_stream(**STOCK_ARGS)] == ["s"]
+    assert _prompt_of(fake) == expected
+    assert fake.calls[0]["inferenceConfig"] == {"maxTokens": bedrock_ai.STOCK_MAX_TOKENS}
+    assert bedrock_ai.STOCK_MAX_TOKENS == 1024
+
+
+@pytest.mark.parametrize("is_korean", [True, False])
+async def test_analyze_article_stream_matches_blocking_prompt_and_token_cap(monkeypatch, creds, is_korean):
+    """기사 스트리밍: 프롬프트 동일 + maxTokens 2048 / Article stream: same prompt, 2048 maxTokens."""
+    blocking = FakeClient()
+    _install_client(monkeypatch, blocking)
+    analyze_article("제목", "본문", is_korean)
+    expected = _bodies(blocking)[0]["messages"][0]["content"]
+
+    fake = _FakeStreamClient([_delta("a"), _stop("end_turn")])
+    _install_client(monkeypatch, fake)
+
+    assert [c async for c in bedrock_ai.analyze_article_stream("제목", "본문", is_korean)] == ["a"]
+    assert _prompt_of(fake) == expected
+    assert fake.calls[0]["inferenceConfig"] == {"maxTokens": bedrock_ai.ARTICLE_MAX_TOKENS}
+    assert bedrock_ai.ARTICLE_MAX_TOKENS == 2048
+
+
+async def test_stock_stream_bad_input_raises_call_error_without_calling_model(stream_client, caplog):
+    """price=None → 조립 실패도 BedrockCallError + 모델 미호출 / Assembly failure maps typed, no invoke."""
+    fake = stream_client([_stop("end_turn")])
+
+    with caplog.at_level(logging.ERROR, logger=LOGGER_NAME):
+        with pytest.raises(BedrockCallError):
+            _ = [c async for c in bedrock_ai.analyze_stock_stream(**dict(STOCK_ARGS, price=None))]
+
+    assert fake.calls == []
+    payloads = _error_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["error_type"] == "TypeError"
+
+
+async def test_article_stream_bad_input_raises_call_error_without_calling_model(stream_client):
+    """content=None도 동일 / A None article content behaves the same."""
+    fake = stream_client([_stop("end_turn")])
+
+    with pytest.raises(BedrockCallError):
+        _ = [c async for c in bedrock_ai.analyze_article_stream("t", None, True)]
+
+    assert fake.calls == []
