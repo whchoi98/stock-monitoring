@@ -595,10 +595,10 @@ def _repeated_to_cap(unit: str) -> str:
 
 
 # 닫는 짝이 없는 태그가 반복되는 형태들 - 추출 정규식이 후보 시작 위치마다 EOF까지 훑던 입력들이다.
-# 각 항목: (id, 상한을 채운 입력, 수정 전 실측 초). 2026-08-02 측정, 262 144바이트(= 상한) 기준.
+# 각 항목: (id, 상한을 채운 입력, 수정 전 실측 초). 2026-08-02 측정, 262 144바이트(당시 상한) 기준 — 입력은 현재 상한을 채우도록 동적으로 커진다.
 # Shapes that repeat an unclosed tag - the inputs that made an extraction regex rescan to EOF per
 # candidate start. Each entry: (id, input filling the cap, seconds measured before the fix), taken
-# 2026-08-02 at 262,144 bytes (= the cap).
+# 2026-08-02 at 262,144 bytes (the cap at the time); the inputs grow dynamically to fill the current cap.
 UNCLOSED_TAG_SHAPES = [
     # `<div ...>` 후보 (전략 2). 앞에 `class="..."`를 붙이면 정규식이 일찍 실패해 느려지지 않으므로
     # 재현에는 순수 반복 형태를 써야 한다 / stage-2 body-class candidates. A leading `class="..."` makes the
@@ -970,8 +970,19 @@ async def test_fetch_article_content_stops_after_max_redirects(monkeypatch, capl
     assert any(p.get("event") == "article_too_many_redirects" for p in payloads)
 
 
-async def test_fetch_article_content_rejects_oversized_declared_length(monkeypatch, caplog):
-    """content-length가 상한을 넘으면 본문을 쓰지 않는다 / An oversized declared content-length discards the body."""
+async def test_fetch_article_content_ignores_oversized_declared_length(monkeypatch, caplog):
+    """
+    상한 초과를 선언해도 거부하지 않는다 — 스트리밍 캡이 실제 방어선이다.
+    An oversized *declared* content-length no longer rejects the fetch; the streaming cap is the guard.
+
+    2026-08-03 회귀 수정: 옛 사전 필터는 선언 크기 초과를 전면 거부해, 큰 페이지를 정직하게
+    선언하는 실제 뉴스 사이트(Yahoo ~856KB)의 기사 분석을 전멸시켰다. 같은 페이지가 chunked면
+    잘라서 진행했으므로 비일관이기도 했다. 이제 선언값은 읽지 않고 항상 캡까지 스트리밍한다.
+    Regression fix 2026-08-03: the old pre-filter hard-rejected any oversized declaration, killing
+    article analysis for real news sites that declare big pages honestly (Yahoo ~856KB) — while the
+    same page sent chunked was truncated and processed. The declaration is now ignored; the body is
+    always streamed up to the cap.
+    """
     _patch_dns(monkeypatch)
     html = "<article><p>Body that would otherwise be extracted fine.</p></article>"
     _patch_transport(monkeypatch, {
@@ -979,11 +990,56 @@ async def test_fetch_article_content_rejects_oversized_declared_length(monkeypat
     })
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        assert await news.fetch_article_content(ARTICLE_URL) == ""
+        content = await news.fetch_article_content(ARTICLE_URL)
 
+    assert content == "Body that would otherwise be extracted fine."
     payloads = _warning_payloads(caplog)
-    assert any(p.get("event") == "article_too_large"
-               and p.get("declared") == news.MAX_ARTICLE_SIZE + 1 for p in payloads)
+    assert not any(p.get("event") == "article_too_large" for p in payloads)
+
+
+async def test_fetch_article_content_extracts_a_real_world_sized_page(monkeypatch):
+    """
+    본문이 늦게 시작하는 대형 페이지에서 추출된다 / A large page whose body starts late still extracts.
+
+    실측 근거 (2026-08-03, Yahoo Finance 기사): 페이지 789-856KB, `<article>` 시작 오프셋 ~310KB.
+    옛 상한 256KB는 본문이 시작되기도 전에 끝나 — 선언 거부를 없애도 추출이 불가능했다.
+    이 테스트는 그 형태를 재현해 상한이 실세계 뉴스 페이지보다 작아지는 회귀를 막는다.
+    Measured basis (2026-08-03, a Yahoo Finance article): the page is 789-856KB and `<article>` starts
+    around offset 310KB. The old 256KB cap ended before the body began, so even without the declared-size
+    rejection nothing could be extracted. This test reproduces that shape and pins the cap above
+    real-world news pages.
+    """
+    _patch_dns(monkeypatch)
+    paragraph = "Real article body paragraph that survives on a large real-world page."
+    junk = '<script>{"data":"%s"}</script>' % ("j" * 300_000)   # 본문 앞 스크립트 덩어리 / the pre-body script blob
+    html = f"<html><head></head><body>{junk}<article><p>{paragraph}</p></article></body></html>"
+    assert len(html) > 300_000
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp(html, headers={"content-length": str(len(html))}),
+    })
+
+    assert await news.fetch_article_content(ARTICLE_URL) == paragraph
+
+
+async def test_fetch_article_content_truncates_when_declared_and_actual_exceed_cap(monkeypatch, caplog):
+    """
+    선언·실제 모두 상한 초과면 chunked와 동일하게 잘라서 진행한다.
+    When both the declared and the actual size exceed the cap, behave exactly like the chunked path:
+    truncate at the cap and extract what fits.
+    """
+    _patch_dns(monkeypatch)
+    body = _oversized_body().decode()
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: _resp(body, headers={"content-length": str(len(body))}),
+    })
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        content = await news.fetch_article_content(ARTICLE_URL)
+
+    assert content == KEPT_PARAGRAPH
+    payloads = _warning_payloads(caplog)
+    assert any(p.get("event") == "article_truncated" for p in payloads)
+    assert not any(p.get("event") == "article_too_large" for p in payloads)
 
 
 KEPT_PARAGRAPH = "Kept paragraph that sits before the size cap and is long enough."
@@ -1046,7 +1102,7 @@ async def test_fetch_article_content_stops_reading_at_the_cap(monkeypatch, caplo
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         assert await news.fetch_article_content(ARTICLE_URL) == KEPT_PARAGRAPH
 
-    # 상한(256KB)을 덮는 청크 수 + 상한을 넘긴 마지막 1개까지만 소비된다 / cap-worth of chunks, plus the one that crossed it
+    # 상한을 덮는 청크 수 + 상한을 넘긴 마지막 1개까지만 소비된다 / cap-worth of chunks, plus the one that crossed it
     expected = news.MAX_ARTICLE_SIZE // stream.chunk_size + 1
     assert stream.chunks_pulled == expected
     assert stream.chunks_pulled < stream.chunk_total // 4   # 전체의 4분의 1도 읽지 않았다 / far short of the whole body
@@ -1095,7 +1151,14 @@ async def test_fetch_article_content_survives_a_gzip_decompression_bomb(monkeypa
     assert len(bomb) < news.MAX_ARTICLE_SIZE          # 선언 크기는 상한 이내다 / the declared size is within the cap
     assert content == KEPT_PARAGRAPH
     assert "xxx" not in content
-    assert stream.chunks_pulled <= 2                  # 압축 본문도 거의 읽지 않는다 / barely any compressed body is read
+    # 압축 본문을 조기에 끊는다: 'x' 연속은 ~1000:1로 풀리므로 1KB 압축 청크 하나가 ~1MB가 되고,
+    # 압축 해제 카운터가 상한(2MB)을 넘긴 직후 읽기가 멈춘다 (전체 ~20청크 중 2-3개).
+    # 이 수는 상한에 비례한다 — 상한 값에 결합된 매직 넘버를 두지 않는다 (2026-08-03, 상한 2MB 상향 때 정정).
+    # The compressed body is cut early: an 'x' run inflates ~1000:1, so one 1KB compressed chunk becomes
+    # ~1MB and the read stops right after the decompressed counter crosses the cap (2-3 of ~20 chunks).
+    # The count scales with the cap — no magic number tied to the cap's value (corrected 2026-08-03).
+    assert stream.chunks_pulled <= 4
+    assert stream.chunks_pulled < stream.chunk_total
     assert any(p.get("event") == "article_truncated" for p in _warning_payloads(caplog))
 
 

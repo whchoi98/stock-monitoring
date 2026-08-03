@@ -15,7 +15,10 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
 - **가격 오버레이 / Price overlay**: quotes 캐시(60s)가 detail 캐시(600s)의 price/change/volume을 응답 시 덮어쓴다 — `api/stocks.py`의 `overlay_live_price`. AI 분석(`api/ai.py`)도 오버레이된 detail을 쓴다(화면과 같은 가격으로 분석).
 - **AI 레이트리밋 키**: `CloudFront-Viewer-Address` 헤더 (XFF는 위조 가능 — 사용 금지). 3회/분/IP, `SlidingWindowLimiter`(단조 시계, 프로세스 로컬 — Fargate 태스크별 적용).
 - **`services/news.py` 보안 가드 — 절대 완화 금지 / never weaken**:
-  - 클라이언트 제공 URL fetch에 SSRF 가드(사설/내부 IP 차단) + 256KB 스트리밍 캡.
+  - 클라이언트 제공 URL fetch에 SSRF 가드(사설/내부 IP 차단) + 2MB 스트리밍 캡
+    (2026-08-03 사용자 승인으로 256KB에서 상향 — 실측 Yahoo 기사 ~856KB, 본문 오프셋 ~310KB로
+    옛 값이 기사 분석을 전멸시켰음. 캡은 유한해야 하며 선언 content-length가 아니라 **실제 읽은
+    바이트**에 걸린다 — 선언값 사전 거부는 같은 회귀를 재도입하므로 금지).
   - regex 백트래킹 상한 `[^<>]{0,1000}` (O(n²) DoS 차단), RSS 파싱은 `defusedxml`만 (XXE/엔티티 확장 차단).
 - **워커는 정확히 1개** (`uvicorn app.main:app`): L1 캐시와 AI 전역 세마포어가 프로세스 단위 — 워커를 늘리면 캐시 분열 + 동시 실행 상한 붕괴.
 - `create_app(background=False)`가 기본 — 테스트는 절대 `background=True`를 쓰지 않는다 (네트워크/AWS 미접촉). L2 연결 실패는 기동을 막지 않는다(NullL2 유지, 로컬 개발).

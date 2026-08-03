@@ -92,20 +92,20 @@ BOILERPLATE_MARKERS = (
 #   1. `<`를 클래스에서 제외 -> 후보 시작 위치마다 스캔이 "다음 `<`까지"로 끝난다. `[^>]*`는 닫는
 #      `>`가 없는 입력에서 매 후보마다 EOF까지 훑어 입력 길이의 제곱이 된다.
 #   2. 길이 상한 -> 한 후보가 소비할 수 있는 문자 수 자체를 못박는다 (2중 방어).
-# 실측(262KB = MAX_ARTICLE_SIZE, 2026-08-02): `"<div "` 반복 39.4s -> 0.01s 미만,
+# 실측(262KB = 당시 상한, 2026-08-02): `"<div "` 반복 39.4s -> 0.01s 미만,
 # `"<p>"` 반복 136.1s -> 0.03s, `"<article>"` 반복 43.4s -> 0.01s 미만, 단락 안 `"<"` 반복 34.2s -> 0.01s 미만.
 # Every class that scans inside a tag is `[^<>]{0,MAX_TAG_SCAN}`. Both parts matter:
 #   1. excluding `<` ends each candidate's scan at the next `<`, whereas `[^>]*` rescans to EOF per
 #      candidate when no closing `>` exists - quadratic in the input length;
 #   2. the length bound caps what a single candidate can consume at all (defense in depth).
-# Measured at 262KB (= MAX_ARTICLE_SIZE) on 2026-08-02: repeated `"<div "` 39.4s -> under 0.01s,
+# Measured at 262KB (the cap at the time) on 2026-08-02: repeated `"<div "` 39.4s -> under 0.01s,
 # repeated `"<p>"` 136.1s -> 0.03s, repeated `"<article>"` 43.4s -> under 0.01s, repeated `"<"` inside a
 # paragraph 34.2s -> under 0.01s.
 #
 # 이 상한들이 보장하는 것: 어떤 입력이든 추출 시간이 문서 길이에 선형이라는 것이 아니라,
-# **후보 시작 위치당 작업량이 상수로 묶인다**는 것 (문서는 이미 256KB로 제한되어 있다).
+# **후보 시작 위치당 작업량이 상수로 묶인다**는 것 (문서는 이미 MAX_ARTICLE_SIZE로 제한되어 있다).
 # What the bounds guarantee: not that extraction is linear for every conceivable input, but that the
-# work per candidate start position is constant-bounded (and the document is already capped at 256KB).
+# work per candidate start position is constant-bounded (and the document is already capped at MAX_ARTICLE_SIZE).
 # ---------------------------------------------------------------------------
 
 # 태그 하나 안에서 훑을 수 있는 최대 문자 수 / Maximum characters scanned inside a single tag
@@ -148,13 +148,19 @@ _WHITESPACE_RE = re.compile(r"\s+")
 ALLOWED_SCHEMES = {"http", "https"}
 MAX_REDIRECTS = 3
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-# 본문 상한 (바이트) - 선언된 content-length와 실제로 읽는 본문에 같은 값을 적용한다.
-# 256KB면 충분하다: 프롬프트에 실리는 본문은 `bedrock_ai.ARTICLE_CONTENT_LIMIT`(6000자)까지이고
-# 단락 수도 25개로 제한되므로, 이보다 큰 HTML을 더 읽어도 분석 결과는 달라지지 않는다.
-# Body cap in bytes, applied both to the declared content-length and to the bytes actually read.
-# 256KB loses nothing: only `bedrock_ai.ARTICLE_CONTENT_LIMIT` (6000 chars) of the extracted body ever
-# reaches the prompt and at most 25 paragraphs are kept, so reading more HTML cannot change the analysis.
-MAX_ARTICLE_SIZE = 262_144
+# 본문 상한 (바이트) - 실제로 읽는 원시 HTML에 적용한다 (스트리밍 카운터가 상한에서 읽기를 끊는다).
+# 2MB인 이유 (2026-08-03 실측, 사용자 승인): 실제 뉴스 페이지는 원시 HTML이 크고 본문이 늦게 나온다 -
+# Yahoo Finance 기사가 789-856KB에 `<article>` 시작 오프셋 ~310KB였다. 옛 256KB는 본문 시작 전에
+# 끝나 기사 분석을 전멸시켰다. "추출 결과는 6000자만 프롬프트에 실린다"는 옛 논거는 추출된 본문
+# 크기 이야기라 원시 HTML 상한의 근거가 못 된다. 2MB는 여전히 유한한 DoS 상한이고, 추출 정규식은
+# 후보당 상수 작업량이라(위 참조) 2MB에서도 선형이다.
+# Body cap in bytes, applied to the raw HTML actually read (the streaming counter stops at the cap).
+# Why 2MB (measured 2026-08-03, user-approved): real news pages ship large raw HTML with a late body -
+# a Yahoo Finance article was 789-856KB with `<article>` starting around offset 310KB. The old 256KB cap
+# ended before the body began, killing article analysis outright. The old "only 6000 chars reach the
+# prompt" argument reasoned about the *extracted* body and never justified a raw-HTML cap. 2MB remains a
+# finite DoS bound, and the extraction regexes stay linear at it (constant work per candidate, above).
+MAX_ARTICLE_SIZE = 2_097_152
 # 기사 조회는 압축을 요청하지 않는다: 압축 해제 폭탄(작은 본문이 GB로 부푸는 응답)이 크기 상한을
 # 우회하지 못하게 한다. 오리진이 이를 무시해도 스트리밍 카운터가 상한에서 읽기를 끊는다.
 # Article fetches ask for no compression, so a decompression bomb (a tiny body inflating to gigabytes)
@@ -508,7 +514,7 @@ async def _is_safe_url(url: str) -> bool:
     return True
 
 
-async def _limited_text(response: httpx.Response, url: str) -> Optional[str]:
+async def _limited_text(response: httpx.Response, url: str) -> str:
     """
     크기 상한을 적용하며 본문을 스트리밍으로 읽어 문자열로 / Stream the body under the size cap and decode it.
 
@@ -519,8 +525,13 @@ async def _limited_text(response: httpx.Response, url: str) -> Optional[str]:
     declared content-length is the *compressed* size, so it passes the cap check and buffering the whole
     body would OOM the worker. Instead every chunk updates a running byte count that breaks out at the cap.
 
-    선언된 content-length는 값싼 사전 필터로 남겨 둔다 (정직한 오리진은 요청조차 아끼게 된다).
-    The declared content-length stays as a cheap pre-filter, saving the read for honest origins.
+    선언된 content-length는 **읽지 않는다** (정정 2026-08-03): 옛 사전 필터는 상한 초과 선언을 전면
+    거부해, 큰 페이지를 정직하게 선언하는 실사이트의 기사 분석을 전멸시켰다 — 같은 페이지가
+    chunked면 잘라서 진행했으니 비일관이기도 했다. 방어는 아래 스트리밍 카운터 하나로 충분하다.
+    The declared content-length is **ignored** (corrected 2026-08-03): the old pre-filter hard-rejected
+    oversized declarations, killing article analysis for real sites that declare big pages honestly —
+    while the same page sent chunked was truncated and processed. The streaming counter below is the
+    whole defense.
 
     버퍼링 상한은 "상한 + 마지막 청크 1개"다. 압축을 요청하지 않으므로(`IDENTITY_ENCODING`) 보통
     청크는 네트워크 청크 크기지만, 오리진이 identity를 무시하면 그 1개 청크가 압축 해제분만큼
@@ -530,13 +541,9 @@ async def _limited_text(response: httpx.Response, url: str) -> Optional[str]:
     trailing chunk can be as large as its decompressed expansion - bounded to a single chunk, not unbounded.
 
     Returns:
-        본문 문자열, 선언된 크기가 상한을 넘으면 None / The body text, or None when the declared size exceeds the cap.
+        상한까지의 본문 문자열 (초과분은 잘리고 `article_truncated`로 남는다).
+        The body text up to the cap; any excess is cut and logged as `article_truncated`.
     """
-    declared = response.headers.get("content-length", "")
-    if declared.isdigit() and int(declared) > MAX_ARTICLE_SIZE:
-        _warn("article_too_large", url=url, declared=int(declared))
-        return None
-
     chunks: list = []
     total = 0
     async for chunk in response.aiter_bytes():
