@@ -147,6 +147,51 @@ def test_l1_reclaims_expired_write_once_keys_on_later_writes(monkeypatch):
     assert sorted(l1.store) == ["later", "live"]
 
 
+async def test_peek_returns_an_l1_hit(cache):
+    """peek은 L1 히트를 값+asOf로 돌려준다 / peek returns an L1 hit as (value, asOf)."""
+    cache.l1.set("k", "warm", 60, "2026-08-01T00:00:00Z")
+
+    assert await cache.peek("k", 60) == ("warm", "2026-08-01T00:00:00Z")
+
+
+async def test_peek_promotes_an_l2_hit_into_l1(cache):
+    """L1 미스·L2 히트는 값을 돌려주고 L1으로 승격된다 / An L2 hit is returned and promoted into L1."""
+    await cache.l2.put("k", "from-l2", 60, "2026-08-01T00:00:00Z")
+
+    assert await cache.peek("k", 60) == ("from-l2", "2026-08-01T00:00:00Z")
+    assert cache.l1.get("k") == ("from-l2", "2026-08-01T00:00:00Z")
+
+
+async def test_peek_returns_none_when_both_tiers_miss(cache):
+    """양쪽 미스는 None (예외도 stale 폴백도 없다) / A full miss is None: no error, no stale fallback."""
+    assert await cache.peek("cold", 60) is None
+
+
+async def test_peek_never_fetches_and_leaves_no_lock(cache):
+    """
+    peek은 업스트림을 부르지 않고 락도 남기지 않는다 / peek never fetches upstream and leaves no lock.
+
+    SSE 라우트가 "히트면 final 하나"를 판단하는 프로브라서 미스가 곧 생성 트리거가 되면 안 된다 —
+    생성은 라우트의 inflight 레지스트리가 선점자 하나에게만 맡긴다.
+    It is the probe the SSE route uses to decide "a hit means one final event", so a miss must not
+    trigger generation: the route's in-flight registry hands that to a single leader.
+    """
+    assert await cache.peek("cold", 60) is None
+    assert cache.l1.store == {} and cache.l2.store == {}
+    assert cache._locks == {}
+
+    calls = []
+
+    async def fetcher():
+        calls.append(1)
+        return "fresh"
+
+    # 미스를 캐시하지 않았다는 증거: 뒤이은 get_or_fetch가 여전히 한 번 fetch한다
+    # Proof that the miss was not cached: the following get_or_fetch still fetches exactly once
+    value, _as_of, source = await cache.get_or_fetch("cold", 60, fetcher)
+    assert (value, source, calls) == ("fresh", "fetch", [1])
+
+
 async def test_concurrent_distinct_keys_are_not_serialized(cache):
     """Distinct keys must not block each other: each key fetches independently."""
     calls = []

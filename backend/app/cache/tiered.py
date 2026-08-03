@@ -135,6 +135,41 @@ class TieredCache:
                 # No fallback available, re-raise original exception
                 raise
 
+    async def peek(self, key: str, ttl: int) -> Optional[Tuple[Any, str]]:
+        """
+        Probe the cache without fetching: L1 -> L2 (promoting an L2 hit into L1), else None.
+
+        This is `get_or_fetch`'s lookup half with no fetch, no stale fallback and no key lock.
+        The SSE AI routes use it to decide "a hit means one `final` event": a miss must therefore
+        not trigger generation, and the race between concurrent missers is resolved by the route's
+        own in-flight registry (one leader streams, the others follow its future), so taking the
+        per-key lock here would only serialize probes without adding a guarantee.
+
+        `ttl` is required for the same reason `get_or_fetch` takes one: promoting an L2 hit writes
+        an L1 entry, and only the caller knows how long that entry may live (the AI routes pass
+        `config.AI_TTL`).
+
+        Args:
+            key: Cache key
+            ttl: Time to live in seconds applied to an L1 promotion
+
+        Returns:
+            Tuple of (value, asOf ISO8601 string) on a hit, None when both tiers miss.
+        """
+        l1_result = self.l1.get(key)
+        if l1_result is not None:
+            value, as_of = l1_result
+            return (value, as_of)
+
+        l2_result = await self.l2.get(key)
+        if l2_result is not None:
+            value, as_of = l2_result
+            # Populate L1 from L2 (same promotion `get_or_fetch` performs)
+            self.l1.set(key, value, ttl, as_of)
+            return (value, as_of)
+
+        return None
+
     async def put(self, key: str, value: Any, ttl: int) -> None:
         """
         Proactively write to both L1 and L2 caches.
