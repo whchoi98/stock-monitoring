@@ -36,7 +36,9 @@ function formatIndicatorValue(indicator: Indicator): string {
 function formatClock(iso: string): string | null {
   const at = Date.parse(iso)
   if (Number.isNaN(at)) return null
-  return new Date(at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false })
+  // hour12: false는 h24 사이클이 되어 00:xx가 24:xx로 렌더된다 (정정 2026-08-03, Task 1 리뷰에서 실증)
+  // hour12: false resolves to the h24 cycle, rendering 00:xx as 24:xx (corrected 2026-08-03, proven in the Task 1 review)
+  return new Date(at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
 }
 
 function TickerItems({ indicators }: Pick<TickerBarProps, 'indicators'>) {
