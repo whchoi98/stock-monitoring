@@ -1080,6 +1080,28 @@ async def test_fetch_article_content_ignores_a_hostile_charset(monkeypatch, capl
                for p in _warning_payloads(caplog))
 
 
+async def test_fetch_article_content_decodes_common_legacy_charsets(monkeypatch):
+    """
+    실사용 레거시 charset은 화이트리스트로 정확히 디코드된다 / Common legacy charsets decode correctly via the whitelist.
+
+    utf-8 폴백은 안전하지만 windows-1252의 curly quote 같은 바이트를 U+FFFD로 깨뜨린다 — 화이트리스트에
+    있는 charset은 원문 그대로 디코드되어야 한다 (전부 C 구현, 2MB에서 ms급 실측 — 2026-08-03 리뷰 권고).
+    The utf-8 fallback is safe but mangles bytes like windows-1252 curly quotes into U+FFFD; whitelisted
+    charsets must decode faithfully (all C-implemented, measured at ms for 2MB — review recommendation).
+    """
+    _patch_dns(monkeypatch)
+    paragraph = "It’s a body with a curly quote that must survive decoding intact."
+    html = f"<article><p>{paragraph}</p></article>"
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: httpx.Response(
+            200, content=html.encode("windows-1252"),
+            headers={"content-type": "text/html; charset=windows-1252"},
+        ),
+    })
+
+    assert await news.fetch_article_content(ARTICLE_URL) == paragraph
+
+
 class _TrickleStream(httpx.AsyncByteStream):
     """청크 사이에 지연을 두고 '한 방울씩' 흘리는 스트림 / A stream that dribbles chunks with a delay between them."""
 

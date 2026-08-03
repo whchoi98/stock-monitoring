@@ -198,6 +198,24 @@ def get_semaphore(request: Request) -> asyncio.Semaphore:
     return semaphore
 
 
+def get_fetch_semaphore(request: Request) -> asyncio.Semaphore:
+    """
+    기사 본문 fetch 전용 세마포어 (첫 요청에서 생성) / The article-fetch semaphore, created on first use.
+
+    Bedrock 세마포어와 **분리**되어 있다 (2026-08-03 보안 리뷰): 하나를 같이 쓰면 느린 fetch가
+    Bedrock 예산을 잠식해 IP 2개로 AI 기능 전체가 대기열에 갇힌다. 늦은 생성 이유는
+    `get_semaphore`와 같다 (asyncio 프리미티브는 실행 중인 루프에서 만든다).
+    Kept **separate** from the Bedrock semaphore (security review 2026-08-03): shared, slow fetches
+    would starve the Bedrock budget and two IPs could queue-lock every AI feature. Created lazily for
+    the same reason as `get_semaphore` (asyncio primitives are built on the running loop).
+    """
+    semaphore = getattr(request.app.state, "ai_fetch_semaphore", None)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(config.AI_FETCH_CONCURRENCY)
+        request.app.state.ai_fetch_semaphore = semaphore
+    return semaphore
+
+
 def rate_limited(request: Request) -> Optional[JSONResponse]:
     """
     한도 초과면 429 응답, 통과면 None / A 429 response when over the limit, None when allowed.
@@ -392,18 +410,21 @@ async def post_article_analysis(
     if limited is not None:
         return limited
     semaphore = get_semaphore(request)
+    fetch_semaphore = get_fetch_semaphore(request)
 
     async def build() -> dict:
-        # fetch도 전역 세마포어 안에서 돈다 (2026-08-03 보안 리뷰 F2): 기사 캡 상향(2MB) 후 fetch
-        # 한 건이 수 MB 버퍼를 잡으므로, Bedrock만 묶던 상한을 fetch까지 확장해 IP를 바꿔 도는
-        # 동시 fetch 버퍼 누적을 전역 AI_GLOBAL_CONCURRENCY개로 묶는다. Bedrock 호출과는 별개의
-        # 임계 구역이라 fetch와 분석이 서로를 직렬화하지는 않는다.
-        # The fetch runs inside the global semaphore too (security review F2, 2026-08-03): after the
-        # 2MB cap raise one fetch holds multi-MB buffers, so the cap that bounded only Bedrock now also
-        # bounds fetches — rotating IPs can no longer stack unbounded concurrent fetch buffers. It is a
-        # separate critical section from the Bedrock call, so fetches and analyses don't serialize each
-        # other.
-        async with semaphore:
+        # fetch는 **전용** 세마포어 안에서 돈다 (2026-08-03 보안 리뷰 F2 + 재검증 breakage 1):
+        # 캡 상향(2MB) 후 fetch 한 건이 수 MB 버퍼를 잡으므로 동시 fetch 버퍼 누적을
+        # AI_FETCH_CONCURRENCY개로 묶는다. Bedrock 세마포어와 분리한 이유: 하나를 같이 쓰면 느린
+        # fetch(최대 20s 점유)가 Bedrock 예산을 잠식해 IP 2개로 AI 기능 전체가 대기열에 갇힌다.
+        # 이 세마포어는 동시 fetch 버퍼만 묶는다 — Bedrock 호출량은 `invoke_bedrock`의 세마포어가 묶는다.
+        # The fetch runs inside its **own** semaphore (security review F2 + re-review breakage 1,
+        # 2026-08-03): after the 2MB cap raise one fetch holds multi-MB buffers, so concurrent fetch
+        # buffers are capped at AI_FETCH_CONCURRENCY. It is separate from the Bedrock semaphore because
+        # sharing one lets slow fetches (holding up to 20s) starve the Bedrock budget — two IPs could
+        # queue-lock every AI feature. This semaphore bounds concurrent fetch buffers only; Bedrock
+        # volume is bounded by `invoke_bedrock`'s semaphore.
+        async with fetch_semaphore:
             content = await news.fetch_article_content(payload.url)
         if not content:
             # 본문이 없으면 분석은 무의미하다: Bedrock을 부르지도, 실패를 캐시하지도 않는다

@@ -474,7 +474,50 @@ async def test_article_fetch_is_capped_by_the_global_semaphore(state, bedrock):
         ])
 
     assert [response.status_code for response in responses] == [200] * total
-    assert 1 <= bedrock.max_fetch_in_flight <= config.AI_GLOBAL_CONCURRENCY
+    assert 1 <= bedrock.max_fetch_in_flight <= config.AI_FETCH_CONCURRENCY
+
+
+async def test_slow_article_fetches_do_not_starve_stock_analysis(state, services, bedrock):
+    """
+    느린 기사 fetch가 종목 분석의 Bedrock 예산을 잠식하지 않는다 / Slow article fetches never eat the stock-analysis budget.
+
+    2026-08-03 보안 리뷰 재검증 breakage 1: fetch와 Bedrock이 같은 세마포어를 쓰면, trickle 오리진
+    URL 2건(IP 2개 × 3회/분 × ~20s 점유)만으로 모든 사용자의 종목·기사 분석이 영구 대기한다.
+    fetch는 전용 세마포어(AI_FETCH_CONCURRENCY)로 분리되어야 한다.
+    Security re-review breakage 1 (2026-08-03): with fetch and Bedrock sharing one semaphore, two
+    trickle-origin URLs (2 IPs × 3/min × ~20s hold) starve every user's stock and article analysis.
+    The fetch must sit under its own semaphore (AI_FETCH_CONCURRENCY).
+    """
+    bedrock.fetch_delay = 0.5
+    app = create_app(state)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        # 느린 fetch 2건으로 fetch 세마포어를 가득 채운다 / Fill the fetch semaphore with two slow fetches
+        article_tasks = [
+            asyncio.create_task(async_client.post(
+                "/api/ai/articles",
+                json={"url": f"https://example.com/slow/{index}", "title": "t", "language": "en"},
+                headers={"X-Forwarded-For": f"10.4.4.{index}"},
+            ))
+            for index in range(config.AI_FETCH_CONCURRENCY)
+        ]
+        await asyncio.sleep(0.05)   # fetch들이 permit을 잡을 시간 / let the fetches acquire their permits
+        assert bedrock.fetch_in_flight == config.AI_FETCH_CONCURRENCY
+
+        started = time.perf_counter()
+        stock_response = await async_client.post(
+            "/api/ai/stocks/AAPL", headers={"X-Forwarded-For": "10.4.5.1"},
+        )
+        stock_elapsed = time.perf_counter() - started
+
+        article_responses = await asyncio.gather(*article_tasks)
+
+    assert stock_response.status_code == 200
+    # fetch가 0.5s씩 점유 중이어도 종목 분석은 그 뒤에 줄 서지 않는다 (여유를 둔 0.4s 상한)
+    # Even with fetches holding 0.5s each, the stock analysis never queues behind them (generous 0.4s bound)
+    assert stock_elapsed < 0.4, f"stock analysis waited {stock_elapsed:.2f}s behind article fetches"
+    assert [response.status_code for response in article_responses] == [200] * config.AI_FETCH_CONCURRENCY
 
 
 async def test_concurrent_requests_for_one_symbol_share_a_single_bedrock_call(state, services, bedrock):

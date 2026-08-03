@@ -274,3 +274,11 @@ BEDROCK_REGION = os.environ.get("BEDROCK_REGION", "ap-northeast-2")
 # AI rate limiting 설정 / AI rate limiting settings
 AI_RATE_PER_MIN = 3           # IP당 분당 요청 수 / Requests per minute per IP
 AI_GLOBAL_CONCURRENCY = 2     # 전역 동시 요청 수 / Global concurrent requests
+# 기사 본문 fetch 전용 동시 실행 상한 — Bedrock 세마포어와 분리한다 (2026-08-03 보안 리뷰):
+# 같은 세마포어를 쓰면 느린 fetch(최대 FETCH_TOTAL_DEADLINE=20s 점유) 2건이 Bedrock 예산을
+# 잠식해 IP 2개로 AI 기능 전체가 대기열에 갇힌다. 분리하면 fetch 폭주는 fetch만 늦춘다.
+# Concurrency cap dedicated to article-body fetches, separate from the Bedrock semaphore
+# (security review 2026-08-03): sharing one semaphore lets two slow fetches (holding up to
+# FETCH_TOTAL_DEADLINE=20s each) starve the Bedrock budget — two IPs would queue-lock all AI
+# features. Separated, a fetch flood slows only fetches.
+AI_FETCH_CONCURRENCY = 2

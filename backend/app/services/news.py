@@ -166,7 +166,12 @@ FETCH_TOTAL_DEADLINE = 20
 # other or missing charset falls back to utf-8 with errors="replace".
 SAFE_CHARSETS = {
     "utf-8", "utf8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
-    "latin-1", "latin1", "iso-8859-1", "ascii", "us-ascii", "cp949", "euc-kr", "ms949",
+    "latin-1", "latin1", "iso-8859-1", "iso-8859-15", "ascii", "us-ascii",
+    "cp949", "euc-kr", "ms949",
+    # 실사용 레거시 인코딩 (전부 C 구현, 2MB에서 0.79-7.19ms 실측 — 2026-08-03 리뷰 권고)
+    # Common legacy encodings (all C-implemented, measured 0.79-7.19ms at 2MB — review recommendation)
+    "windows-1252", "cp1252", "shift_jis", "shift-jis", "sjis",
+    "euc-jp", "gbk", "gb2312", "big5",
 }
 # 본문 상한 (바이트) - 실제로 읽는 원시 HTML에 적용한다 (스트리밍 카운터가 상한에서 읽기를 끊는다).
 # 2MB인 이유 (2026-08-03 실측, 사용자 승인): 실제 뉴스 페이지는 원시 HTML이 크고 본문이 늦게 나온다 -
