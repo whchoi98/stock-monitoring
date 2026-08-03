@@ -19,6 +19,11 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
     (2026-08-03 사용자 승인으로 256KB에서 상향 — 실측 Yahoo 기사 ~856KB, 본문 오프셋 ~310KB로
     옛 값이 기사 분석을 전멸시켰음. 캡은 유한해야 하며 선언 content-length가 아니라 **실제 읽은
     바이트**에 걸린다 — 선언값 사전 거부는 같은 회귀를 재도입하므로 금지).
+  - 캡 상향과 함께 들어온 가드 3종 (2026-08-03 적대적 보안 리뷰): **charset 화이트리스트**
+    (`SAFE_CHARSETS` — 오리진 charset을 코덱 레지스트리에 그대로 넘기면 punycode 같은 순수 파이썬
+    O(n²) 코덱으로 이벤트 루프가 분 단위 정지), **fetch 총 데드라인**(`FETCH_TOTAL_DEADLINE` —
+    httpx read당 타임아웃만으로는 trickle이 버퍼 무기한 점유), **fetch를 전역 AI 세마포어 안에서**
+    (`api/ai.py` — 동시 fetch 버퍼 누적 상한).
   - regex 백트래킹 상한 `[^<>]{0,1000}` (O(n²) DoS 차단), RSS 파싱은 `defusedxml`만 (XXE/엔티티 확장 차단).
 - **워커는 정확히 1개** (`uvicorn app.main:app`): L1 캐시와 AI 전역 세마포어가 프로세스 단위 — 워커를 늘리면 캐시 분열 + 동시 실행 상한 붕괴.
 - `create_app(background=False)`가 기본 — 테스트는 절대 `background=True`를 쓰지 않는다 (네트워크/AWS 미접촉). L2 연결 실패는 기동을 막지 않는다(NullL2 유지, 로컬 개발).

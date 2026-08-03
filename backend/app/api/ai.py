@@ -394,7 +394,17 @@ async def post_article_analysis(
     semaphore = get_semaphore(request)
 
     async def build() -> dict:
-        content = await news.fetch_article_content(payload.url)
+        # fetch도 전역 세마포어 안에서 돈다 (2026-08-03 보안 리뷰 F2): 기사 캡 상향(2MB) 후 fetch
+        # 한 건이 수 MB 버퍼를 잡으므로, Bedrock만 묶던 상한을 fetch까지 확장해 IP를 바꿔 도는
+        # 동시 fetch 버퍼 누적을 전역 AI_GLOBAL_CONCURRENCY개로 묶는다. Bedrock 호출과는 별개의
+        # 임계 구역이라 fetch와 분석이 서로를 직렬화하지는 않는다.
+        # The fetch runs inside the global semaphore too (security review F2, 2026-08-03): after the
+        # 2MB cap raise one fetch holds multi-MB buffers, so the cap that bounded only Bedrock now also
+        # bounds fetches — rotating IPs can no longer stack unbounded concurrent fetch buffers. It is a
+        # separate critical section from the Bedrock call, so fetches and analyses don't serialize each
+        # other.
+        async with semaphore:
+            content = await news.fetch_article_content(payload.url)
         if not content:
             # 본문이 없으면 분석은 무의미하다: Bedrock을 부르지도, 실패를 캐시하지도 않는다
             # Without a body there is nothing to analyze: no Bedrock call, and no cached failure

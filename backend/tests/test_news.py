@@ -1011,9 +1011,13 @@ async def test_fetch_article_content_extracts_a_real_world_sized_page(monkeypatc
     """
     _patch_dns(monkeypatch)
     paragraph = "Real article body paragraph that survives on a large real-world page."
-    junk = '<script>{"data":"%s"}</script>' % ("j" * 300_000)   # 본문 앞 스크립트 덩어리 / the pre-body script blob
+    # 실측 페이지(789-856KB)의 형태를 그대로 고정한다: 본문 앞 ~700KB 스크립트 덩어리.
+    # 캡을 실측 페이지 아래로 내리는 회귀는 이 테스트가 잡는다 (2026-08-03 보안 리뷰 F5).
+    # Pins the measured page's shape: ~700KB of pre-body script. Lowering the cap below real measured
+    # pages is what this test catches (security review F5, 2026-08-03).
+    junk = '<script>{"data":"%s"}</script>' % ("j" * 700_000)
     html = f"<html><head></head><body>{junk}<article><p>{paragraph}</p></article></body></html>"
-    assert len(html) > 300_000
+    assert len(html) > 700_000
     _patch_transport(monkeypatch, {
         ARTICLE_URL: _resp(html, headers={"content-length": str(len(html))}),
     })
@@ -1040,6 +1044,81 @@ async def test_fetch_article_content_truncates_when_declared_and_actual_exceed_c
     payloads = _warning_payloads(caplog)
     assert any(p.get("event") == "article_truncated" for p in payloads)
     assert not any(p.get("event") == "article_too_large" for p in payloads)
+
+
+async def test_fetch_article_content_ignores_a_hostile_charset(monkeypatch, caplog):
+    """
+    오리진이 준 charset을 코덱 레지스트리에 그대로 넘기지 않는다 / The origin's charset never reaches the codec registry raw.
+
+    2026-08-03 보안 리뷰 F1: `charset=punycode`는 순수 파이썬 O(n²) 디코더를 고르게 해, 이벤트 루프
+    위의 단일 decode 호출이 분 단위로 멈춘다 (실측: 256KB 2.3s, 2MB ~140s — 헬스체크 5s 임계 초과로
+    태스크 교체까지 간다). 화이트리스트(C 구현 코덱) 밖의 charset은 utf-8로 폴백하고 경고를 남긴다.
+    Security review F1 (2026-08-03): `charset=punycode` selects a pure-Python O(n²) decoder, stalling a
+    single on-loop decode call for minutes (measured 2.3s at 256KB, ~140s at 2MB — past the 5s health
+    check threshold, up to task replacement). A charset outside the C-codec whitelist falls back to
+    utf-8 with a warning.
+    """
+    _patch_dns(monkeypatch)
+    paragraph = "Body that must decode as utf-8 despite the hostile charset header."
+    filler = "x" * 262_144   # 구 캡 크기에서도 punycode는 ~2.3s — 1초 상한이 회귀를 명확히 잡는다
+    html = f"<article><p>{paragraph}</p></article><!--{filler}-->"
+    _patch_transport(monkeypatch, {
+        ARTICLE_URL: httpx.Response(
+            200, content=html.encode(),
+            headers={"content-type": "text/html; charset=punycode"},
+        ),
+    })
+
+    started = time.perf_counter()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        content = await news.fetch_article_content(ARTICLE_URL)
+    elapsed = time.perf_counter() - started
+
+    assert content == paragraph
+    assert elapsed < 1.0, f"decode took {elapsed:.1f}s - a hostile charset reached the codec registry"
+    assert any(p.get("event") == "article_charset_ignored" and p.get("charset") == "punycode"
+               for p in _warning_payloads(caplog))
+
+
+class _TrickleStream(httpx.AsyncByteStream):
+    """청크 사이에 지연을 두고 '한 방울씩' 흘리는 스트림 / A stream that dribbles chunks with a delay between them."""
+
+    def __init__(self, chunk: bytes, chunks: int, delay: float) -> None:
+        self.chunk = chunk
+        self.chunks = chunks
+        self.delay = delay
+
+    async def __aiter__(self):
+        import asyncio as _asyncio
+        for _ in range(self.chunks):
+            await _asyncio.sleep(self.delay)
+            yield self.chunk
+
+
+async def test_fetch_article_content_enforces_a_total_deadline(monkeypatch, caplog):
+    """
+    per-read 타임아웃만으로는 trickle을 못 막는다 — 총 데드라인이 fetch 전체를 묶는다.
+    A per-read timeout cannot stop a trickle; a total deadline bounds the whole fetch.
+
+    2026-08-03 보안 리뷰 F2: httpx `timeout`은 read당 비활동 타임아웃이라, 캡 직전까지 빠르게 보낸 뒤
+    몇 초에 한 바이트씩 흘리는 오리진이 수 MB 버퍼를 사실상 무기한 점유할 수 있었다.
+    Security review F2 (2026-08-03): httpx's `timeout` is a per-read inactivity timeout, so an origin
+    that sends fast up to just under the cap and then dribbles a byte every few seconds could hold
+    multi-MB buffers essentially forever.
+    """
+    _patch_dns(monkeypatch)
+    monkeypatch.setattr(news, "FETCH_TOTAL_DEADLINE", 0.2, raising=False)
+    stream = _TrickleStream(chunk=b"<p>chunk</p>", chunks=50, delay=0.05)   # 다 읽으면 2.5s / 2.5s if fully read
+    _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream)})
+
+    started = time.perf_counter()
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        content = await news.fetch_article_content(ARTICLE_URL)
+    elapsed = time.perf_counter() - started
+
+    assert content == ""
+    assert elapsed < 1.0, f"fetch ran {elapsed:.1f}s - the total deadline did not bind"
+    assert any(p.get("event") == "article_fetch_timeout" for p in _warning_payloads(caplog))
 
 
 KEPT_PARAGRAPH = "Kept paragraph that sits before the size cap and is long enough."

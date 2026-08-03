@@ -148,6 +148,26 @@ _WHITESPACE_RE = re.compile(r"\s+")
 ALLOWED_SCHEMES = {"http", "https"}
 MAX_REDIRECTS = 3
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# fetch 전체(리다이렉트 포함)의 총 데드라인 (초). httpx `timeout`은 read당 비활동 타임아웃이라,
+# 캡 직전까지 빠르게 보낸 뒤 몇 초에 한 바이트씩 흘리는 오리진(trickle)이 수 MB 버퍼를 사실상
+# 무기한 점유할 수 있다 — 총 데드라인이 그 채널을 닫는다 (2026-08-03 보안 리뷰 F2).
+# Total deadline (seconds) for the whole fetch including redirects. httpx's `timeout` is a per-read
+# inactivity timeout, so a trickling origin (fast up to just under the cap, then a byte every few
+# seconds) could hold multi-MB buffers essentially forever — the total deadline closes that channel
+# (security review F2, 2026-08-03).
+FETCH_TOTAL_DEADLINE = 20
+# 디코드에 허용하는 charset 화이트리스트 — 오리진이 준 charset을 코덱 레지스트리에 그대로 넘기면
+# `punycode` 같은 순수 파이썬 O(n²) 코덱이 이벤트 루프 위의 decode 한 번을 분 단위로 만든다
+# (실측: 256KB 2.3s, 2MB ~140s — 2026-08-03 보안 리뷰 F1). 아래는 전부 C 구현이라 2MB에서도 ms다.
+# 목록 밖(또는 미선언) charset은 utf-8 + errors="replace"로 폴백한다.
+# Charset whitelist for decoding — passing the origin's charset straight to the codec registry lets a
+# pure-Python O(n²) codec like `punycode` turn one on-loop decode into minutes (measured 2.3s at 256KB,
+# ~140s at 2MB; security review F1, 2026-08-03). Everything below is C-implemented (ms at 2MB); any
+# other or missing charset falls back to utf-8 with errors="replace".
+SAFE_CHARSETS = {
+    "utf-8", "utf8", "utf-8-sig", "utf-16", "utf-16-le", "utf-16-be",
+    "latin-1", "latin1", "iso-8859-1", "ascii", "us-ascii", "cp949", "euc-kr", "ms949",
+}
 # 본문 상한 (바이트) - 실제로 읽는 원시 HTML에 적용한다 (스트리밍 카운터가 상한에서 읽기를 끊는다).
 # 2MB인 이유 (2026-08-03 실측, 사용자 승인): 실제 뉴스 페이지는 원시 HTML이 크고 본문이 늦게 나온다 -
 # Yahoo Finance 기사가 789-856KB에 `<article>` 시작 오프셋 ~310KB였다. 옛 256KB는 본문 시작 전에
@@ -554,9 +574,15 @@ async def _limited_text(response: httpx.Response, url: str) -> str:
             break
 
     body = b"".join(chunks)[:MAX_ARTICLE_SIZE]
+    # charset은 화이트리스트를 거친다 (위 `SAFE_CHARSETS` 참조 — 적대적 charset의 O(n²) 코덱 차단)
+    # The charset goes through the whitelist (`SAFE_CHARSETS` above — blocks hostile O(n²) codecs)
+    charset = (response.charset_encoding or "utf-8").lower()
+    if charset not in SAFE_CHARSETS:
+        _warn("article_charset_ignored", url=url, charset=charset)
+        charset = "utf-8"
     # 상한에서 자르면 멀티바이트 문자가 쪼개질 수 있다 -> 대체 문자로 흡수한다 (본문은 어차피 잘렸다)
     # Cutting at the cap can split a multi-byte character; replacement absorbs it (the body is cut anyway)
-    return body.decode(response.charset_encoding or "utf-8", errors="replace")
+    return body.decode(charset, errors="replace")
 
 
 async def _fetch_hop(client: httpx.AsyncClient, url: str) -> tuple:
@@ -587,13 +613,25 @@ async def _fetch_hop(client: httpx.AsyncClient, url: str) -> tuple:
 
 async def _fetch_html(url: str) -> Optional[str]:
     """
-    기사 HTML 조회 - 가드 통과 후 리다이렉트를 직접 따라간다 / Fetch article HTML, following redirects manually behind the guard.
+    기사 HTML 조회 - 총 데드라인 안에서 리다이렉트를 직접 따라간다 / Fetch article HTML under a total deadline, following redirects manually.
 
     URL이 클라이언트에서 오므로 매 홉마다 `_is_safe_url`을 다시 실행한다 (리다이렉트로 내부망을
-    훑는 것을 막는다). 실패·거부는 모두 경고 + None.
+    훑는 것을 막는다). 전체는 `FETCH_TOTAL_DEADLINE`으로 묶는다 — httpx의 read당 타임아웃만으로는
+    trickle 오리진이 버퍼를 무기한 잡을 수 있다. 실패·거부·초과는 모두 경고 + None.
     The URL is client-supplied, so `_is_safe_url` re-runs on every hop, which stops redirect chains
-    from probing the internal network. Failures and rejections warn and return None.
+    from probing the internal network. The whole fetch sits under `FETCH_TOTAL_DEADLINE`: httpx's
+    per-read timeout alone lets a trickling origin hold buffers indefinitely. Failures, rejections
+    and the deadline all warn and return None.
     """
+    try:
+        return await asyncio.wait_for(_fetch_html_hops(url), timeout=FETCH_TOTAL_DEADLINE)
+    except asyncio.TimeoutError:
+        _warn("article_fetch_timeout", url=url, deadline_seconds=FETCH_TOTAL_DEADLINE)
+        return None
+
+
+async def _fetch_html_hops(url: str) -> Optional[str]:
+    """`_fetch_html`의 홉 루프 본체 (데드라인 래퍼와 분리) / The hop loop of `_fetch_html`, split from the deadline wrapper."""
     target = url
     async with _client(follow_redirects=False) as client:
         for _ in range(MAX_REDIRECTS + 1):

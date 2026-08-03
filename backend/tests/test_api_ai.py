@@ -59,10 +59,13 @@ class FakeBedrock:
         self.error: Exception = None  # type: ignore[assignment]
         self.content: str = ARTICLE_CONTENT
         self.delay: float = 0.0
+        self.fetch_delay: float = 0.0
         # 동시 실행 관측용 / For observing concurrent execution
         self._lock = threading.Lock()
         self.in_flight = 0
         self.max_in_flight = 0
+        self.fetch_in_flight = 0
+        self.max_fetch_in_flight = 0
 
     def _enter(self) -> None:
         with self._lock:
@@ -93,7 +96,18 @@ class FakeBedrock:
 
     async def fetch_article_content(self, url: str) -> str:
         self.fetched_urls.append(url)
-        return self.content
+        # fetch 동시 실행 관측 (2026-08-03 보안 리뷰 F2 — fetch도 전역 세마포어 안에서 돌아야 한다)
+        # Observes concurrent fetches (security review F2: fetches must run inside the global semaphore)
+        with self._lock:
+            self.fetch_in_flight += 1
+            self.max_fetch_in_flight = max(self.max_fetch_in_flight, self.fetch_in_flight)
+        try:
+            if self.fetch_delay:
+                await asyncio.sleep(self.fetch_delay)
+            return self.content
+        finally:
+            with self._lock:
+                self.fetch_in_flight -= 1
 
 
 @pytest.fixture
@@ -430,6 +444,37 @@ async def test_global_concurrency_caps_parallel_bedrock_calls(state, services, b
     assert [response.status_code for response in responses] == [200] * len(symbols)
     assert len(bedrock.stock_calls) == len(symbols)
     assert 1 <= bedrock.max_in_flight <= config.AI_GLOBAL_CONCURRENCY
+
+
+async def test_article_fetch_is_capped_by_the_global_semaphore(state, bedrock):
+    """
+    기사 본문 fetch도 전역 동시 실행 상한 안에서 돈다 / Article fetches run inside the global concurrency cap.
+
+    2026-08-03 보안 리뷰 F2: 기사 캡 상향(2MB) 후 fetch 한 건이 수 MB 버퍼를 잡는다. 세마포어가
+    Bedrock 호출만 묶으면, IP를 바꿔 도는 공격자가 동시 fetch 버퍼를 상한 없이 쌓을 수 있다
+    (레이트리밋은 IP별·in-flight 미계수). 그래서 fetch도 같은 전역 세마포어 안으로 들어간다.
+    Security review F2 (2026-08-03): after the 2MB cap raise one fetch holds multi-MB buffers. With the
+    semaphore bounding only Bedrock, an attacker rotating IPs could stack unbounded concurrent fetch
+    buffers (the rate limit is per-IP and counts requests, not in-flight work) — so the fetch now runs
+    inside the same global semaphore.
+    """
+    bedrock.fetch_delay = 0.05
+    total = config.AI_GLOBAL_CONCURRENCY + 2
+    app = create_app(state)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        responses = await asyncio.gather(*[
+            async_client.post(
+                "/api/ai/articles",
+                json={"url": f"https://example.com/a/{index}", "title": "t", "language": "en"},
+                headers={"X-Forwarded-For": f"10.3.3.{index}"},
+            )
+            for index in range(total)
+        ])
+
+    assert [response.status_code for response in responses] == [200] * total
+    assert 1 <= bedrock.max_fetch_in_flight <= config.AI_GLOBAL_CONCURRENCY
 
 
 async def test_concurrent_requests_for_one_symbol_share_a_single_bedrock_call(state, services, bedrock):
