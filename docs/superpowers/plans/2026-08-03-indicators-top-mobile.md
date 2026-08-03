@@ -32,7 +32,7 @@
 - Test: `frontend/src/components/common/TickerBar.test.tsx`
 
 **Interfaces:**
-- Consumes: `Overview.asOf: string` (ISO, `frontend/src/api/types.ts:28`), `useOverview()`의 `data?.asOf`.
+- Consumes: envelope `asOf: string` (ISO, `frontend/src/api/types.ts:28`) — `useOverview()`가 `data`의 **형제**로 언랩한다 (`const { data, asOf } = useOverview()`, 정정 2026-08-03).
 - Produces: `TickerBarProps`에 `asOf?: string` 추가 (Task 2의 App 재배치에서 그대로 사용). DOM: `.ticker-bar > .ticker-viewport > .ticker-track` + `.ticker-bar > .ticker-clock`(조건부).
 
 - [ ] **Step 1: 실패하는 테스트 작성** — `TickerBar.test.tsx`의 `describe` 안에 추가:
@@ -146,8 +146,11 @@ reduced-motion 블록(1130행 부근)의 `.ticker-bar { overflow-x: auto; }`를 
 - [ ] **Step 5: App에서 prop 연결** — `App.tsx:46`:
 
 ```tsx
-<TickerBar indicators={data?.indicators ?? []} asOf={data?.asOf} />
+<TickerBar indicators={data?.indicators ?? []} asOf={asOf} />
 ```
+
+(정정 2026-08-03: `const { data, asOf } = useOverview()` 선행 — `asOf`는 envelope 필드로 `data`의 형제다.
+원문 `asOf={data?.asOf}`는 TS2339.)
 
 - [ ] **Step 6: 전체 테스트 통과 확인**
 
