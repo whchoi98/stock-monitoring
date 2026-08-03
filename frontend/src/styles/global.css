@@ -67,13 +67,13 @@ a {
 
 /*
  * 상단 sticky 블록을 비켜 가야 하는 요소들의 오프셋 — 매직 넘버를 흩뿌리지 않도록 한 곳에서 정한다.
- * 근거(실측): 블록 ≈88px(헤더 ≈48 + 티커 ≈40)에, 예전 76px 오프셋이 헤더 ≈48px 위에 두었던
- * 숨 쉴 여유 ≈28px을 더한 값. `.app-top`만 z-index를 가지므로 오프셋이 얕으면 상대가 티커 밑으로 파고든다.
- * 정확한 픽셀 값은 Task 3 브라우저 패스에서 눈으로 확인해 미세 조정한다.
+ * 근거(브라우저 실측, 이 변수를 쓰는 곳은 모두 901px 이상이다): 블록 92px = 헤더 56px(여백 12+12 +
+ * 토글 31 + 경계선 1) + 티커 36px. 여기에 숨 쉴 여유 24px을 더한 값이 116px이다.
+ * `.app-top`만 z-index를 가지므로 오프셋이 얕으면 상대가 티커 밑으로 파고든다.
  * The offset for anything that must clear the top sticky block, defined once so the number is not scattered.
- * Measured basis: the block is ≈88px (a ≈48px nav plus a ≈40px ticker), plus the ≈28px of breathing room the
- * old 76px offset gave over the ≈48px header. Only `.app-top` carries a z-index, so too shallow an offset
- * tucks its neighbour under the ticker. The exact pixel value gets eyeballed and tuned in Task 3's browser pass.
+ * Measured in the browser (every user of this variable is above 901px): the block is 92px — a 56px nav (12+12
+ * padding, a 31px toggle, a 1px rule) plus a 36px ticker — and 116px is that plus 24px of breathing room.
+ * Only `.app-top` carries a z-index, so too shallow an offset tucks its neighbour under the ticker.
  */
 :root {
   --app-top-clearance: 116px;
@@ -86,28 +86,65 @@ a {
   padding: 12px 20px;
   background: var(--bg);
   border-bottom: 1px solid var(--card);
+  /*
+   * 한 줄에 다 못 들어가면 항목 단위로 줄을 넘긴다 — 라벨이 글자 단위로 쪼개지는 것보다 낫다
+   * (아래 nowrap과 한 쌍이다). 390px는 좁힌 여백으로 한 줄에 들어가고, 그보다 좁으면 이 규칙이 받는다.
+   * When the row cannot fit, whole items wrap instead of labels breaking mid-word — this pairs with the
+   * nowrap below. 390px fits on one line thanks to the tightened spacing; anything narrower lands here.
+   */
+  flex-wrap: wrap;
 }
 
 .app-brand {
   color: var(--text-strong);
   font-weight: 700;
+  /*
+   * 브랜드는 쪼개지 않는다 — 390px에서 "stock-/monitoring" 두 줄로 갈라졌다.
+   * The brand never breaks: at 390px it split into "stock-/monitoring" across two lines.
+   */
+  white-space: nowrap;
 }
 
 .app-links {
   display: flex;
   gap: 16px;
-  /* 테마 토글을 오른쪽 끝으로 밀어낸다 / Push the theme toggle to the far right */
-  margin-right: auto;
 }
 
 .app-links a {
   color: var(--text);
+  /* 링크 라벨도 쪼개지 않는다 — 390px에서 "대시보/드", "기사 분/석"이 되었다 / Nor do the link labels: 390px gave "대시보/드" and "기사 분/석" */
+  white-space: nowrap;
 }
 
 /* react-router의 NavLink가 현재 경로에 붙이는 클래스 / The class react-router's NavLink adds on the active route */
 .app-links a.active {
   color: var(--text-strong);
   font-weight: 700;
+}
+
+/*
+ * 좁은 화면에서는 여백·간격을 좁혀 네비를 한 줄에 담는다 — 기본 여백·간격(좌우 20px + 20px)으로는 한 줄에
+ * 416px이 필요해 390px에서 26px 넘쳤고, 라벨이 전부 두 줄로 갈라졌다 (여기서 좁히면 380px — 390px에 들어간다).
+ * 링크에 세로 패딩을 주어 탭 영역을 토글과 같은 높이로 맞춘다. 토글이 이미 줄 높이를 정하므로 바는 커지지 않는다.
+ * On a narrow screen tighter padding and gaps keep the nav on one line: with the default spacing (20px side
+ * padding plus 20px gaps) one line needs 416px, overflowing 390px by 26px and splitting every label across two
+ * lines; the values here bring it to 380px, which fits.
+ * The links take vertical padding so their tap target matches the toggle's height; the toggle already sets the
+ * row height, so the bar does not grow.
+ */
+@media (max-width: 560px) {
+  .app-nav {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .app-links {
+    gap: 12px;
+  }
+
+  .app-links a {
+    padding: 6px 0;
+  }
 }
 
 .app-main {
@@ -164,6 +201,18 @@ a {
 /* 네비(--bg 배경) 위에서는 카드색이 대비를 만든다 / On the nav (a --bg surface) the card colour provides contrast */
 .theme-toggle {
   background: var(--card);
+  /* 라벨을 쪼개지 않는다 — 390px에서 "라이/트"가 되었다 / The label never breaks: 390px gave "라이/트" */
+  white-space: nowrap;
+  /*
+   * 네비 오른쪽 끝으로 밀어낸다 — `.app-links`의 margin-right가 아니라 토글 자신의 auto 여백으로
+   * 미는 이유: 375px 이하에서 토글이 둘째 줄로 넘어갈 때도 그 줄에서 오른쪽에 붙는다
+   * (링크 쪽 여백이면 첫 줄만 밀려 둘째 줄의 토글이 왼쪽에 홀로 남았다). 둘 다 auto면 여유가 나뉘므로 한쪽만 둔다.
+   * Pushed to the nav's right end by the toggle's own auto margin rather than by a margin-right on
+   * `.app-links`: this way it also sits right when it wraps to a second line below 375px (a margin on the
+   * links only pushed the first line, leaving the wrapped toggle alone on the left). Only one side may carry
+   * an auto margin — two would split the free space.
+   */
+  margin-left: auto;
 }
 
 /* 카드 안에서는 페이지 배경색이 대비를 만든다 / Inside a card the page background provides contrast */
@@ -1098,22 +1147,46 @@ a {
   display: flex;
   align-items: center;
   overflow: hidden;
-  padding: 10px 0;
   background: var(--card);
+  /*
+   * 스크롤 시 카드(--card)가 이 바 밑을 지나가는데, 그때 두 --card 면이 맞붙어 경계가 사라진다 —
+   * 페이지색 1px 선이 그 경계다 (뷰포트 확대로 다크·라이트 모두 확인). 반대로 아래가 페이지(--bg)일 때는
+   * 이 선이 배경에 묻히지만 --card 바와 --bg 페이지의 면 전환이 이미 경계를 그리므로 문제가 없다.
+   * `.app-nav`처럼 --card로 두면 정작 필요한 카드 위에서 보이지 않으므로 --bg가 맞다.
+   * As the page scrolls, cards (--card) pass under this bar, and there two --card surfaces would meet with no
+   * edge; the 1px page-coloured line is that edge (confirmed zoomed in, both themes). When the page (--bg) is
+   * what sits below instead, the line disappears into it — harmless, because the --card bar against the --bg
+   * page already draws the boundary. Mirroring `.app-nav`'s --card would vanish over cards, the case that
+   * needs it, so --bg is the right choice here.
+   */
   border-bottom: 1px solid var(--bg);
 }
 
 /* 마키가 순환하는 영역 — 우측 시각 칩을 침범하지 않도록 칩과 flex로 나눈다.
-   The marquee viewport; flex keeps the crawl out of the right-side clock chip. */
+   세로 여백은 바가 아니라 이 둘이 나눠 갖는다 (칩의 구분선을 바 높이로 늘리기 위해 — 아래 참조).
+   The marquee viewport; flex keeps the crawl out of the right-side clock chip. The vertical padding lives on
+   these two children rather than on the bar, which is what lets the chip's divider span the bar (see below). */
 .ticker-viewport {
   flex: 1;
   overflow: hidden;
+  padding: 10px 0;
 }
 
 /* 우측 고정 업데이트 시각 칩 / The fixed right-side as-of clock chip */
 .ticker-clock {
   flex: none;
-  padding: 0 14px;
+  /*
+   * 구분선이 바 높이 전체를 지나게 한다 — 바가 세로 패딩을 갖고 있던 동안 이 1px 선은 칩 글자 줄만큼
+   * (≈14px, 바는 36px) 짧은 토막이라 마키가 잘린 자리의 얼룩처럼 보였다. 칩이 스스로 늘어나 여백을
+   * 품으면 선이 크롤과 칩을 나누는 칸막이로 읽힌다.
+   * The divider spans the bar's full height: while the bar owned the vertical padding this 1px line was only
+   * as tall as the chip's line box (≈14px against a 36px bar) and read as a smudge where the marquee gets
+   * clipped. With the chip stretching and owning its padding, the line reads as the partition it is.
+   */
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
   font-size: 12px;
   color: var(--text);
   white-space: nowrap;

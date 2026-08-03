@@ -1,7 +1,7 @@
 /**
- * 하단 고정 경제지표 티커 바 — 지표명 + 값 + 등락을 가로로 무한 스크롤한다 (Toss 문법).
- * The fixed bottom economic-indicator ticker; it scrolls name, value and change horizontally
- * forever (the Toss idiom).
+ * 상단 sticky 블록(헤더 아래) 경제지표 티커 바 — 지표명 + 값 + 등락을 가로로 무한 스크롤한다 (Toss 문법).
+ * The economic-indicator ticker inside the top sticky block, below the nav; it scrolls name, value and
+ * change horizontally forever (the Toss idiom).
  *
  * 데이터는 셸(App)이 `useOverview()`로 가져와 prop으로 내려준다 — 이 컴포넌트는 순수 표시다.
  * The shell (App) fetches with `useOverview()` and passes them down; this component is pure display.
