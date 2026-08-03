@@ -65,6 +65,20 @@ a {
   z-index: 10;
 }
 
+/*
+ * 상단 sticky 블록을 비켜 가야 하는 요소들의 오프셋 — 매직 넘버를 흩뿌리지 않도록 한 곳에서 정한다.
+ * 근거(실측): 블록 ≈88px(헤더 ≈48 + 티커 ≈40)에, 예전 76px 오프셋이 헤더 ≈48px 위에 두었던
+ * 숨 쉴 여유 ≈28px을 더한 값. `.app-top`만 z-index를 가지므로 오프셋이 얕으면 상대가 티커 밑으로 파고든다.
+ * 정확한 픽셀 값은 Task 3 브라우저 패스에서 눈으로 확인해 미세 조정한다.
+ * The offset for anything that must clear the top sticky block, defined once so the number is not scattered.
+ * Measured basis: the block is ≈88px (a ≈48px nav plus a ≈40px ticker), plus the ≈28px of breathing room the
+ * old 76px offset gave over the ≈48px header. Only `.app-top` carries a z-index, so too shallow an offset
+ * tucks its neighbour under the ticker. The exact pixel value gets eyeballed and tuned in Task 3's browser pass.
+ */
+:root {
+  --app-top-clearance: 116px;
+}
+
 .app-nav {
   display: flex;
   align-items: center;
@@ -237,12 +251,11 @@ a {
   align-items: start;
 }
 
-/* 사이드바는 스크롤해도 따라온다 — 오프셋 76px은 헤더만 sticky였던 시절 값이라 헤더+티커 블록보다 얕다.
-   The sidebar follows the scroll; its 76px offset dates from the header-only sticky era, so it sits
-   shallower than the nav+ticker block. */
+/* 사이드바는 스크롤해도 따라온다 — 상단 sticky 블록(헤더+티커)을 비켜 갈 만큼 내려 붙인다.
+   The sidebar follows the scroll, pinned far enough down to clear the top sticky block (nav plus ticker). */
 .dashboard-side {
   position: sticky;
-  top: 76px;
+  top: var(--app-top-clearance);
   min-width: 0;
 }
 
@@ -1029,8 +1042,12 @@ a {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  /* 사이드바가 화면보다 길어지지 않게 목록 안에서만 스크롤 / Scroll inside the list so the sidebar never outgrows the viewport */
-  max-height: calc(100vh - 220px);
+  /* 사이드바가 화면보다 길어지지 않게 목록 안에서만 스크롤 — 상단 블록 몫은 오프셋 변수를 그대로 쓰고,
+     남은 116px는 목록 밖 크롬(main·카드 여백) 몫이다 (기존 220px에서 헤더 ≈48 + 하단 티커 예비 56을 뺀 값).
+     Scroll inside the list so the sidebar never outgrows the viewport: the top block's share reuses the offset
+     variable and the remaining 116px covers the chrome outside the list (the main and card padding) — the old
+     220px minus its ≈48px header and 56px bottom-ticker reserve. */
+  max-height: calc(100vh - var(--app-top-clearance) - 116px);
   overflow-y: auto;
   margin: 0;
   padding: 0;
