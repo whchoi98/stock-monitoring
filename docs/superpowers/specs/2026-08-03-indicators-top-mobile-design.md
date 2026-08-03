@@ -40,6 +40,8 @@
 ### 업데이트 시각 표기 (사용자 추가 요구)
 - `TickerBar`에 `asOf?: string` prop 추가 (셸이 `data?.asOf` 전달). 티커 **우측 고정 칩**으로
   `HH:MM 기준`을 상시 표기 — 마키는 칩 왼쪽 영역에서만 순환.
+  (정정 2026-08-03: `asOf`는 envelope 필드로 `useOverview()`가 `data`의 형제로 언랩 —
+  `const { data, asOf } = useOverview()`. 원문 `data?.asOf`는 TS2339.)
   - 형식: 브라우저 로컬 시간대 `HH:MM` (`Intl.DateTimeFormat` 계열), `title`(+접근성 라벨)에 전체 ISO.
   - CSS: `.ticker-bar`를 `display: flex`로 — 트랙 래퍼가 `flex: 1; overflow: hidden`, 칩은 `flex: none`.
   - `asOf` 없음(파싱 불가 포함) → 칩 미렌더, 티커는 지표만으로 동작.
