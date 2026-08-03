@@ -331,6 +331,14 @@ class StockMonitoringStack(cdk.Stack):
             alb.load_balancer_dns_name,
             protocol_policy=cloudfront.OriginProtocolPolicy.HTTP_ONLY,
             custom_headers={ORIGIN_VERIFY_HEADER: header_value},
+            # 기사 AI 분석(번역+요약, ARTICLE_MAX_TOKENS=2048)의 콜드 생성이 ~45초라 기본 30초로는
+            # 첫 요청이 504를 받는다 (2026-08-03 실측 — 재시도는 캐시 히트 0.03s). 60초는 쿼터 증가
+            # 없이 가능한 최댓값이고 최악 ~50초를 커버한다. ALB idle 60초(기본)도 그대로 충분하다.
+            # Cold article-AI generation (translation+summary, ARTICLE_MAX_TOKENS=2048) takes ~45s, so the
+            # default 30s returned 504 on first requests (measured 2026-08-03; the retry hits cache in
+            # 0.03s). 60s is the no-quota maximum and covers the ~50s worst case; the ALB's default 60s
+            # idle timeout already suffices.
+            read_timeout=cdk.Duration.seconds(60),
         )
         dist = cloudfront.Distribution(
             self,
