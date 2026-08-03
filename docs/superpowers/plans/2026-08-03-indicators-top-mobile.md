@@ -218,7 +218,7 @@ return (
         </nav>
         <ThemeToggle />
       </header>
-      <TickerBar indicators={data?.indicators ?? []} asOf={data?.asOf} />
+      <TickerBar indicators={data?.indicators ?? []} asOf={asOf} />
     </div>
 
     <main className="app-main">
@@ -227,6 +227,10 @@ return (
   </div>
 )
 ```
+
+(정정 2026-08-03, Task 1에서 컴파일러로 확인: `asOf`는 `Overview`가 아닌 envelope 필드라 `useOverview()`가
+`data`의 **형제**로 언랩한다 — Task 1이 이미 `const { data, asOf } = useOverview()`로 바꿔 두었으므로
+이 블록은 `asOf={asOf}`가 맞다. 원문 `asOf={data?.asOf}`는 TS2339 컴파일 에러.)
 
 - [ ] **Step 4: CSS 변경** — `global.css`:
 
