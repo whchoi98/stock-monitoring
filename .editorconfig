@@ -1,0 +1,23 @@
+# EditorConfig — https://editorconfig.org
+# 편집기 공통 서식 규칙 / Shared editor formatting rules
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# Python (backend/, infra/) — 4칸 들여쓰기 / 4-space indent
+[*.py]
+indent_size = 4
+
+# Makefile 은 탭 필수 / Makefiles require tabs
+[Makefile]
+indent_style = tab
+
+# Markdown — 줄 끝 공백이 의미를 가질 수 있음 / trailing spaces can be meaningful
+[*.md]
+trim_trailing_whitespace = false

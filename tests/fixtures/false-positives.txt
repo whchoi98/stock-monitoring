@@ -1,0 +1,30 @@
+# 위양성 픽스처 — 이 파일의 어떤 줄도 secret-scan.sh 패턴에 매치되면 안 됨.
+# False-positive fixtures — NO line in this file may match any secret-scan.sh pattern.
+# 이 프로젝트에서 실제로 등장할 법한 무해한 문자열들 / Harmless strings that plausibly appear in this project.
+
+# 일반 base64 (AWS 키 아님) / Plain base64, not an AWS key
+dGhpcyBpcyBhIHRlc3Q=
+
+# 소문자 akia — AKIA 패턴은 대문자만 / Lowercase akia — the AKIA pattern is uppercase-only
+akiaiosfodnn7example
+
+# 빈 값·짧은 값·간접 참조 / Empty values, short values, indirect references
+password = ""
+password = "1234"
+password = os.environ["DB_PASSWORD"]
+secret: ""
+aws_secret_access_key = <from-environment>
+
+# 식별자·환경변수 이름 (값 아님) / Identifiers and env var names, not values
+SECRET_NAME = "stock-monitoring"
+api_key_name = "cache"
+CACHE_TABLE=stock-monitoring-cache
+
+# 토큰 접두부만 있는 산문 / Prose containing token prefixes only
+xoxb-style tokens are scanned by the hook
+sk_live_ prefix only
+ghp_short
+AIzaProxy
+
+# 프로젝트 실사용 URL / Real project URL
+https://d2wa9w1vbqlndl.cloudfront.net

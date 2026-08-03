@@ -1,0 +1,40 @@
+# =============================================================================
+# 루트 .gitignore — 루트 레벨 + 교차(cross-cutting) 패턴만 다룬다.
+# Root .gitignore — root-level and cross-cutting patterns only.
+#
+# backend/ · frontend/ · infra/ 는 각자 .gitignore 를 유지한다.
+# backend/, frontend/, and infra/ keep their own .gitignore files.
+# (backend/static/ 빌드 산출물은 backend/.gitignore 의 /static/ 이 이미 담당)
+# (the generated backend/static/ build output is already covered by /static/
+#  in backend/.gitignore)
+# =============================================================================
+
+# 환경변수 — .env.example 만 커밋한다 / Environment — only .env.example is committed
+.env
+.env.*
+!.env.example
+
+# Claude Code 로컬 전용 파일 / Claude Code local-only files
+.claude/settings.local.json
+.claude/worktrees/
+.superpowers/
+
+# 의존성·가상환경 / Dependencies & virtual environments (cross-cutting)
+node_modules/
+.venv/
+venv/
+
+# Python 바이트코드·테스트 산출물 / Python bytecode & test artifacts (cross-cutting)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# CDK synth 산출물 / CDK synth output
+cdk.out/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.log
