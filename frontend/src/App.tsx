@@ -21,8 +21,11 @@ export default function App() {
    * The shell fetches the ticker data once; it shares the query key (and therefore the request) with
    * the dashboard's `useOverview()`, and while loading or after a failure an empty array goes down and
    * the ticker removes itself — the app still renders.
+   *
+   * `asOf`는 envelope에서 벗겨진 형제 값이라 `data` 안에 없다 (`queries.ts`의 `unwrap`).
+   * `asOf` is peeled off the envelope as a sibling, so it does not live inside `data` (`unwrap` in `queries.ts`).
    */
-  const { data } = useOverview()
+  const { data, asOf } = useOverview()
 
   return (
     <div className="app">
@@ -43,7 +46,7 @@ export default function App() {
         <Outlet />
       </main>
 
-      <TickerBar indicators={data?.indicators ?? []} />
+      <TickerBar indicators={data?.indicators ?? []} asOf={asOf} />
     </div>
   )
 }

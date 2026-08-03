@@ -1076,10 +1076,29 @@ a {
   bottom: 0;
   left: 0;
   z-index: 10;
+  display: flex;
+  align-items: center;
   overflow: hidden;
   padding: 10px 0;
   background: var(--card);
   border-top: 1px solid var(--bg);
+}
+
+/* 마키가 순환하는 영역 — 우측 시각 칩을 침범하지 않도록 칩과 flex로 나눈다.
+   The marquee viewport; flex keeps the crawl out of the right-side clock chip. */
+.ticker-viewport {
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 우측 고정 업데이트 시각 칩 / The fixed right-side as-of clock chip */
+.ticker-clock {
+  flex: none;
+  padding: 0 14px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  border-left: 1px solid var(--bg);
 }
 
 /*
@@ -1132,7 +1151,7 @@ a {
     animation: none;
   }
 
-  .ticker-bar {
+  .ticker-viewport {
     overflow-x: auto;
   }
 

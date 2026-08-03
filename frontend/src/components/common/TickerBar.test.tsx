@@ -53,4 +53,26 @@ describe('TickerBar', () => {
     expect(screen.getAllByText('WTI Oil')).toHaveLength(2)
     expect(container.querySelectorAll('[aria-hidden="true"]')).toHaveLength(1)
   })
+
+  it('asOf가 있으면 HH:MM 기준 칩을 렌더한다 / renders the HH:MM clock chip when asOf is given', () => {
+    render(<TickerBar indicators={[OIL]} asOf="2026-08-03T05:32:00+00:00" />)
+    const clock = screen.getByTitle('데이터 기준 시각 2026-08-03T05:32:00+00:00')
+    // 시간대는 실행 환경에 따라 다르므로 형식만 고정한다 / The zone varies by host, so only the shape is pinned.
+    expect(clock.textContent).toMatch(/^\d{2}:\d{2} 기준$/)
+  })
+
+  it('asOf가 없으면 칩을 렌더하지 않는다 / renders no chip without asOf', () => {
+    render(<TickerBar indicators={[OIL]} />)
+    expect(screen.queryByTitle(/데이터 기준 시각/)).toBeNull()
+  })
+
+  it('asOf가 파싱 불가면 칩을 렌더하지 않는다 / renders no chip for an unparseable asOf', () => {
+    render(<TickerBar indicators={[OIL]} asOf="not-a-date" />)
+    expect(screen.queryByTitle(/데이터 기준 시각/)).toBeNull()
+  })
+
+  it('지표가 없으면 asOf가 있어도 아무것도 렌더하지 않는다 / still renders nothing without indicators', () => {
+    const { container } = render(<TickerBar indicators={[]} asOf="2026-08-03T05:32:00+00:00" />)
+    expect(container.innerHTML).toBe('')
+  })
 })
