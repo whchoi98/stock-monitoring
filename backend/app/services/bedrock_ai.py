@@ -184,6 +184,24 @@ _QUEUE_ERROR = "error"
 _QUEUE_END = "end"
 
 
+def _abort_stream(stream: Any) -> None:
+    """
+    버려진 이벤트 스트림을 닫아 소켓을 돌려준다 / Close an abandoned event stream to release its socket.
+
+    조기 종료(소비자 이탈) 전용 — botocore `EventStream.close()`가 원본 HTTP 응답을 닫는다. 닫기 실패는
+    이미 버린 스트림이라 치명적이지 않지만 조용히 넘기지 않는다.
+    Cancellation path only: botocore's `EventStream.close()` closes the raw HTTP response. A close
+    failure is not fatal (the stream is being abandoned anyway) but is never silent.
+    """
+    close = getattr(stream, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception as exc:
+        _warn("ai_stream_close_failed", error=str(exc), error_type=type(exc).__name__)
+
+
 async def stream_invoke(prompt: str, max_tokens: int) -> AsyncIterator[str]:
     """
     converse_stream으로 모델을 호출해 텍스트 델타를 즉시 yield / Invoke via converse_stream, yielding text deltas as they arrive.
@@ -197,6 +215,15 @@ async def stream_invoke(prompt: str, max_tokens: int) -> AsyncIterator[str]:
     stream holds a slot for tens of seconds and that pool is shared with yfinance and extraction
     (security review 2026-08-03). Thread count is bounded by the caller's Bedrock semaphore.
 
+    그 상한이 성립하려면 소비자가 사라질 때 펌프도 멈춰야 한다: 제너레이터가 닫히면(SSE 클라이언트
+    disconnect → `GeneratorExit`) `finally`가 취소 플래그를 세우고, 펌프는 **다음 이벤트 경계에서**
+    읽기를 중단한다. 즉 고아 스레드는 이벤트 하나(네트워크가 조용하면 botocore read 타임아웃)만큼만
+    살아남고, 세마포어가 풀린 뒤까지 스트림을 끝까지 읽는 일은 없다.
+    That bound only holds if the pump stops when the consumer does: closing the generator (an SSE
+    client disconnect raising `GeneratorExit`) sets a cancel flag in `finally`, and the pump stops
+    reading **at the next event boundary**. An orphaned pump therefore outlives its consumer by one
+    event (or a botocore read timeout when the wire is quiet), never by a whole drained stream.
+
     `stopReason == "max_tokens"`는 진짜 절단 시그널이라 경고로 남긴다 (시나리오별 max_tokens 분리 덕에
     이 로그가 의미를 갖는다). / A max_tokens stop is logged as the truncation signal it is.
 
@@ -206,16 +233,34 @@ async def stream_invoke(prompt: str, max_tokens: int) -> AsyncIterator[str]:
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+    # 소비자가 떠났음을 펌프에 알리는 플래그 / Tells the pump its consumer is gone
+    cancelled = threading.Event()
 
-    def put(item: tuple[str, Any]) -> None:
+    def dropped(kind: str, value: Any, reason: str, detail: str = "") -> None:
+        """
+        전달하지 못한 항목을 단일 라인 JSON으로 남긴다 (조용한 실패 금지) / Log an undeliverable item.
+
+        소비자가 사라진 뒤의 실패는 raise할 곳이 없다 — 그래도 보이지 않게 사라지면 안 된다.
+        델타 본문은 남기지 않는다(모델 출력이므로 종류만 기록) / delta text is never logged.
+        A failure arriving after the consumer left has nowhere to be raised, but must stay visible.
+        """
+        fields: dict[str, Any] = {"reason": reason, "kind": kind}
+        if isinstance(value, BaseException):
+            fields["error"] = str(value)
+            fields["error_type"] = type(value).__name__
+        if detail:
+            fields["detail"] = detail
+        _warn("ai_stream_dropped", **fields)
+
+    def put(kind: str, value: Any) -> None:
         # 루프가 닫힌 뒤(앱 종료 중)에는 소비자가 없다 — 여기서 RuntimeError를 흘리면 스레드 예외
-        # 트레이스백만 남으므로 삼킨다 (전달 대상이 사라진 것이지 실패를 숨기는 것이 아니다).
+        # 트레이스백만 남으므로 삼키되, 무엇이 사라졌는지는 로그로 남긴다.
         # After the loop is closed (shutdown) there is no consumer left; letting the RuntimeError
-        # escape would only print a thread traceback, so it is dropped (no failure is being hidden).
+        # escape would only print a thread traceback, so it is swallowed — but never unlogged.
         try:
-            loop.call_soon_threadsafe(queue.put_nowait, item)
-        except RuntimeError:
-            pass
+            loop.call_soon_threadsafe(queue.put_nowait, (kind, value))
+        except RuntimeError as exc:
+            dropped(kind, value, reason="loop_closed", detail=str(exc))
 
     def pump() -> None:
         try:
@@ -225,31 +270,48 @@ async def stream_invoke(prompt: str, max_tokens: int) -> AsyncIterator[str]:
                 messages=[{"role": "user", "content": [{"text": prompt}]}],
                 inferenceConfig={"maxTokens": max_tokens},
             )
-            for event in response["stream"]:
+            stream = response["stream"]
+            for event in stream:
+                if cancelled.is_set():
+                    # 소비자가 끊겼다: 남은 이벤트를 읽지 않고 스트림을 닫고 스레드를 끝낸다 (세마포어 상한 유지)
+                    # The consumer is gone: close the stream and stop reading instead of draining.
+                    _abort_stream(stream)
+                    return
                 text = event.get("contentBlockDelta", {}).get("delta", {}).get("text")
                 if text:
-                    put((_QUEUE_DELTA, text))
+                    put(_QUEUE_DELTA, text)
                 stop = event.get("messageStop", {}).get("stopReason")
                 if stop is not None:
-                    put((_QUEUE_STOP, stop))
+                    put(_QUEUE_STOP, stop)
         except Exception as exc:  # noqa: BLE001 - 스레드 경계, 큐로 전달 / thread boundary: forwarded via the queue
-            put((_QUEUE_ERROR, exc))
+            if cancelled.is_set():
+                # 큐를 읽을 소비자가 없으므로 넣어도 사라진다 — 로그로만 남긴다
+                # No consumer is left to read the queue, so this is logged instead of enqueued.
+                dropped(_QUEUE_ERROR, exc, reason="consumer_gone")
+            else:
+                put(_QUEUE_ERROR, exc)
         else:
-            put((_QUEUE_END, None))
+            if not cancelled.is_set():
+                put(_QUEUE_END, None)
 
     threading.Thread(target=pump, name="bedrock-stream", daemon=True).start()
 
-    while True:
-        kind, value = await queue.get()
-        if kind == _QUEUE_DELTA:
-            yield value
-        elif kind == _QUEUE_STOP:
-            if value == "max_tokens":
-                _warn("ai_stream_truncated", stop_reason=value, max_tokens=max_tokens)
-        elif kind == _QUEUE_ERROR:
-            _raise_mapped(value, "ai_stream_failed")
-        else:
-            return
+    try:
+        while True:
+            kind, value = await queue.get()
+            if kind == _QUEUE_DELTA:
+                yield value
+            elif kind == _QUEUE_STOP:
+                if value == "max_tokens":
+                    _warn("ai_stream_truncated", stop_reason=value, max_tokens=max_tokens)
+            elif kind == _QUEUE_ERROR:
+                _raise_mapped(value, "ai_stream_failed")
+            else:
+                return
+    finally:
+        # 정상 종료·GeneratorExit(조기 close)·예외 모두 여기를 지난다 → 펌프에 즉시 알린다
+        # Normal exit, GeneratorExit (early close) and errors all pass here: tell the pump at once.
+        cancelled.set()
 
 
 def _article_prompt(title: str, content: str, is_korean: bool) -> str:

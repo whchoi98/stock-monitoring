@@ -79,6 +79,70 @@ def _stop(reason):
     return {"messageStop": {"stopReason": reason}}
 
 
+class _GatedStream:
+    """close() 호출을 기록하는 이벤트 스트림 대역 / An event-stream stand-in recording close() calls."""
+
+    def __init__(self, events):
+        self._events = events
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._events)
+
+    def close(self):
+        self.closed = True
+        self._events.close()
+
+
+class _GatedStreamClient:
+    """
+    게이트가 열릴 때까지 다음 이벤트를 내주지 않는 페이크 / A fake withholding each next event until its gate opens.
+
+    조기 종료 검증에는 **블로킹** 스트림이 필요하다: 유한 `iter(events)`는 즉시 소진되므로 펌프가 취소를
+    무시하고 끝까지 읽어도 스레드가 곧 사라져 테스트가 어떤 구현에서도 통과한다(= 무의미한 테스트).
+    A blocking stream is required to observe early close: a finite `iter(events)` drains instantly, so
+    a pump that ignores cancellation still ends promptly and the test would pass against anything.
+    """
+
+    # 구현이 취소를 무시해도 스레드가 영원히 남지 않도록 상한을 둔다 / bounded so a broken impl still exits
+    GATE_TIMEOUT = 5.0
+
+    def __init__(self, error=None):
+        self.calls = []
+        self.error = error                  # 게이트가 열린 뒤 던질 예외 / raised once the gate opens
+        self.gate = threading.Event()       # 두 번째 이벤트를 여는 게이트 / opens the second event
+        self.tail_gate = threading.Event()  # 그 이후 이벤트를 여는 게이트 / opens everything after that
+        self.produced = []                  # 스트림이 실제로 내보낸 것 / what the stream actually emitted
+        self.stream = None                  # 마지막으로 넘긴 스트림 / the stream handed to the pump
+
+    def converse_stream(self, **kwargs):
+        self.calls.append(kwargs)
+        self.stream = _GatedStream(self._events())
+        return {"stream": self.stream}
+
+    def _events(self):
+        self.produced.append("a")
+        yield _delta("a")
+        self.gate.wait(self.GATE_TIMEOUT)
+        if self.error is not None:
+            raise self.error
+        self.produced.append("b")
+        yield _delta("b")
+        # 취소를 존중하지 않는 펌프는 여기서 막힌다 / a pump ignoring cancellation blocks here
+        self.tail_gate.wait(self.GATE_TIMEOUT)
+        self.produced.append("c")
+        yield _delta("c")
+        yield _stop("end_turn")
+
+    def release_all(self):
+        """테스트 실패 시에도 스레드를 남기지 않기 위한 정리 / Cleanup so a failure never leaks the thread."""
+        self.gate.set()
+        self.tail_gate.set()
+
+
 def _prompt_of(stream_client):
     """페이크가 받은 converse_stream 프롬프트 / The prompt the fake received via converse_stream."""
     return stream_client.calls[0]["messages"][0]["content"][0]["text"]
@@ -87,6 +151,14 @@ def _prompt_of(stream_client):
 def _pump_threads():
     """살아 있는 스트림 펌프 스레드 / Stream pump threads still alive."""
     return [t for t in threading.enumerate() if t.name == "bedrock-stream" and t.is_alive()]
+
+
+async def _await_pump_exit(timeout=1.5):
+    """펌프 스레드가 끝나기를 기다리고 남은 스레드를 반환 / Wait for pump exit, returning what is left."""
+    deadline = time.monotonic() + timeout
+    while _pump_threads() and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    return _pump_threads()
 
 
 class _FrozenCreds:
@@ -612,18 +684,93 @@ async def test_stream_invoke_raises_unavailable_without_credentials(monkeypatch,
     assert created["count"] == 0
 
 
-async def test_stream_invoke_thread_ends_when_consumer_stops_early(stream_client):
-    """소비를 중단해도 펌프 스레드는 남지 않는다 / The pump thread does not linger when the consumer stops early."""
-    stream_client([_delta("a"), _delta("b"), _stop("end_turn")])
+async def test_stream_invoke_pump_stops_reading_after_early_close(monkeypatch, creds, caplog):
+    """
+    조기 close 후 펌프는 스트림을 끝까지 읽지 않고 멈춘다 / After an early close the pump stops instead of draining.
 
-    agen = bedrock_ai.stream_invoke("p", 10)
-    assert await agen.__anext__() == "a"
-    await agen.aclose()
+    페이크가 블로킹이라 "끝까지 읽는" 구현은 tail_gate에서 막혀 스레드가 남는다(= 이 테스트가 잡는 회귀).
+    The fake blocks, so a drain-to-end pump parks on tail_gate and the thread lingers — the regression
+    this test exists to catch. 고아 스레드는 세마포어 해제 이후까지 살아남으면 안 된다 / an orphaned pump
+    must not outlive the caller's semaphore release.
+    """
+    fake = _GatedStreamClient()
+    _install_client(monkeypatch, fake)
 
-    deadline = time.monotonic() + 2.0
-    while _pump_threads() and time.monotonic() < deadline:
-        await asyncio.sleep(0.01)
-    assert _pump_threads() == []
+    try:
+        with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+            agen = bedrock_ai.stream_invoke("p", 10)
+            assert await agen.__anext__() == "a"
+
+            await agen.aclose()          # 소비자 이탈 → 취소 플래그 / consumer leaves, cancel flag set
+            fake.gate.set()              # 다음 이벤트 하나를 흘려보낸다 / release exactly one more event
+
+            assert await _await_pump_exit() == []
+            # 취소 후 읽은 이벤트는 "b" 하나뿐 — "c"·messageStop까지 가지 않았다
+            # Only "b" was read after cancellation: it never reached "c" or the messageStop.
+            assert fake.produced == ["a", "b"]
+            # 버린 스트림은 닫아 소켓을 돌려준다 / the abandoned stream is closed, releasing its socket
+            assert fake.stream.closed is True
+            # 조용한 취소: 버린 항목도 없고 경고도 없다 / a clean cancel logs nothing
+            assert _error_payloads(caplog) == []
+    finally:
+        fake.release_all()
+        await _await_pump_exit()
+
+
+async def test_stream_invoke_logs_error_arriving_after_consumer_left(monkeypatch, creds, caplog):
+    """소비자가 떠난 뒤의 실패도 로그로는 남는다 / A failure after the consumer left is still logged."""
+    fake = _GatedStreamClient(error=RuntimeError("late boom"))
+    _install_client(monkeypatch, fake)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+            agen = bedrock_ai.stream_invoke("p", 10)
+            assert await agen.__anext__() == "a"
+
+            await agen.aclose()
+            fake.gate.set()              # 게이트 뒤에서 스트림이 터진다 / the stream blows up past the gate
+
+            assert await _await_pump_exit() == []
+            payloads = _error_payloads(caplog)
+            assert [p["event"] for p in payloads] == ["ai_stream_dropped"]
+            assert payloads[0]["reason"] == "consumer_gone"
+            assert payloads[0]["kind"] == "error"
+            assert payloads[0]["error_type"] == "RuntimeError"
+            assert "late boom" in payloads[0]["error"]
+    finally:
+        fake.release_all()
+        await _await_pump_exit()
+
+
+async def test_stream_invoke_logs_item_dropped_when_queue_put_fails(monkeypatch, creds, caplog):
+    """큐 전달 실패(닫힌 루프)도 조용히 사라지지 않는다 / A failed queue put is logged, not silent."""
+    fake = _FakeStreamClient([_delta("안"), _delta("녕"), _stop("end_turn")])
+    _install_client(monkeypatch, fake)
+
+    # 첫 전달만 닫힌 루프처럼 실패시킨다 (나머지는 그대로) / only the first put fails, as a closed loop would
+    loop = asyncio.get_running_loop()
+    real_call_soon = loop.call_soon_threadsafe
+    remaining = {"failures": 1}
+
+    def _flaky(callback, *args):
+        if remaining["failures"]:
+            remaining["failures"] -= 1
+            raise RuntimeError("Event loop is closed")
+        return real_call_soon(callback, *args)
+
+    monkeypatch.setattr(loop, "call_soon_threadsafe", _flaky)
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert [c async for c in bedrock_ai.stream_invoke("p", 5)] == ["녕"]
+        assert await _await_pump_exit() == []
+
+    payloads = _error_payloads(caplog)
+    assert [p["event"] for p in payloads] == ["ai_stream_dropped"]
+    assert payloads[0]["reason"] == "loop_closed"
+    assert payloads[0]["kind"] == "delta"
+    assert "Event loop is closed" in payloads[0]["detail"]
+    # 델타 본문(모델 출력)은 로그에 남기지 않는다 / the delta text itself is never logged
+    assert all("안" not in record.getMessage() for record in caplog.records)
 
 
 # ---------------------------------------------------------------------------
