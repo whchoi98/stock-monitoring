@@ -95,6 +95,22 @@ it('네비와 자식 라우트를 렌더하고 지표를 티커 바로 내려보
   expect((await screen.findAllByText('WTI Oil')).length).toBeGreaterThan(0)
 })
 
+it('헤더와 티커가 상단 sticky 블록 안에 함께 있고 main은 밖이다 / the nav and ticker share the top sticky block; main sits outside', async () => {
+  stubOverview()
+
+  const { container } = renderShell()
+  // 개요 도착 후 티커까지 렌더된 상태에서 구조를 본다 / Inspect after the overview lands and the ticker exists.
+  // 마키가 목록을 두 벌 렌더하므로 findAll이다 / The marquee renders two copies of the list, hence findAll.
+  await screen.findAllByText('WTI Oil', undefined, { timeout: 3000 })
+
+  const top = container.querySelector('.app-top')
+  expect(top).not.toBeNull()
+  expect(top!.querySelector('.app-nav')).not.toBeNull()
+  expect(top!.querySelector('.ticker-bar')).not.toBeNull()
+  expect(top!.querySelector('.app-main')).toBeNull()
+  expect(container.querySelector('.app > .app-main')).not.toBeNull()
+})
+
 it('개요가 실패해도 셸은 살아 있고 티커 바만 사라진다 / the shell survives a failed overview; only the ticker disappears', async () => {
   const fetchMock = vi.fn<typeof fetch>(() => Promise.reject(new TypeError('network down')))
   vi.stubGlobal('fetch', fetchMock)

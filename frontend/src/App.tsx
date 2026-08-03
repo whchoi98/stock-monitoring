@@ -1,6 +1,6 @@
 /**
- * 앱 셸 레이아웃 — 상단 네비 / 페이지(Outlet) / 하단 티커 바.
- * The app shell layout: top nav, the page via Outlet, the bottom ticker.
+ * 앱 셸 레이아웃 — 상단 sticky 헤더+티커 / 페이지(Outlet).
+ * The app shell layout: the top sticky nav plus ticker, then the page via Outlet.
  *
  * 라우트 테이블은 `main.tsx`에 있다 (RouterProvider 옆). 이 파일은 컴포넌트만 export해야 하며
  * (oxlint `react/only-export-components` — HMR 보존), 그래서 라우트 정의를 여기 두지 않는다.
@@ -29,24 +29,29 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="app-nav">
-        <Link className="app-brand" to="/">
-          stock-monitoring
-        </Link>
-        <nav className="app-links">
-          <NavLink to="/" end>
-            대시보드
-          </NavLink>
-          <NavLink to="/articles">기사 분석</NavLink>
-        </nav>
-        <ThemeToggle />
-      </header>
+      {/*
+        헤더와 티커를 한 sticky 블록으로 묶는다 — 높이 매직 넘버 없이 둘이 함께 상단에 붙는다.
+        One sticky block holds the nav and the ticker: both pin to the top with no height constant.
+      */}
+      <div className="app-top">
+        <header className="app-nav">
+          <Link className="app-brand" to="/">
+            stock-monitoring
+          </Link>
+          <nav className="app-links">
+            <NavLink to="/" end>
+              대시보드
+            </NavLink>
+            <NavLink to="/articles">기사 분석</NavLink>
+          </nav>
+          <ThemeToggle />
+        </header>
+        <TickerBar indicators={data?.indicators ?? []} asOf={asOf} />
+      </div>
 
       <main className="app-main">
         <Outlet />
       </main>
-
-      <TickerBar indicators={data?.indicators ?? []} asOf={asOf} />
     </div>
   )
 }

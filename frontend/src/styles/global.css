@@ -53,14 +53,19 @@ a {
  */
 .app {
   min-height: 100vh;
-  /* 하단 고정 티커 바가 마지막 콘텐츠를 가리지 않도록 그만큼 비운다 / Reserve room so the fixed ticker never covers content */
-  padding-bottom: 56px;
 }
 
-.app-nav {
+/* 헤더+티커를 함께 상단에 고정하는 래퍼 — 개별 sticky 대신 한 블록이라 높이 계산이 필요 없다.
+   RouteError 셸은 .app-nav를 단독으로 쓰므로 그 헤더는 정적이 된다 (에러 화면 — 무해).
+   The wrapper pinning nav+ticker together; one block needs no height math. The RouteError shell
+   uses a bare .app-nav, whose header therefore goes static (an error screen — harmless). */
+.app-top {
   position: sticky;
   top: 0;
   z-index: 10;
+}
+
+.app-nav {
   display: flex;
   align-items: center;
   gap: 20px;
@@ -232,7 +237,9 @@ a {
   align-items: start;
 }
 
-/* 사이드바는 스크롤해도 따라온다 (하단 티커 바 높이만큼 여유) / The sidebar follows the scroll, minus the ticker's height */
+/* 사이드바는 스크롤해도 따라온다 — 오프셋 76px은 헤더만 sticky였던 시절 값이라 헤더+티커 블록보다 얕다.
+   The sidebar follows the scroll; its 76px offset dates from the header-only sticky era, so it sits
+   shallower than the nav+ticker block. */
 .dashboard-side {
   position: sticky;
   top: 76px;
@@ -1069,19 +1076,14 @@ a {
   }
 }
 
-/* ── 하단 경제지표 티커 바 / Bottom economic-indicator ticker ── */
+/* ── 상단 sticky 블록 안의 경제지표 티커 바 / The economic-indicator ticker inside the top sticky block ── */
 .ticker-bar {
-  position: fixed;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  z-index: 10;
   display: flex;
   align-items: center;
   overflow: hidden;
   padding: 10px 0;
   background: var(--card);
-  border-top: 1px solid var(--bg);
+  border-bottom: 1px solid var(--bg);
 }
 
 /* 마키가 순환하는 영역 — 우측 시각 칩을 침범하지 않도록 칩과 flex로 나눈다.
