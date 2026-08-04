@@ -35,6 +35,18 @@ describe('isAnalyzable', () => {
   it('잘못된 URL은 분석 불가 (throw 금지) / a malformed URL is not analyzable and does not throw', () => {
     expect(isAnalyzable(item({ link: 'not a url' }))).toBe(false)
   })
+
+  /*
+   * 빈 링크는 "분석 화면으로" 쪽이다 — 새 탭 분기로 보내면 `<a href="">`가 되어 현재 페이지를 한 번 더
+   * 여는 것이 전부다. 백엔드는 `<link>` 없는 RSS 항목을 빈 문자열로 통과시키므로(제목 없는 항목만
+   * 버린다) 실제로 도달하는 입력이다.
+   * An empty link belongs on the analysis-screen side: sent to the new-tab branch it becomes `<a href="">`,
+   * which does nothing but open the current page again. The backend lets an RSS item with no `<link>` through
+   * as an empty string (only a missing title drops an item), so this input really arrives.
+   */
+  it('빈 링크는 분석 화면 쪽으로 보낸다 / an empty link routes to the analysis screen', () => {
+    expect(isAnalyzable(item({ link: '' }))).toBe(true)
+  })
 })
 
 describe('articleHref', () => {

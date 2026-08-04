@@ -30,6 +30,21 @@ const WRAPPED: NewsItem = {
   language: 'ko',
 }
 
+/**
+ * `<link>`가 없던 RSS 항목 / An RSS item that had no `<link>`.
+ *
+ * 백엔드는 제목 없는 항목만 버리므로 빈 링크는 그대로 도착한다 (`app/services/news.py`).
+ * The backend drops only untitled items, so an empty link arrives as is (`app/services/news.py`).
+ */
+const EMPTY_LINK: NewsItem = {
+  id: 'empty',
+  title: '링크 없는 항목',
+  link: '',
+  source: '연합뉴스',
+  published: '2026-08-03T05:00:00Z',
+  language: 'ko',
+}
+
 /** 발행사 직접 URL / A publisher URL */
 const DIRECT: NewsItem = {
   id: 'direct',
@@ -72,7 +87,7 @@ function renderNewsFeed() {
 }
 
 beforeEach(() => {
-  vi.mocked(useNews).mockReturnValue(hookResult({ data: [WRAPPED, DIRECT] }))
+  vi.mocked(useNews).mockReturnValue(hookResult({ data: [WRAPPED, DIRECT, EMPTY_LINK] }))
 })
 
 describe('NewsFeed', () => {
@@ -95,5 +110,20 @@ describe('NewsFeed', () => {
     expect(new URL(href, 'http://h').searchParams.get('url')).toBe(DIRECT.link)
     expect(link.getAttribute('target')).toBeNull()
     expect(link.querySelector('.news-meta')?.textContent).not.toContain('원문 보기')
+  })
+
+  it('빈 링크는 새 탭으로 열지 않는다 (href="" = 현재 페이지 복제) / never opens an empty link in a new tab', () => {
+    const { itemLink } = renderNewsFeed()
+    const link = itemLink(EMPTY_LINK.title)
+
+    // 새 탭 분기로 갔다면 `href=""`(현재 페이지)를 새 탭으로 여는 것이 전부다
+    // Had it taken the new-tab branch, all it would do is open `href=""` — the current page — in a new tab
+    expect(link.getAttribute('target')).toBeNull()
+    expect(link.getAttribute('href')).not.toBe('')
+    // 대신 분석 화면으로 간다 — 그 화면이 빈 url을 "잘못된 접근" 카드로 안내한다 (유료 호출 없음)
+    // It goes to the analysis screen instead, which answers an empty url with its "잘못된 접근" card (no paid call)
+    const href = link.getAttribute('href') ?? ''
+    expect(href.startsWith('/articles?')).toBe(true)
+    expect(new URL(href, 'http://h').searchParams.get('url')).toBe('')
   })
 })
