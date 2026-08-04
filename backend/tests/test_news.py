@@ -1321,20 +1321,26 @@ BOMB_INCOMPRESSIBLE_TAIL = 200_000
 # 실측(2026-08-04): ASCII 폭탄은 4.50MB = 2.15배(20MB→67MB로 키워도 동일 - 압축률 비례 항 없음).
 # 그런데 **실제 기사**(추출 결과가 80바이트가 아니라 본문 전체인 경우)에서: 2.3MB 한국어 기사
 # 4.03배, 아스트랄 문자 위주 UTF-8 6.03배 - 폭탄 테스트만으로는 안 보이던 (c)항이 여기서 지배한다.
-# 8배는 아스트랄 최악(6.03배)에 여유를 두면서, 청크 하나를 통째로 압축 해제하던 옛 구현(51MB =
-# 24.3배)과 NEW-1(유효 gzip 1개+쓰레기 16MB가 `unused_data`에 무제한 누적, 수정 전 16.02배)은
-# 여전히 확실히 잡는다.
+# 구조적 최악은 7.04배다(재검증 2026-08-04): 2·3바이트 폭 텍스트 어디에든 아스트랄 문자 하나만
+# 섞여도 (c)가 "디코드 전 폭 스캔용 버퍼(2바이트) + 아스트랄 감지 후 재확장 버퍼(4바이트)"로
+# 갈라져 캡의 2배가 된다 - 이모지 하나 낀 2MB 한국어 기사가 정확히 이 형태다. 실측 마진은 캡의
+# 0.96배(~2MB, 12%)뿐이다. 8배는 이 구조적 최악(7.04배)에 그 마진을 남기면서, 청크 하나를
+# 통째로 압축 해제하던 옛 구현(51MB = 24.3배)과 NEW-1(유효 gzip 1개+쓰레기 16MB가 `unused_data`에
+# 무제한 누적, 수정 전 16.02배)은 여전히 확실히 잡는다.
 # Peak bound for the *streaming stage* (`_limited_text`): 8x the cap. The large live objects are
-# (a) the piece list ~cap, (b) the `b"".join` result ~cap, (c) the scratch buffer `.decode()` briefly
-# holds (byte length x max char width - 4 for astral characters), (d) the decoded str ~cap, plus one
-# decompression step (`DECOMPRESS_STEP`, 64KB). (c) did not exist under the old 3x bound - an ASCII bomb
-# has max char width 1, so it never showed up.
+# (a) the piece list ~cap, (b) the `b"".join` result ~cap, (c) the scratch buffer(s) `.decode()`
+# briefly holds, (d) the decoded str ~cap, plus one decompression step (`DECOMPRESS_STEP`, 64KB).
+# (c) did not exist under the old 3x bound - an ASCII bomb has max char width 1, so it never showed up.
 # Measured 2026-08-04: the ASCII bomb peaks at 4.50MB = 2.15x (unchanged from 20MB to 67MB - no term
 # scales with the ratio). But for **real articles** (where extraction keeps the whole body, not 80 bomb
 # bytes): a 2.3MB Korean article measures 4.03x, astral-heavy UTF-8 measures 6.03x - term (c), invisible
-# to the bomb test, dominates there. 8x leaves margin above the astral worst case (6.03x) while still
-# catching the old whole-chunk-inflation implementation (51MB = 24.3x) and NEW-1 (a valid tiny gzip
-# stream plus 16MB of garbage accumulating without bound in `unused_data`; pre-fix 16.02x).
+# to the bomb test, dominates there. The structural worst case is 7.04x (re-verified 2026-08-04): once
+# any astral character sits anywhere inside bulk 2-/3-byte-wide text, (c) splits into a pre-decode
+# width-scan buffer (2 bytes/char) plus a post-detection re-widening buffer (4 bytes/char) - a 2MB
+# Korean article with a single emoji is exactly this shape. Real margin is only 0.96x the cap (~2MB,
+# 12%). 8x leaves that margin over the structural worst case (7.04x) while still catching the old
+# whole-chunk-inflation implementation (51MB = 24.3x) and NEW-1 (a valid tiny gzip stream plus 16MB of
+# garbage accumulating without bound in `unused_data`; pre-fix 16.02x).
 STREAMING_PEAK_LIMIT = 8 * news.MAX_ARTICLE_SIZE
 
 # `fetch_article_content` **전체**의 peak 상한 - 캡의 4배. 이 값은 위 스트리밍 단계 상한이 아니다:
@@ -1344,6 +1350,9 @@ STREAMING_PEAK_LIMIT = 8 * news.MAX_ARTICLE_SIZE
 # 2.86배였다(추출만 떼어 재면 0.24-1.91배). 즉 4배는 **이 폭탄 형태**의 상한이며
 # `fetch_article_content` 일반의 상한이 아니다 — 여기서 지키는 것은 "압축률이 메모리에 도달하지
 # 않는다"이고, 회귀(24.3배)를 확실히 잡는 지점이다. 스트리밍 단계 자체는 위 상한으로 따로 잰다.
+# **주의(재검증 2026-08-04)**: 위 4.03배는 이모지가 없는 한국어 기사다. 이모지 하나만 섞이면
+# (위 `STREAMING_PEAK_LIMIT`의 구조적 최악 참조) 전체 peak가 실측 8.05배까지 뛴다 - 이 4배를
+# `fetch_article_content` 전반의 안전 여유로 오해하지 말 것.
 # Peak bound for the *whole* `fetch_article_content`: 4x the cap - and deliberately not the streaming bound
 # above, because extraction (`_extract_paragraphs` + `_clean_html`) copies the decoded str and dominates for
 # large bodies. Measured 2026-08-04: this bomb extracts only 64 bytes, so its end-to-end peak equals the
@@ -1351,6 +1360,9 @@ STREAMING_PEAK_LIMIT = 8 * news.MAX_ARTICLE_SIZE
 # single 2MB `<p>` reaches 2.86x (extraction alone measures 0.24-1.91x). So 4x bounds *this bomb's shape*,
 # not `fetch_article_content` in general: what it pins is "the compression ratio never reaches memory", and
 # it still catches the 24.3x regression. The streaming stage is measured separately against the bound above.
+# **Caveat (re-verified 2026-08-04)**: the 4.03x above is an emoji-free Korean article. With a single emoji
+# mixed in (see `STREAMING_PEAK_LIMIT`'s structural worst case), the whole-function peak measures 8.05x -
+# do not read this 4x as a general safety margin for `fetch_article_content`.
 PEAK_MEMORY_LIMIT = 4 * news.MAX_ARTICLE_SIZE
 
 
