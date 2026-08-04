@@ -642,6 +642,98 @@ async def test_global_concurrency_caps_parallel_bedrock_calls(state, services, b
     assert 1 <= bedrock.max_in_flight <= config.AI_GLOBAL_CONCURRENCY
 
 
+async def test_leader_waiting_for_a_bedrock_permit_heartbeats_before_analyzing(
+    state, services, bedrock, monkeypatch,
+):
+    """
+    permit을 기다리는 **선점자**도 waiting 하트비트를 낸다 / A leader waiting for a permit heartbeats too.
+
+    상한이 AI_GLOBAL_CONCURRENCY(2)이므로 세 번째 키는 앞선 두 스트림이 끝날 때까지 기다린다.
+    그 대기가 조용하면 첫 phase 뒤로 아무 바이트도 나가지 않아 CloudFront origin-response 타임아웃에
+    걸린다 - 이 기능이 없애려는 바로 그 wall-clock 제약이다. 팔로워(같은 키)만 하트비트를 내면
+    서로 다른 키의 대기는 여전히 침묵한다.
+    The cap is AI_GLOBAL_CONCURRENCY (2), so a third key waits for the two in-flight streams to finish. A
+    silent wait sends no bytes after the first phase event and runs into the CloudFront origin-response
+    timeout - the very wall-clock ceiling this feature exists to remove. Heartbeating followers alone is
+    not enough: waits on *distinct* keys would stay silent.
+
+    analyzing은 permit을 든 뒤에 (다시) 알린다 - phase 시퀀스가 사실과 어긋나면 안 된다.
+    `analyzing` is (re-)announced only once the permit is held, so the phase sequence never lies.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    bedrock.delay = 0.05      # 스트림 하나가 하트비트 여러 번보다 오래 permit을 잡는다 / one stream outlasts several beats
+    symbols = SYMBOLS[: config.AI_GLOBAL_CONCURRENCY + 1]
+    app = create_app(state)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        responses = await asyncio.gather(*[
+            # 서로 다른 심볼 = 서로 다른 캐시 키 -> 전원이 선점자다 (팔로워 경로가 아니다)
+            # Distinct symbols mean distinct cache keys, so every request is a leader, not a follower
+            async_client.post(f"/api/ai/stocks/{symbol}", headers={"X-Forwarded-For": f"10.7.7.{index}"})
+            for index, symbol in enumerate(symbols)
+        ])
+        # permit 누수 확인: 뒤이은 요청이 그대로 완료된다 / no leaked permit: a later request still completes
+        later = await async_client.post(
+            f"/api/ai/stocks/{SYMBOLS[-1]}", headers={"X-Forwarded-For": "10.7.7.9"},
+        )
+
+    assert set(_final(later)) == ENVELOPE_KEYS
+    assert len(bedrock.stock_calls) == len(symbols) + 1
+    # permit이 전량 반납됐다 (대기 경로가 permit을 새지 않는다) / every permit is back: the wait leaks none
+    assert app.state.ai_semaphore._value == config.AI_GLOBAL_CONCURRENCY
+
+    waited = 0
+    for response in responses:
+        events = _events(response)
+        assert set(_final(response)) == ENVELOPE_KEYS
+        waits = [index for index, (name, data) in enumerate(events)
+                 if name == "phase" and data["phase"] == "waiting"]
+        if not waits:
+            continue
+        waited += 1
+        analyzing = [index for index, (name, data) in enumerate(events)
+                     if name == "phase" and data["phase"] == "analyzing"]
+        first_delta = min(index for index, (name, _data) in enumerate(events) if name == "delta")
+        # 대기는 델타보다 앞이고, 대기가 끝난 뒤 analyzing이 다시 나온다
+        # The waits precede every delta, and `analyzing` is announced again once the wait ends
+        assert max(waits) < first_delta
+        assert max(analyzing) > max(waits), f"analyzing not re-announced after the wait: {_phases(events)}"
+    assert waited >= 1, "permit 대기가 조용했다 / the permit wait was silent"
+
+
+async def test_abandoned_permit_wait_neither_leaks_nor_double_returns_a_permit(state, monkeypatch):
+    """
+    대기 중 소비자가 떠나도 permit은 정확히 한 번만 정산된다 / An abandoned permit wait settles it exactly once.
+
+    하트비트를 내려면 획득을 태스크로 띄워야 하고(`async with` 불가), 그 태스크는 소비자 이탈 시
+    누구도 회수하지 않는다. permit을 흘리면 상한이 영구히 줄어들고(2 -> 1 -> 0: AI 기능 정지),
+    이중 반납하면 상한이 늘어나 비용 방어가 뚫린다. 둘 다 막는다.
+    Heartbeating requires acquisition to run as a task (no `async with`), and nobody harvests that task
+    when the consumer leaves. Leaking the permit shrinks the cap for good (2 -> 1 -> 0 stalls the whole AI
+    feature); returning it twice grows the cap and breaches the cost defense. Neither is allowed.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    semaphore = asyncio.Semaphore(1)
+    await semaphore.acquire()       # 유일한 permit을 테스트가 들고 있다 / the test holds the only permit
+    started: list = []
+
+    async def never_reached() -> AsyncIterator[str]:
+        started.append(1)
+        yield "x"
+
+    stream = ai._bedrock_deltas(state, semaphore, never_reached, analyzing_announced=False)
+
+    # permit이 없으니 첫 이벤트는 대기 하트비트다 / with no permit free the first event is the wait heartbeat
+    assert await stream.__anext__() == ("phase", {"phase": "waiting"})
+    await stream.aclose()           # 소비자 이탈 (연결 끊김) / the consumer leaves (connection dropped)
+    semaphore.release()             # 테스트가 든 permit 반납 / the test returns its own permit
+    await asyncio.sleep(0.02)       # 취소가 전달될 시간 / let the cancellation land
+
+    assert not started, "permit 없이 Bedrock 스트림을 시작했다 / the stream started without a permit"
+    assert semaphore._value == 1, f"permit 정산 오류 / permit accounting is off: {semaphore._value}"
+
+
 async def test_article_fetch_is_capped_by_the_global_semaphore(state, bedrock):
     """
     기사 본문 fetch도 전역 동시 실행 상한 안에서 돈다 / Article fetches run inside the global concurrency cap.

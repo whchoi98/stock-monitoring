@@ -291,29 +291,84 @@ def get_inflight(request: Request) -> dict:
     return registry
 
 
+def _return_permit(semaphore: asyncio.Semaphore, acquire: "asyncio.Future[bool]") -> None:
+    """
+    획득 태스크가 든 permit을 반납한다 (모든 이탈 경로에서 호출) / Return the permit the acquisition holds, on every exit path.
+
+    세 경우뿐이다. ① 획득 완료(정상 종료·스트림 실패·소비자 이탈) -> `release`. ② 아직 대기 중 ->
+    태스크를 취소한다. `asyncio.Semaphore.acquire`는 취소와 permit 부여의 경합까지 스스로 처리하므로
+    (취소된 대기자는 값을 되돌려 주고 다음 대기자를 깨운다) 여기서 release하면 오히려 이중 반납이 된다.
+    ③ 취소를 걸기도 전에 이미 부여됐다면 태스크가 done이므로 ①로 처리된다.
+    Exactly three cases: (1) already acquired (normal end, stream failure, consumer departure) -> release;
+    (2) still waiting -> cancel the task, and *do not* release: `asyncio.Semaphore.acquire` itself settles
+    the cancel-vs-grant race (a cancelled waiter gives the value back and wakes the next one), so releasing
+    here would double-return it; (3) granted just before the cancel lands -> the task is done, so it takes
+    path (1).
+    """
+    if not acquire.done():
+        acquire.cancel()
+        return
+    if not acquire.cancelled() and acquire.exception() is None:
+        semaphore.release()
+
+
 async def _bedrock_deltas(
     state: AppState,
     semaphore: asyncio.Semaphore,
     make_stream: Callable[[], AsyncIterator[str]],
+    analyzing_announced: bool,
 ) -> AsyncIterator[Tuple[str, dict]]:
     """
-    전역 동시 실행 제한 안에서 Bedrock 스트림을 돌리며 delta 이벤트를 흘린다.
-    Run a Bedrock stream inside the global concurrency cap, yielding delta events as they arrive.
+    전역 동시 실행 제한 안에서 Bedrock 스트림을 돌리며 phase/delta 이벤트를 흘린다.
+    Run a Bedrock stream inside the global concurrency cap, yielding phase and delta events.
 
     permit은 **스트림 완료까지** 보유한다 - 블로킹 경로가 호출 하나를 감쌌던 것과 같은 동시성 의미다
     (요청 하나가 끝날 때까지 permit 하나). 소비자가 사라지면 `GeneratorExit`이 이 제너레이터를 닫으며
-    permit을 반납하고, 서비스 계층이 펌프 스레드를 멈춘다.
+    `finally`가 permit을 반납하고, 서비스 계층이 펌프 스레드를 멈춘다.
     The permit is held until the stream ends - the same concurrency meaning the blocking path had when it
-    wrapped one call. If the consumer leaves, `GeneratorExit` closes this generator, returning the permit, and the
-    service layer stops its pump thread.
+    wrapped one call. If the consumer leaves, `GeneratorExit` closes this generator, the `finally` returns
+    the permit, and the service layer stops its pump thread.
+
+    **permit 대기 중에도 `phase: waiting` 하트비트를 낸다.** 상한이 `AI_GLOBAL_CONCURRENCY`(2)라 뒤늦은
+    요청은 앞선 두 스트림이 끝날 때까지 수십 초를 기다릴 수 있는데, 그동안 조용하면 첫 phase 뒤로
+    바이트가 없어 CloudFront origin-response 타임아웃에 걸린다 - 이 기능이 없애려는 그 wall-clock
+    제약이다. 그래서 `async with semaphore`를 쓰지 않고 획득을 태스크로 띄운 뒤 하트비트 간격마다
+    깨어난다 (팔로워 루프와 같은 패턴). `analyzing`은 permit을 든 **뒤에** 알린다 - 대기 중에
+    "분석 중"이라고 말하지 않기 위해서다.
+    **The permit wait heartbeats `phase: waiting` too.** With the cap at `AI_GLOBAL_CONCURRENCY` (2) a late
+    request can wait tens of seconds for two in-flight streams, and a silent wait sends nothing after the
+    first phase event - straight into the CloudFront origin-response timeout this feature exists to remove.
+    Hence no `async with semaphore`: acquisition runs as a task and this generator wakes every heartbeat
+    period (the follower loop's pattern). `analyzing` is announced only *after* the permit is held, so the
+    stream never claims to be analyzing while it is queued.
 
     성공/실패는 모두 `bedrock` 소스 상태에 반영한다 (조용한 실패 금지).
     Both outcomes are reflected in the `bedrock` source status (no silent failures).
 
+    Args:
+        analyzing_announced: 호출부가 이미 `phase: analyzing`을 냈는지 (주식 라우트의 첫 이벤트가 그것이다).
+            True면 대기가 있었을 때만 다시 알린다 - 대기 없는 흐름에 같은 phase를 두 번 내지 않는다.
+            / Whether the caller already emitted `phase: analyzing` (the stock route's first event is
+            exactly that). When True it is re-announced only if a wait happened, so an uncontended stream
+            never repeats the same phase.
+
     Raises:
         BedrockUnavailableError, BedrockCallError: 서비스 계층의 타입 있는 예외 그대로 / the service's typed errors, unchanged.
     """
-    async with semaphore:
+    acquire: "asyncio.Future[bool]" = asyncio.ensure_future(semaphore.acquire())
+    try:
+        waited = False
+        while True:
+            done, _pending = await asyncio.wait([acquire], timeout=HEARTBEAT_SECONDS)
+            if done:
+                acquire.result()    # permit 확보 (획득 실패는 그대로 올린다) / permit in hand; a failure propagates
+                break
+            waited = True
+            yield (EVENT_PHASE, {"phase": PHASE_WAITING})
+
+        if waited or not analyzing_announced:
+            yield (EVENT_PHASE, {"phase": PHASE_ANALYZING})
+
         try:
             # `make_stream()` 호출 자체(프롬프트 조립)도 try 안에 둔다 - 잘못된 입력의 즉시 예외까지 잡는다
             # The call itself (prompt assembly) sits inside the try so an eager bad-input error is caught too
@@ -323,7 +378,9 @@ async def _bedrock_deltas(
             state.mark_source(SOURCE_BEDROCK, STATUS_DEGRADED)
             _warn("ai_bedrock_failed", error=str(exc), error_type=type(exc).__name__)
             raise
-    state.mark_source(SOURCE_BEDROCK, STATUS_OK)
+        state.mark_source(SOURCE_BEDROCK, STATUS_OK)
+    finally:
+        _return_permit(semaphore, acquire)
 
 
 async def _analysis_stream(
@@ -341,12 +398,14 @@ async def _analysis_stream(
     ② 캐시 프로브(`peek`): 히트면 `final` 하나로 끝낸다
     ③ 미스면 이 키의 선점자/팔로워를 가른다 - 선점자는 `produce()`의 이벤트를 중계하며 델타를 누적하고
        완료 시 캐시에 저장, 팔로워는 `HEARTBEAT_SECONDS`마다 `phase: waiting`을 내며 선점자 결과를 승계
+       (선점자도 Bedrock permit을 기다리는 동안 같은 하트비트를 낸다 - `_bedrock_deltas`)
     ④ **어떤 경로에서도 `final`을 emit한다** - 오류는 `{"error": DETAIL_*, "status": code}`로 실어 보낸다.
        SSE의 최다 운영 이슈(연결만 끊겨 클라이언트가 완료/사망을 구분 못 함)를 여기서 차단한다.
     (1) emit the first `phase` at once, so TTFB is ~0s and the CloudFront idle counter starts resetting;
     (2) probe the cache with `peek` - a hit ends the stream with a single `final`;
     (3) on a miss, split leader from follower: the leader relays `produce()`'s events while accumulating
-        deltas and caches the result, a follower heartbeats `phase: waiting` and inherits the outcome;
+        deltas and caches the result, a follower heartbeats `phase: waiting` and inherits the outcome
+        (a leader queued for a Bedrock permit heartbeats the same way - see `_bedrock_deltas`);
     (4) **every path emits a `final`**, errors carried as `{"error": DETAIL_*, "status": code}` - which is
         what stops the classic SSE failure mode of a bare close the client cannot interpret.
 
@@ -517,6 +576,9 @@ async def post_stock_analysis(
                 market=(detail.get("market") or deps.market_of(symbol)).upper(),
                 news_titles=titles,
             ),
+            # 첫 이벤트가 이미 analyzing이었다 - permit을 기다렸을 때만 다시 알린다
+            # The first event was already `analyzing`; it is re-announced only after a permit wait
+            analyzing_announced=True,
         )
         async for event in deltas:
             yield event
@@ -583,13 +645,15 @@ async def post_article_analysis(
             _warn("ai_article_content_empty", url=payload.url)
             raise HTTPException(status_code=502, detail=DETAIL_ARTICLE_UNAVAILABLE)
 
-        # 본문을 확보한 뒤에야 분석 단계로 넘어간다 (사용자는 두 단계를 그대로 본다)
-        # Only with a body in hand does it move to the analysis phase, which the user sees as its own step
-        yield (EVENT_PHASE, {"phase": PHASE_ANALYZING})
+        # 본문을 확보하고 permit까지 든 뒤에 분석 단계를 알린다 (`_bedrock_deltas`가 emit한다) -
+        # 사용자는 fetching -> (대기 시 waiting) -> analyzing을 사실 그대로 본다.
+        # The analysis phase is announced once the body *and* the permit are in hand (`_bedrock_deltas`
+        # emits it), so the user truthfully sees fetching -> (waiting, if queued) -> analyzing.
         deltas = _bedrock_deltas(
             state,
             semaphore,
             lambda: bedrock_ai.analyze_article_stream(payload.title, content, payload.language == "ko"),
+            analyzing_announced=False,
         )
         async for event in deltas:
             yield event
