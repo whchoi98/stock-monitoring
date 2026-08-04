@@ -614,6 +614,20 @@ class _BoundedInflater:
 
     def feed(self, data: bytes) -> Iterator[bytes]:
         """원시 청크 1개를 상한 이하 조각들로 풀어 낸다 / Inflate one raw chunk into pieces of at most `DECOMPRESS_STEP`."""
+        if self._zobj is not None and self._zobj.eof:
+            # 스트림이 이전 청크에서 이미 끝났다 - 이 청크는 전부 `unused_data`(eof 뒤 쓰레기)다.
+            # `decompress()`에 계속 먹이면 zlib 객체 내부의 `unused_data`가 무제한 누적된다 (호출부의
+            # `chunks` 리스트가 아니라 zlib 오브젝트 안이라 파이썬 레벨 상한이 안 보인다) - 이전 청크
+            # 안의 eof는 잡아도 **다음** 청크에서 다시 먹이는 것까지는 못 막는다는 것이 NEW-1이었다
+            # (2026-08-04 리뷰). raw 바이트는 이미 호출부의 `MAX_RAW_READ_BYTES`가 세고 있으므로
+            # 여기서는 그냥 버린다.
+            # The stream already ended in a previous chunk - this chunk is entirely `unused_data`
+            # (post-eof garbage). Feeding it to `decompress()` anyway lets `unused_data` grow without
+            # bound *inside the zlib object* (invisible to any Python-level cap on the caller's `chunks`
+            # list) - catching eof within one chunk but not this next-chunk re-feed was NEW-1 (review,
+            # 2026-08-04). Raw bytes are already counted by the caller's `MAX_RAW_READ_BYTES`, so this
+            # chunk is simply dropped here.
+            return
         if self._zobj is None:
             # 판정에 2바이트가 필요한데 오리진은 첫 청크를 1바이트로 보낼 수 있다 (chunked면 자유다).
             # 모자라면 붙여 두고 다음 청크를 기다린다 - 부족한 바이트로 wbits를 단정하면 `zlib.error`가
@@ -642,6 +656,16 @@ class _BoundedInflater:
                 # is precisely what F-1 was.
                 return
             yield piece
+            if self._zobj.eof:
+                # 스트림이 끝났다 - 이후 바이트는 `unused_data`(eof 뒤 쓰레기)이지 다음 스텝의 입력이
+                # 아니다. 여기서 안 끊으면 적대적 오리진이 "유효한 짧은 스트림 + 쓰레기 다량"으로
+                # `unconsumed_tail`을 raw 상한까지 계속 먹여 peak를 캡의 8배까지 밀어붙인다
+                # (2026-08-04 리뷰 NEW-1 — F-1이 새로 연 구멍).
+                # The stream has ended - anything after this is `unused_data` (post-eof garbage), not the
+                # next step's input. Not stopping here lets a hostile origin ("valid short stream + a lot
+                # of garbage") keep feeding `unconsumed_tail` up to the raw bound, pushing peak to 8x the
+                # cap (review finding NEW-1, 2026-08-04 - a hole F-1 itself opened).
+                return
             # 상한에 걸려 남은 **입력**이 다음 스텝의 입력이 된다 / the input left over by the bound feeds the next step
             data = self._zobj.unconsumed_tail
 

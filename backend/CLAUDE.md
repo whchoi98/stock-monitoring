@@ -25,7 +25,9 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
     = 캡×8) — 해제 출력이 0인 스트림(끝나지 않는 gzip FNAME, deflate 빈 stored block 반복)은 캡을
     건드리지 못해 데드라인까지 무제한 읽었다(실측 5초 ~6GB, 2026-08-04 리뷰 F-1 → `article_compressed_overrun`).
     스텝 상한을 걸 수 없는 코덱(br/zstd)은 무한 폴백 대신 경고 + "" (단, `identity` 토큰은 목록에서
-    걸러내 `identity, gzip`은 gzip으로 처리 — httpx 시절 동작 복구).
+    걸러내 `identity, gzip`은 gzip으로 처리 — httpx 시절 동작 복구). 스트림이 `eof`에 닿으면 이후
+    청크는 즉시 버린다 — 안 그러면 유효한 짧은 스트림 뒤 쓰레기가 zlib의 `unused_data`에 파이썬
+    레벨로는 안 보이게 무제한 쌓인다(2026-08-04 재검증 NEW-1, F-1 자체의 재발).
   - 캡 상향과 함께 들어온 가드 3종 (2026-08-03 적대적 보안 리뷰): **charset 화이트리스트**
     (`SAFE_CHARSETS` — 오리진 charset을 코덱 레지스트리에 그대로 넘기면 punycode 같은 순수 파이썬
     O(n²) 코덱으로 이벤트 루프가 분 단위 정지), **fetch 총 데드라인**(`FETCH_TOTAL_DEADLINE` —

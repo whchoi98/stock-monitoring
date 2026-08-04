@@ -1313,18 +1313,29 @@ async def test_fetch_article_content_requests_identity_encoding(monkeypatch):
 BOMB_INFLATED_BYTES = 20_000_000
 BOMB_INCOMPRESSIBLE_TAIL = 200_000
 
-# 스트리밍 단계(`_limited_text`)의 peak 상한 - 캡의 3배. 이 단계에서 동시에 살아 있는 큰 객체는
-# 압축률과 무관하게 (a) 조각 리스트 ~캡, (b) `b"".join` 결과 ~캡, (c) 디코드된 str ~캡 셋뿐이고,
-# 여기에 스텝 1개(`DECOMPRESS_STEP`, 64KB)를 더한 값이다. 실측(2026-08-04): 스텝 상한 구현이 4.50MB
-# = 캡의 2.15배이며, 폭탄을 20MB에서 67MB로 키워도 **같은 값**이다(= 압축률에 비례하는 항이 없다).
-# 반대로 청크 하나를 통째로 압축 해제하는 구현은 첫 64KB 읽기가 20MB로 부풀어 51MB = 24.3배였다.
-# Peak bound for the *streaming stage* (`_limited_text`): 3x the cap. The only large live objects there are
-# (a) the piece list ~cap, (b) the `b"".join` result ~cap and (c) the decoded str ~cap - all independent of
-# the compression ratio - plus one decompression step (`DECOMPRESS_STEP`, 64KB). Measured 2026-08-04: the
-# stepped implementation peaks at 4.50MB = 2.15x the cap, unchanged when the bomb grows from 20MB to 67MB
-# (no term scales with the ratio), whereas inflating a whole chunk at once peaked at 51MB = 24.3x because
-# the first 64KB read expanded to 20MB.
-STREAMING_PEAK_LIMIT = 3 * news.MAX_ARTICLE_SIZE
+# 스트리밍 단계(`_limited_text`)의 peak 상한 - 캡의 8배. 동시에 살아 있는 큰 객체는 압축률과
+# 무관하게 (a) 조각 리스트 ~캡, (b) `b"".join` 결과 ~캡, (c) `.decode()`가 잠깐 잡는 스크래치
+# 버퍼(바이트 길이 × 최대 문자 너비 - 아스트랄 문자면 4), (d) 디코드된 str ~캡, 그리고 스텝 1개
+# (`DECOMPRESS_STEP`, 64KB)다. (c)는 3배 상한 때는 없던 항이다 - ASCII 폭탄에서는 최대 문자 너비가
+# 1이라 안 보였다.
+# 실측(2026-08-04): ASCII 폭탄은 4.50MB = 2.15배(20MB→67MB로 키워도 동일 - 압축률 비례 항 없음).
+# 그런데 **실제 기사**(추출 결과가 80바이트가 아니라 본문 전체인 경우)에서: 2.3MB 한국어 기사
+# 4.03배, 아스트랄 문자 위주 UTF-8 6.03배 - 폭탄 테스트만으로는 안 보이던 (c)항이 여기서 지배한다.
+# 8배는 아스트랄 최악(6.03배)에 여유를 두면서, 청크 하나를 통째로 압축 해제하던 옛 구현(51MB =
+# 24.3배)과 NEW-1(유효 gzip 1개+쓰레기 16MB가 `unused_data`에 무제한 누적, 수정 전 16.02배)은
+# 여전히 확실히 잡는다.
+# Peak bound for the *streaming stage* (`_limited_text`): 8x the cap. The large live objects are
+# (a) the piece list ~cap, (b) the `b"".join` result ~cap, (c) the scratch buffer `.decode()` briefly
+# holds (byte length x max char width - 4 for astral characters), (d) the decoded str ~cap, plus one
+# decompression step (`DECOMPRESS_STEP`, 64KB). (c) did not exist under the old 3x bound - an ASCII bomb
+# has max char width 1, so it never showed up.
+# Measured 2026-08-04: the ASCII bomb peaks at 4.50MB = 2.15x (unchanged from 20MB to 67MB - no term
+# scales with the ratio). But for **real articles** (where extraction keeps the whole body, not 80 bomb
+# bytes): a 2.3MB Korean article measures 4.03x, astral-heavy UTF-8 measures 6.03x - term (c), invisible
+# to the bomb test, dominates there. 8x leaves margin above the astral worst case (6.03x) while still
+# catching the old whole-chunk-inflation implementation (51MB = 24.3x) and NEW-1 (a valid tiny gzip
+# stream plus 16MB of garbage accumulating without bound in `unused_data`; pre-fix 16.02x).
+STREAMING_PEAK_LIMIT = 8 * news.MAX_ARTICLE_SIZE
 
 # `fetch_article_content` **전체**의 peak 상한 - 캡의 4배. 이 값은 위 스트리밍 단계 상한이 아니다:
 # 추출 단계(`_extract_paragraphs` + `_clean_html`)가 디코드된 str 위에서 사본을 만들기 때문에 큰
@@ -1435,6 +1446,87 @@ async def test_limited_text_streaming_stage_peaks_near_the_cap(monkeypatch):
     assert peak < STREAMING_PEAK_LIMIT, (
         f"streaming peak {peak:,}B = {peak / news.MAX_ARTICLE_SIZE:.1f}x the cap - the inflation ratio is "
         f"reaching memory"
+    )
+
+
+@pytest.mark.parametrize("label,text,charset", [
+    # 한경/매경 등 이 제품의 1급 콘텐츠 - 압축되지 않은 실제 다국어 본문 (폭탄이 아니다).
+    # This product's primary content (Hankyung/MK etc.) - real, uncompressed multi-byte text (not a bomb).
+    ("korean", ("가나다라마바사아자차카타파하" * 200_000)[:2_000_000], "utf-8"),
+    # 아스트랄 문자(4바이트 UTF-8)는 decode 스크래치 버퍼가 가장 크게 부푸는 형태 / astral (4-byte UTF-8) maximizes the decode scratch buffer
+    ("astral", ("𝔘𝔫𝔦𝔠𝔬𝔡𝔢" * 300_000)[:2_000_000], "utf-8"),
+])
+async def test_limited_text_peaks_bounded_for_real_multibyte_content(monkeypatch, label, text, charset):
+    """
+    실사용 다국어 본문(압축 없음)의 peak가 상한 안에 머문다 / Real, uncompressed multi-byte content stays within the bound.
+
+    2026-08-04 리뷰 F-2: 옛 `STREAMING_PEAK_LIMIT`(3배)은 폭탄(추출 결과 80바이트)에서만 성립했다.
+    이 테스트가 재는 것은 폭탄이 아니라 **본문 그대로**다 - `.decode()`가 잠깐 잡는 스크래치 버퍼가
+    조각 리스트/join/디코드된 str 3항 논거에 없던 항이었다(위 `STREAMING_PEAK_LIMIT` 주석 참조).
+    한국어 4.03배, 아스트랄 6.03배 실측 - 옛 3배 상한은 둘 다 넘겼다(정정 전 이 테스트는 RED였다).
+    Review F-2 (2026-08-04): the old `STREAMING_PEAK_LIMIT` (3x) held only for the bomb (whose extracted
+    body is 80 bytes). This test measures the body itself, not a bomb - `.decode()`'s transient scratch
+    buffer was the term missing from the piece-list/join/decoded-str rationale (see the
+    `STREAMING_PEAK_LIMIT` comment above). Measured: Korean 4.03x, astral 6.03x - both exceeded the old 3x
+    bound (this test was RED before that constant was corrected).
+    """
+    _patch_dns(monkeypatch)
+    body_bytes = f"<article><p>{text}</p></article>".encode(charset)
+    response = _streamed(_ChunkStream(body_bytes, chunk_size=PRODUCTION_READ_SIZE), headers={
+        "content-type": f"text/html; charset={charset}",
+    })
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        await news._limited_text(response, ARTICLE_URL)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < STREAMING_PEAK_LIMIT, (
+        f"[{label}] peak {peak:,}B = {peak / news.MAX_ARTICLE_SIZE:.2f}x the cap - real multi-byte "
+        f"content is exceeding the streaming-stage bound"
+    )
+
+
+async def test_limited_text_bounds_a_valid_stream_followed_by_garbage(monkeypatch):
+    """
+    유효한 압축 스트림 뒤에 쓰레기가 와도 peak가 무한히 자라지 않는다 / A garbage tail after a valid stream cannot grow peak without bound.
+
+    2026-08-04 적대적 재리뷰 NEW-1: F-1의 raw 카운터 자체가 F4의 재발이었다. `unconsumed_tail`은
+    스텝 상한이 **출력**을 끊었을 때 남는 입력이지, 스트림이 정상 종료(`eof`)된 뒤의 쓰레기가 아니다
+    (그건 `unused_data`다). eof 뒤에도 새 원시 청크를 계속 `decompress()`에 먹이면 쓰레기가
+    zlib 오브젝트 내부의 `unused_data`에 파이썬 레벨로는 안 보이게 무제한 쌓인다. 유효한 짧은
+    gzip 스트림 뒤에 16MB 쓰레기를 붙이면 수정 전 peak가 캡의 16배(raw 상한의 2배)였다.
+    Adversarial re-review NEW-1 (2026-08-04): F-1's own raw counter was itself a recurrence of F4.
+    `unconsumed_tail` is the input left over when the step bound cut **output**, not garbage after the
+    stream legitimately ended (`eof`) - that is `unused_data`. Feeding fresh raw chunks into
+    `decompress()` even after eof lets garbage accumulate inside the zlib object's `unused_data`,
+    invisible to any Python-level cap. A valid short gzip stream followed by 16MB of garbage peaked at
+    16x the cap before the fix (2x the raw bound).
+    """
+    _patch_dns(monkeypatch)
+    tiny = gzip.compress(b"<p>hi</p>")
+    hostile = tiny + b"G" * (16 * 1024 * 1024)
+    response = _streamed(_ChunkStream(hostile, chunk_size=PRODUCTION_READ_SIZE), headers={
+        "content-encoding": "gzip",
+    })
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        # `_limited_text`는 HTML을 그대로 돌려준다 - 추출은 상위 함수의 몫이다
+        # `_limited_text` returns raw HTML as-is - extraction is the caller's job
+        content = await news._limited_text(response, ARTICLE_URL)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert content == "<p>hi</p>"
+    assert peak < STREAMING_PEAK_LIMIT, (
+        f"peak {peak:,}B = {peak / news.MAX_ARTICLE_SIZE:.2f}x the cap - post-eof garbage is "
+        f"accumulating in the inflater's `unused_data`"
     )
 
 
