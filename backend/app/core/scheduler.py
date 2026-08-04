@@ -117,10 +117,20 @@ async def refresh_market(state: AppState) -> None:
     # 1) 시장별 독립 조회 / Fetch each market independently
     for market in MARKETS:
         try:
-            quotes_by_market[market] = await market_api.quotes_payload(market)
+            quotes = await market_api.quotes_payload(market)
         except Exception as exc:
             degraded = True
             _warn("scheduler_market_quotes_failed", market=market, error=str(exc))
+            continue
+        quotes_by_market[market] = quotes
+        # 부분 성공(커버리지 100% 미달)도 degraded다 — 행은 쓰지만 정상으로 보고하지 않는다.
+        # 라우트와 동일한 판정(`market_api.quote_coverage`)을 쓴다.
+        # A partial (below full coverage) is degraded too: the rows are written but never reported
+        # healthy, using the same judgement as the route (`market_api.quote_coverage`).
+        parsed, requested = market_api.quote_coverage(market, quotes)
+        if parsed < requested:
+            degraded = True
+            _warn("scheduler_market_quotes_partial", market=market, parsed=parsed, requested=requested)
 
     # 2) 시가총액은 실제로 시세가 온 심볼만 조회 / Only look up caps for symbols that actually returned a quote
     #    심볼이 하나도 없으면 조회를 건너뛴다 — 빈 맵이 10분 창(MARKET_CAP_TTL) 동안 캐시되면

@@ -7,6 +7,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from app.main import create_app
+from app.services import market_data
 from tests.conftest import FAKE_NEWS
 
 ENVELOPE_KEYS = {"asOf", "marketOpen", "data"}
@@ -92,6 +93,33 @@ def test_health_stays_200_without_app_context():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "sources": {}, "cacheAge": {}}
+
+
+def test_partial_quotes_are_served_but_reported_degraded(client, services, state, monkeypatch):
+    """
+    부분 성공은 200으로 서빙하되 헬스에서 degraded로 드러낸다 / A partial is served with 200 but reported degraded.
+
+    `fetch_quotes`는 커버리지 60~99%를 성공으로 반환한다(하한 미달만 예외). 이것을 그냥 ok로
+    마킹하면 US 테이블이 50행 중 30행만 보이는 동안 `/api/health`가 "완전 정상"이라고 보고한다.
+    `fetch_quotes` returns 60-99% coverage as a success (only below the floor raises). Marking that ok
+    would let `/api/health` claim full health while the US table shows 30 of 50 rows.
+    """
+    def partial(market: str):
+        """US만 요청 심볼보다 적게 반환 / Only US returns fewer rows than it requested."""
+        quotes = services.fetch_quotes(market)
+        return quotes[:-1] if market == "us" else quotes
+
+    monkeypatch.setattr(market_data, "fetch_quotes", partial)
+
+    response = client.get("/api/market/quotes", params={"market": "us"})
+    assert response.status_code == 200  # 부분 결과는 그대로 서빙 / the partial rows are still served
+    assert len(response.json()["data"]) == len(market_data.market_symbols("us")) - 1
+    assert state.source_status["yahoo"] == "degraded"
+    assert client.get("/api/health").json()["sources"]["yahoo"] == "degraded"
+
+    # 전량 커버리지는 다시 ok / full coverage marks the source ok again
+    assert client.get("/api/market/quotes", params={"market": "kr"}).status_code == 200
+    assert client.get("/api/health").json()["sources"]["yahoo"] == "ok"
 
 
 def test_upstream_failure_is_503_and_marks_source_degraded(client, services, state):

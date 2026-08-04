@@ -42,13 +42,41 @@ async def quotes_payload(market: str) -> list:
     return [quote.model_dump(mode="json") for quote in quotes]
 
 
+def quote_coverage(market: str, quotes: list) -> Tuple[int, int]:
+    """
+    커버리지 = (반환 행 수, 요청 심볼 수) / Coverage as (returned rows, requested symbols).
+
+    `market_data.fetch_quotes`는 커버리지 60~99%를 성공으로 반환하므로(하한 미달만 예외),
+    호출부가 이 비율을 직접 봐야 부분 성공이 `/api/health`에 드러난다. 라우트와 스케줄러가 같은
+    판정을 쓰도록 여기 한 곳에 둔다.
+    `fetch_quotes` returns 60-99% coverage as a success (only below the floor raises), so the caller has
+    to look at the ratio for a partial to reach `/api/health`. Kept here so the route and the scheduler
+    judge it identically.
+    """
+    return len(quotes), len(market_data.market_symbols(market))
+
+
 async def cached_quotes(state: AppState, market: str) -> Tuple[list, str]:
-    """고정 키 `quotes:{market}`로 시세 조회 / Read quotes through the fixed key `quotes:{market}`."""
+    """
+    고정 키 `quotes:{market}`로 시세 조회 / Read quotes through the fixed key `quotes:{market}`.
+
+    부분 성공은 `deps.Partial`로 감싸 전달한다: 행은 그대로 캐시·응답에 쓰이고 `sources.yahoo`만
+    degraded가 된다 (빈 화면 대신 30/50행을 보여주되 그 사실을 숨기지 않는다).
+    A partial is handed over wrapped in `deps.Partial`: the rows are cached and served as usual while
+    `sources.yahoo` goes degraded — 30 of 50 rows beats a blank table, but it must not look healthy.
+    """
+    async def fetcher():
+        payload = await quotes_payload(market)
+        parsed, requested = quote_coverage(market, payload)
+        if parsed < requested:
+            return deps.Partial(payload, {"market": market, "parsed": parsed, "requested": requested})
+        return payload
+
     return await deps.cached(
         state,
         deps.key_quotes(market),
         config.L2_TTL,
-        lambda: quotes_payload(market),
+        fetcher,
         deps.SOURCE_YAHOO,
     )
 

@@ -167,6 +167,17 @@ class FakeServices:
         self._enter("fetch_quotes")
         return [quote.model_copy() for quote in FAKE_QUOTES[market]]
 
+    def market_symbols(self, market: str) -> list[str]:
+        """
+        페이크 시세와 같은 유니버스 / The same universe the fake quotes cover.
+
+        호출부는 `len(quotes) < len(market_symbols(market))`로 부분 성공을 판정하므로, 이 페이크가
+        실제 config(시장당 50심볼)를 그대로 돌려주면 모든 테스트가 영구 degraded가 된다.
+        Callers detect a partial with `len(quotes) < len(market_symbols(market))`, so returning the real
+        config universe (50 symbols per market) here would make every test permanently degraded.
+        """
+        return [quote.symbol for quote in FAKE_QUOTES[market]]
+
     # --- charts (동기 / sync) ---
     def fetch_chart(self, symbol: str, period: str) -> ChartResponse:
         self._enter("fetch_chart")
@@ -229,6 +240,7 @@ def services(monkeypatch) -> FakeServices:
     monkeypatch.setattr(market_data, "fetch_indices", fake.fetch_indices)
     monkeypatch.setattr(market_data, "fetch_indicators", fake.fetch_indicators)
     monkeypatch.setattr(market_data, "fetch_quotes", fake.fetch_quotes)
+    monkeypatch.setattr(market_data, "market_symbols", fake.market_symbols)
     monkeypatch.setattr(charts, "fetch_chart", fake.fetch_chart)
     monkeypatch.setattr(fundamentals, "fetch_detail", fake.fetch_detail)
     monkeypatch.setattr(news, "fetch_news", fake.fetch_news)

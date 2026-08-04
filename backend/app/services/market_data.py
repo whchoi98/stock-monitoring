@@ -559,6 +559,28 @@ def _quote_budget(symbol_count: int) -> float:
     return min(QUOTE_BUDGET_PER_SYMBOL * symbol_count, QUOTE_FETCH_DEADLINE_MAX)
 
 
+def market_symbols(market: Literal["us", "kr"]) -> list[str]:
+    """
+    한 시장의 요청 대상 심볼 유니버스 / The symbol universe one market's quote fetch requests.
+
+    호출부(라우트·스케줄러)가 커버리지(반환 시세 수 / 요청 심볼 수)를 직접 계산해 부분 성공을
+    `/api/health`에 드러낼 수 있도록 공개한다. `fetch_quotes`를 AppState와 결합시키지 않고 부분
+    성공을 관측 가능하게 만드는 이음새다 — 서비스는 순수하게 유지한다.
+    Public so callers (routes and the scheduler) can compute coverage themselves - returned quotes over
+    requested symbols - and surface a partial in `/api/health`. This is the seam that makes a partial
+    observable without coupling `fetch_quotes` to AppState; the service stays pure.
+
+    Args:
+        market: "us" 또는 "kr" / "us" or "kr".
+
+    Raises:
+        ValueError: 지원하지 않는 market / Unsupported market argument.
+    """
+    if market not in _MARKETS:
+        raise ValueError(f"unsupported market: {market!r} (expected 'us' or 'kr')")
+    return list(getattr(config, _MARKETS[market][0]))
+
+
 def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
     """
     시장 전체 종목 시세를 심볼별 순차 요청으로 조회 / Fetch a market's quotes with serial per-symbol requests.
@@ -596,11 +618,8 @@ def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
             All symbols empty, or coverage below `QUOTE_MIN_COVERAGE`; keeps an empty or severely
             partial result from being cached as "success" and evicting the last good quotes.
     """
-    if market not in _MARKETS:
-        raise ValueError(f"unsupported market: {market!r} (expected 'us' or 'kr')")
-
-    symbols_attr, names_attr, sectors_attr, currency = _MARKETS[market]
-    symbols = list(getattr(config, symbols_attr))
+    symbols = market_symbols(market)  # 지원하지 않는 market은 여기서 ValueError / raises for a bad market
+    _symbols_attr, names_attr, sectors_attr, currency = _MARKETS[market]
     names = getattr(config, names_attr)
     sectors = getattr(config, sectors_attr)
     if not symbols:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Tuple
 
@@ -125,6 +126,29 @@ def market_open_now() -> bool:
 # 캐시 경유 조회 / Cached fetch
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class Partial:
+    """
+    "성공했지만 불완전한" 페이로드 래퍼 / Wrapper for a payload that succeeded but is incomplete.
+
+    fetcher가 이것을 반환하면 `cached`는 값을 그대로 캐시·응답에 쓰면서도 소스를 degraded로
+    마킹한다. 예외를 던지는 것과 다르다: 부분 결과는 마지막 정상값보다 최신이므로 서빙·캐시할
+    가치가 있지만, 조용히 ok로 넘기면 예를 들어 US 테이블이 50행 중 30행만 나오는 동안
+    `/api/health`가 "완전 정상"이라고 보고한다 (2026-08-04 장애 리뷰 지적 사항).
+    A fetcher returning this gets its value cached and served as usual, but the source is marked
+    degraded. This is deliberately not an exception: a partial is newer than the last good value and
+    worth serving, yet passing it silently as ok would let `/api/health` claim full health while, say,
+    the US table shows 30 of 50 rows (raised by the 2026-08-04 incident review).
+
+    Attributes:
+        value: 캐시·응답에 쓰이는 실제 페이로드 / The real payload that gets cached and returned.
+        detail: 경고 로그에 함께 담을 필드 (예: parsed/requested) / Extra fields for the warning log.
+    """
+
+    value: Any
+    detail: dict = field(default_factory=dict)
+
+
 async def cached(
     state: AppState,
     key: str,
@@ -142,7 +166,8 @@ async def cached(
         state: 앱 컨텍스트 / App context.
         key: 고정 캐시 키 / Fixed cache key.
         ttl: 캐시 TTL(초) / Cache TTL in seconds.
-        fetcher: 업스트림 조회 async 콜러블 / Async callable that queries upstream.
+        fetcher: 업스트림 조회 async 콜러블. `Partial`을 반환하면 값은 그대로 쓰고 소스만 degraded.
+            Async callable that queries upstream; returning `Partial` keeps the value but degrades the source.
         source: 소스 키 (예: "yahoo") / Source key (e.g. "yahoo").
 
     Returns:
@@ -160,6 +185,11 @@ async def cached(
             state.mark_source(source, STATUS_DEGRADED)
             _warn("route_fetch_failed", key=key, source=source, error=str(exc))
             raise
+        if isinstance(value, Partial):
+            # 부분 성공: 값은 캐시·응답에 쓰지만 헬스에서는 정상이 아니다 / cached and served, but not healthy
+            state.mark_source(source, STATUS_DEGRADED)
+            _warn("route_fetch_partial", key=key, source=source, **value.detail)
+            return value.value
         state.mark_source(source, STATUS_OK)
         return value
 

@@ -195,6 +195,31 @@ async def test_refresh_market_isolates_a_single_market_failure(state, services, 
     assert state.source_status["yahoo"] == STATUS_DEGRADED
 
 
+async def test_refresh_market_marks_degraded_on_a_partial_market(state, services, l2, monkeypatch):
+    """
+    커버리지 100% 미달(부분 성공)도 degraded다 / A partial market (below full coverage) is degraded too.
+
+    부분 결과는 캐시에 그대로 쓴다 — 마지막 정상값보다 최신이고, `fetch_quotes`의 커버리지 게이트가
+    이미 하한을 지켰다. 감추는 대신 `/api/health`에 드러내야 30/50행 테이블이 초록으로 보이지 않는다.
+    The partial rows are still written: they are newer than the last good value and `fetch_quotes`'
+    coverage gate already enforced the floor. Surfacing it in `/api/health` is what keeps a 30-of-50-row
+    table from looking green.
+    """
+    def partial(market: str):
+        """US만 요청 심볼보다 적게 반환 / Only US returns fewer rows than it requested."""
+        quotes = services.fetch_quotes(market)
+        return quotes[:-1] if market == "us" else quotes
+
+    monkeypatch.setattr(market_data, "fetch_quotes", partial)
+
+    await scheduler.refresh_market(state)
+
+    us_quotes, _as_of = state.cache.l1.get(deps.key_quotes("us"))
+    assert len(us_quotes) == len(market_data.market_symbols("us")) - 1
+    assert deps.key_quotes("us") in l2.store
+    assert state.source_status["yahoo"] == STATUS_DEGRADED
+
+
 async def test_refresh_market_skips_market_caps_when_no_quotes_arrived(state, services, caps, l2):
     """
     시세가 하나도 안 왔으면 시가총액 조회 자체를 건너뛴다 / With no quote at all, the cap lookup is skipped.

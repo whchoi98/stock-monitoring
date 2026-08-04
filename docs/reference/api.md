@@ -17,7 +17,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 | Market routes | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, news feed; payload builders reused by the scheduler |
 | Stock routes | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`); price overlay; simulated data flagged |
 | AI routes | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}`, `POST /api/ai/articles` — the only `text/event-stream` responses (`phase` → `delta`* → `final`; §3), cost defense in [agent-llm.md](agent-llm.md) |
-| Shared deps | `backend/app/api/deps.py` | `get_state`, `resolve_symbol` (universe gate, 404 outside US 50 + KR 50), cache key builders, `cached()` wrapper (503 + source degraded on failure) |
+| Shared deps | `backend/app/api/deps.py` | `get_state`, `resolve_symbol` (universe gate, 404 outside US 50 + KR 50), cache key builders, `cached()` wrapper (503 + source degraded on failure; a fetcher returning `Partial` is cached and served but still degrades the source) |
 | Rate limiter | `backend/app/api/ratelimit.py` | `SlidingWindowLimiter` used by the AI routes |
 | Models | `backend/app/models.py` | Pydantic response models + the `envelope()` helper |
 | App context | `backend/app/state.py` | `AppState`: tiered cache handle + per-source status (`mark_source`) |
@@ -65,7 +65,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 | 시장 라우트 | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, 뉴스 피드. 페이로드 빌더를 스케줄러가 재사용 |
 | 종목 라우트 | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`). 가격 오버레이, 시뮬레이션 표시 |
 | AI 라우트 | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}`, `POST /api/ai/articles` — 유일한 `text/event-stream` 응답(`phase` → `delta`* → `final`, §3). 비용 방어 상세는 [agent-llm.md](agent-llm.md) |
-| 공용 의존성 | `backend/app/api/deps.py` | `get_state`, `resolve_symbol`(유니버스 게이트 — US 50 + KR 50 밖은 404), 캐시 키 빌더, `cached()` 래퍼(실패 시 503 + 소스 degraded) |
+| 공용 의존성 | `backend/app/api/deps.py` | `get_state`, `resolve_symbol`(유니버스 게이트 — US 50 + KR 50 밖은 404), 캐시 키 빌더, `cached()` 래퍼(실패 시 503 + 소스 degraded. fetcher가 `Partial`을 반환하면 값은 캐시·서빙하되 소스는 degraded) |
 | 레이트리미터 | `backend/app/api/ratelimit.py` | AI 라우트가 쓰는 `SlidingWindowLimiter` |
 | 모델 | `backend/app/models.py` | pydantic 응답 모델 + `envelope()` 헬퍼 |
 | 앱 컨텍스트 | `backend/app/state.py` | `AppState`: 계층 캐시 핸들 + 소스별 상태(`mark_source`) |
