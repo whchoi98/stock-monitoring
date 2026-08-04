@@ -47,7 +47,7 @@ cd ..
 ### 3. Verify
 
 ```bash
-# Full test suite: backend pytest + frontend vitest (488 tests, all green)
+# Full test suite: backend pytest + frontend vitest (496 tests, all green)
 make test
 ```
 
@@ -185,7 +185,7 @@ cd ..
 ### 3. 검증
 
 ```bash
-# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (488개, 전부 그린)
+# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (496개, 전부 그린)
 make test
 ```
 

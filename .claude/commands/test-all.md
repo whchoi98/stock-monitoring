@@ -1,5 +1,5 @@
 ---
-description: 백엔드 pytest(320) + 프론트엔드 vitest(168) 전체 테스트 실행 후 결과 보고 / Execute the full test suite (backend pytest 320 + frontend vitest 168) and report results
+description: 백엔드 pytest(320) + 프론트엔드 vitest(176) 전체 테스트 실행 후 결과 보고 / Execute the full test suite (backend pytest 320 + frontend vitest 176) and report results
 allowed-tools: Read, Glob, Bash(cd backend && .venv/bin/pytest:*), Bash(cd frontend && npx vitest run:*), Bash(git log:*), Bash(git diff:*)
 ---
 
@@ -21,7 +21,7 @@ cd backend && .venv/bin/pytest -q
 ```
 
 ```bash
-# Frontend — vitest 168개 (colocated .test.tsx) / 168 vitest tests
+# Frontend — vitest 176개 (colocated .test.tsx) / 176 vitest tests
 cd frontend && npx vitest run
 ```
 
@@ -31,8 +31,8 @@ Run the second command even if the first fails. Collect both results before repo
 ## Step 2: 보고 / Report
 
 다음을 제시한다 / present:
-- 스위트별 실행/통과/실패/스킵 수 (기대값: backend 320, frontend 168, 총 488)
-  / per-suite totals: run, passed, failed, skipped (expected: backend 320, frontend 168, 488 total)
+- 스위트별 실행/통과/실패/스킵 수 (기대값: backend 320, frontend 176, 총 496)
+  / per-suite totals: run, passed, failed, skipped (expected: backend 320, frontend 176, 496 total)
 - 실패 테스트 상세: 파일 경로와 에러 메시지 / failed test details with file paths and error messages
 - 원인이 명백하면 수정 제안 / suggest fixes for failing tests if the cause is apparent
 

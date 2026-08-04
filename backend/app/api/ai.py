@@ -256,7 +256,10 @@ EVENT_FINAL = "final"
 # phase 값 / phase values
 PHASE_FETCHING = "fetching"      # 기사 본문 조회 중 / fetching the article body
 PHASE_ANALYZING = "analyzing"    # Bedrock 스트림 진행 중 / the Bedrock stream is running
-PHASE_WAITING = "waiting"        # 같은 키의 선점자를 기다리는 중 / waiting on this key's leader
+PHASE_WAITING = "waiting"        # 줄 서 있는 중 - 원인은 셋이다: 같은 키의 선점자 대기, Bedrock permit 대기,
+                                 # 기사 fetch permit 대기 (`_waiting_heartbeats`가 셋을 모두 낸다)
+                                 # Queued - three causes: waiting on this key's leader, on a Bedrock permit, or
+                                 # on an article fetch permit (`_waiting_heartbeats` emits it for all three)
 
 # inflight Future 결과 태그 / Result tags on an in-flight registry future
 OUTCOME_OK = "ok"
