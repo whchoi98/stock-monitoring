@@ -34,7 +34,7 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
 
 ## 명령 / Commands
 ```bash
-cd backend && .venv/bin/pytest -q   # 테스트 (328개, 오프라인)
+cd backend && .venv/bin/pytest -q   # 테스트 (343개, 오프라인)
 make run                             # 로컬 실행 (repo 루트, :8000)
 ```
 

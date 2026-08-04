@@ -18,7 +18,7 @@ Refactor existing code to improve quality without changing behavior.
 
 ### 1. 분석 / Analysis
 - 대상 코드와 해당 테스트를 식별 / identify the target code and its tests
-  - backend: `backend/tests/` (pytest 328개), frontend: colocated `.test.tsx` (vitest 176개)
+  - backend: `backend/tests/` (pytest 343개), frontend: colocated `.test.tsx` (vitest 176개)
 - 호출자와 의존성 전부 파악 / map all callers and dependencies
   - backend 레이어: `app/api/` → `app/services/` → `app/cache/`(memory L1 / dynamo L2 / tiered) + `app/core/`
   - frontend 레이어: `src/pages/` → `src/components/` → `src/api/`(client, queries, types)
