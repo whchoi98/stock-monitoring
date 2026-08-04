@@ -81,7 +81,16 @@ function StockDetailBody({ symbol }: { symbol: string }) {
         <FundamentalCards symbol={symbol} />
         <ReturnsRow symbol={symbol} />
         <StockNews symbol={symbol} />
-        <AIPanel symbol={symbol} />
+        {/*
+          AI 패널만 `key`로 심볼에 묶는다 — 다른 위젯은 react-query가 심볼별 키로 상태를 갈아 주지만, AI는
+          스트리밍 훅의 컴포넌트 상태(누적 텍스트·결과)를 들고 있어서 리마운트 없이는 이전 종목의 분석이 새
+          종목 화면에 남는다(뒤늦게 도착한 final이 새 심볼의 상태로 들어가는 경로도 같다).
+          Only the AI panel is tied to the symbol with a `key`: every other widget gets its state swapped by
+          react-query's per-symbol keys, while the AI panel holds the streaming hook's component state
+          (accumulated text and result), which without a remount would leave the previous symbol's analysis on
+          the new symbol's page — the same defect that lets a late final commit into the new symbol's state.
+        */}
+        <AIPanel key={symbol} symbol={symbol} />
       </div>
     </div>
   )

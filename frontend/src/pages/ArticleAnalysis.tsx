@@ -11,22 +11,28 @@
  *
  * **유료 호출을 정확히 한 번만 낸다.** StrictMode(main.tsx)는 이펙트를 두 번 실행하므로 ref로 막고,
  * 파라미터가 바뀌면(같은 라우트에서 다른 기사로 이동) 다시 실행되도록 요청 내용을 키로 쓴다.
- * `useMutation`은 재시도도 하지 않는다 (main.tsx `mutations: { retry: false }`).
+ * 스트리밍 훅도 재시도하지 않는다 (`api/aiStream.ts` — 실패는 그대로 `error`가 된다).
  * **The paid call fires exactly once.** StrictMode (in main.tsx) runs effects twice, so a ref guards it, keyed
- * on the request itself so a parameter change (another article on the same route) does run again. The mutation
- * never retries either (main.tsx's `mutations: { retry: false }`).
+ * on the request itself so a parameter change (another article on the same route) does run again. The streaming
+ * hook never retries either (`api/aiStream.ts`: a failure simply becomes `error`).
+ *
+ * 응답은 SSE로 흘러 들어온다 — 단계(`phase`)가 먼저, 토큰이 `streamText`에 누적되고, 마지막에 완결된
+ * `data`가 온다. 그래서 진행 표시가 단계 문구 → 실시간 마크다운 → 최종본으로 이어진다.
+ * The response arrives as SSE: the phase first, tokens accumulating into `streamText`, and a settled `data` at
+ * the end — so progress reads as phase wording, then live markdown, then the final text.
  */
 import { useEffect, useRef } from 'react'
 import Markdown from 'react-markdown'
 import { Link, useSearchParams } from 'react-router-dom'
+import remarkGfm from 'remark-gfm'
 
-import { useArticleAI } from '../api/queries.ts'
+import { useArticleAIStream } from '../api/aiStream.ts'
 import type { Language } from '../api/types.ts'
 import { AsOfBadge } from '../components/common/AsOfBadge.tsx'
 import { Card } from '../components/common/Card.tsx'
 import { ErrorCard } from '../components/common/ErrorCard.tsx'
 import { Spinner } from '../components/common/Spinner.tsx'
-import { aiErrorMessage } from '../lib/aiMessages.ts'
+import { aiErrorMessage, aiPhaseLabel } from '../lib/aiMessages.ts'
 
 /** 제목 길이 상한 — 백엔드 `MAX_TITLE_LEN`과 같은 값 / The title cap, the same value as the backend's `MAX_TITLE_LEN` */
 const MAX_TITLE_LEN = 512
@@ -90,7 +96,13 @@ interface ArticleAnalysisBodyProps {
 }
 
 function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps) {
-  const { data, asOf, isLoading, error, analyze } = useArticleAI()
+  /*
+   * `isLoading`은 쓰지 않는다 — 이 화면에는 실행 버튼이 없고(진입이 곧 요청), 아래 `pending`이 "결과도
+   * 오류도 텍스트도 없는 상태"로 진행 중을 판정하므로 실행 전 첫 렌더까지 함께 덮인다.
+   * `isLoading` is unused: this screen has no run button (arriving is the request) and `pending` below decides
+   * progress from "no result, no error, no text", which covers the first render before the run as well.
+   */
+  const { phase, streamText, data, asOf, error, analyze } = useArticleAIStream()
 
   const run = () => analyze({ url, title, language })
 
@@ -100,22 +112,25 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
    * The automatic run on entry, skipped when the request matches one already sent. The ref survives
    * StrictMode's second effect pass, so this comparison is what stops the paid call from firing twice.
    *
-   * **왜 `setTimeout(…, 0)`으로 한 틱 미루는가** (육안 확인에서 잡은 실제 결함):
-   * `mutate()`를 마운트 이펙트 안에서 **동기로** 부르면 StrictMode 개발 모드에서 결과가 유실된다.
-   * TanStack Query v5의 `MutationObserver`에는 `onUnsubscribe`(진행 중인 뮤테이션에서 옵저버를 떼어낸다)만
-   * 있고 다시 붙이는 `onSubscribe`가 없다 — StrictMode가 이펙트를 정리·재실행하는 사이 `useSyncExternalStore`의
-   * 구독이 끊기면서 옵저버가 떨어져 나가고, 그 뒤 도착한 200 응답이 아무 컴포넌트에도 전달되지 않는다
-   * (화면은 영원히 "진행 중"으로 남았다). 다음 매크로태스크로 미루면 구독이 자리를 잡은 뒤에 호출되므로
-   * 개발·운영 모두에서 결과가 도착한다. 예약은 정리 함수가 취소하므로 StrictMode에서도 호출은 한 번이다.
-   * **Why the call is deferred by one tick with `setTimeout(…, 0)`** (a real defect the visual check caught):
-   * calling `mutate()` *synchronously* inside a mount effect loses the result under StrictMode in development.
-   * TanStack Query v5's `MutationObserver` has only `onUnsubscribe` (which detaches the observer from the
-   * in-flight mutation) and no `onSubscribe` to re-attach it, so when StrictMode tears the
-   * `useSyncExternalStore` subscription down between the two effect passes the observer comes off the mutation
-   * and the 200 that arrives afterwards reaches no component — the screen stayed "in progress" forever.
-   * Deferring to the next macrotask means the call happens once the subscription has settled, so the result
-   * arrives in development and in production alike. The cleanup cancels the pending schedule, so StrictMode
-   * still yields exactly one call.
+   * **왜 `setTimeout(…, 0)`으로 한 틱 미루는가** (육안 확인에서 잡은 실제 결함, 스트리밍 훅에서도 유효):
+   * 분석 요청을 마운트 이펙트 안에서 **동기로** 부르면 StrictMode 개발 모드에서 결과가 유실된다.
+   * StrictMode는 이펙트를 한 번 정리하고 다시 실행하는데, 그 정리에는 **스트리밍 훅 자신의 언마운트
+   * 정리**(`api/aiStream.ts`: 실행 번호를 올리고 흐르던 본문을 끊는다)도 포함된다. 그래서 첫 패스에서 시작한
+   * 스트림은 폐기되고, 그 패스가 이미 ref를 채워 두었다면 두 번째 패스는 "같은 요청"이라 건너뛴다 —
+   * 화면이 영원히 진행 중으로 남는다. 다음 매크로태스크로 미루고 **ref를 그 안에서** 채우면, 취소된 예약은
+   * 아무 흔적을 남기지 않으므로 살아남은 패스 하나만 실제로 호출한다 (호출은 정확히 한 번).
+   * 예전 원인(TanStack `MutationObserver`가 구독이 끊길 때 뮤테이션에서 떨어져 나가던 문제)은 훅이 바뀌며
+   * 사라졌지만, 지연이 필요한 이유는 그대로 남았다.
+   * **Why the call is deferred by one tick with `setTimeout(…, 0)`** (a real defect the visual check caught,
+   * still live with the streaming hook): calling the analysis *synchronously* inside a mount effect loses the
+   * result under StrictMode in development. StrictMode tears effects down once and re-runs them, and that
+   * teardown includes the **streaming hook's own unmount cleanup** (`api/aiStream.ts` bumps the run counter and
+   * stops the body in flight). The stream the first pass started is therefore discarded, and if that pass had
+   * already filled the ref the second pass would skip it as "the same request" — leaving the screen in progress
+   * forever. Deferring to the next macrotask and filling the ref *inside* it means a cancelled schedule leaves
+   * no trace, so only the surviving pass actually calls (exactly once). The original cause (TanStack's
+   * `MutationObserver` detaching from the mutation when its subscription dropped) went away with the hook, but
+   * the reason to defer did not.
    */
   const requested = useRef<string | null>(null)
   useEffect(() => {
@@ -130,10 +145,20 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
   }, [url, title, language, analyze])
 
   /*
-   * 아직 아무 상태도 없는 첫 렌더(이펙트 직전)도 진행 중으로 본다 — 한 프레임짜리 빈 화면을 만들지 않는다.
-   * The very first render (before the effect) counts as running too, so no one-frame empty state flashes.
+   * final이 도착하면 완결된 `data.analysis`가 누적 텍스트를 대신한다 (스펙 §2 — 훅은 final 뒤에도
+   * `streamText`를 지우지 않으므로 우선순위를 여기서 정한다).
+   * Once the final lands, the settled `data.analysis` replaces the accumulated text (spec §2: the hook keeps
+   * `streamText` afterwards, so the precedence is decided here).
    */
-  const pending = isLoading || (error === null && data === undefined)
+  const body = data?.analysis ?? streamText
+
+  /*
+   * 아직 아무 상태도 없는 첫 렌더(이펙트 직전)도 진행 중으로 본다 — 한 프레임짜리 빈 화면을 만들지 않는다.
+   * 반대로 토큰이 한 조각이라도 도착했으면 그 텍스트가 진행 표시이므로 스피너를 접는다.
+   * The very first render (before the effect) counts as running too, so no one-frame empty state flashes.
+   * Conversely, once even one token has arrived that text *is* the progress, so the spinner folds away.
+   */
+  const pending = data === undefined && error === null && body === ''
 
   return (
     <div className="article">
@@ -148,36 +173,36 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
       <Card title="AI 분석" action={<AsOfBadge asOf={asOf} />}>
         {pending ? (
           /*
-           * 두 단계를 **둘 다** 표시한다 (전환 애니메이션 없음). 백엔드는 기사 수집과 Claude 호출을
-           * 한 번의 POST 안에서 처리하므로 클라이언트가 관측할 수 있는 것은 "요청 진행 중"뿐이다.
-           * 시간 기준으로 [1/2]→[2/2]를 넘기면 실제로는 모르는 경계를 아는 척하게 된다 — 그래서
-           * 무엇이 진행되는지만 정직하게 나열한다.
-           * **Both** stages show at once, with no transition. The backend does the fetch and the Claude call
-           * inside one POST, so all the client can observe is "the request is in flight"; flipping [1/2] to
-           * [2/2] on a timer would pretend to know a boundary it cannot see. So it lists what is happening
-           * and claims nothing more.
+           * 지금 어느 단계인지는 **서버가 말해 준다** (`phase` 이벤트). 예전에는 기사 수집과 Claude 호출이
+           * 한 번의 POST 안에서 끝나 클라이언트가 경계를 볼 수 없었고, 그래서 `[1/2]`·`[2/2]`를 둘 다
+           * 세워 두었다. 이제는 관측되는 단계 하나만 정직하게 보여준다 (문구는 `lib/aiMessages.ts`).
+           * The server now **says** which stage it is in (the `phase` event). Previously the fetch and the
+           * Claude call finished inside one POST and the client could not see the boundary, so both `[1/2]`
+           * and `[2/2]` stood there; today it shows the one observed stage (wording in `lib/aiMessages.ts`).
            */
           <div className="ai-pending">
             <Spinner />
-            <div>
-              <ol className="article-steps">
-                <li>[1/2] 기사 수집 중</li>
-                <li>[2/2] Claude 분석 중</li>
-              </ol>
-              <p className="article-steps-note">두 단계를 한 번의 요청으로 처리합니다</p>
-            </div>
+            <p className="empty">{aiPhaseLabel(phase)}</p>
           </div>
         ) : error !== null ? (
+          /*
+           * 실패는 부분 텍스트보다 앞선다 (F6 AIPanel과 같은 순서) — 잘린 분석을 결과처럼 남겨 두면
+           * 사용자가 그것을 완성된 답으로 읽는다.
+           * A failure outranks partial text (the same order as F6's AIPanel): a truncated analysis left on
+           * screen invites reading it as a finished answer.
+           */
           <ErrorCard onRetry={run} message={aiErrorMessage(error)} />
         ) : (
           /*
            * 모델 출력이므로 `dangerouslySetInnerHTML`이 아니라 react-markdown으로 렌더한다 (F6 AIPanel과
-           * 같은 이유·같은 `.markdown` 스타일). 파이프 표는 remark-gfm이 없어 원문 그대로 보인다.
+           * 같은 이유·같은 `.markdown` 스타일·같은 remark-gfm). 스트리밍 중에는 아직 닫히지 않은 표·목록이
+           * 프레임마다 다르게 파싱될 수 있는데, 그것이 곧 "쓰이는 중"의 모습이므로 그대로 보여준다.
            * Model output, so react-markdown renders it rather than `dangerouslySetInnerHTML` (F6's AIPanel,
-           * same reason and the same `.markdown` styling). Pipe tables show as raw text: no remark-gfm.
+           * same reason, same `.markdown` styling, same remark-gfm). Mid-stream an unclosed table or list may
+           * parse differently frame to frame; that is what "being written" looks like, so it is shown as is.
            */
           <div className="markdown">
-            <Markdown>{data?.analysis ?? ''}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]}>{body}</Markdown>
           </div>
         )}
       </Card>

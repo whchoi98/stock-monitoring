@@ -2,17 +2,15 @@
  * TanStack Query 훅 — envelope을 언래핑해 화면이 쓰는 평평한 형태로 돌려준다.
  * TanStack Query hooks; they unwrap the envelope into the flat shape the UI consumes.
  *
- * 모든 훅은 `{data, asOf, marketOpen, isLoading, error}`를 돌려준다 (AI 훅은 `analyze`가 추가된다).
+ * 모든 훅은 `{data, asOf, marketOpen, isLoading, error}`를 돌려준다.
  * 폴링은 여기 정의된 두 상수만 쓴다 — 수동 setInterval 금지.
- * Every hook returns `{data, asOf, marketOpen, isLoading, error}` (the AI hooks add `analyze`), and
- * polling uses only the two constants defined here; never a hand-rolled setInterval.
+ * Every hook returns `{data, asOf, marketOpen, isLoading, error}`, and polling uses only the two constants
+ * defined here; never a hand-rolled setInterval.
  */
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 
-import { apiGet, apiPost } from './client.ts'
+import { apiGet } from './client.ts'
 import type {
-  ArticleAnalysis,
-  ArticleAnalysisRequest,
   ChartData,
   Envelope,
   InvestorsData,
@@ -22,7 +20,6 @@ import type {
   Overview,
   Period,
   Quote,
-  StockAnalysis,
   StockDetail,
 } from './types.ts'
 
@@ -46,11 +43,6 @@ export interface QueryResult<T> {
   marketOpen: boolean | undefined
   isLoading: boolean
   error: Error | null
-}
-
-/** AI 훅의 반환 형태 — 분석은 사용자가 눌러야 시작된다 / What the AI hooks return; analysis starts on a click */
-export interface MutationResult<TVariables, T> extends QueryResult<T> {
-  analyze: (variables: TVariables) => void
 }
 
 /** envelope을 평평하게 펼친다 / Flatten the envelope */
@@ -142,36 +134,17 @@ export function useInvestors(symbol: string): QueryResult<InvestorsData> {
   )
 }
 
-// ---------------------------------------------------------------------------
-// AI 분석 / AI analysis
-// ---------------------------------------------------------------------------
-
-/**
- * 종목 AI 분석 / Stock AI analysis.
+/*
+ * AI 분석 훅은 여기 없다 / The AI analysis hooks do not live here.
  *
- * 폴링하지 않는다 (비용이 드는 유일한 엔드포인트) — 사용자가 `analyze()`를 부를 때만 호출된다.
- * Never polled, as these are the only endpoints that cost money; it runs only when `analyze()` is called.
+ * 두 AI 엔드포인트는 SSE(`phase`→`delta`*→`final`)를 흘리므로 `api/aiStream.ts`의 스트리밍 훅
+ * (`useStockAIStream`/`useArticleAIStream`)이 담당한다 — react-query는 키마다 완결된 결과 하나를 캐시하는
+ * 모델이라 진행 중 텍스트를 담을 자리가 없다. 그 파일이 "서버 상태는 react-query로만" 규칙의 유일한
+ * 예외이며, 이 파일은 그 예외를 넓히지 않는다.
+ * Both AI endpoints stream SSE (`phase`, deltas, `final`), so `api/aiStream.ts`'s hooks own them: react-query
+ * caches one settled result per key and has nowhere to put in-flight text. That file is the single exception to
+ * the "server state lives in react-query" rule, and this file does not widen it.
  */
-export function useStockAI(symbol: string): MutationResult<void, StockAnalysis> {
-  const mutation = useMutation({
-    mutationFn: () => apiPost<StockAnalysis>(`/api/ai/stocks/${path(symbol)}`),
-  })
-  return {
-    ...unwrap(mutation.data, mutation.isPending, mutation.error),
-    analyze: mutation.mutate,
-  }
-}
-
-/** 기사 AI 분석 (요약·번역·인사이트) / Article AI analysis (summary, translation, insights) */
-export function useArticleAI(): MutationResult<ArticleAnalysisRequest, ArticleAnalysis> {
-  const mutation = useMutation({
-    mutationFn: (body: ArticleAnalysisRequest) => apiPost<ArticleAnalysis>('/api/ai/articles', body),
-  })
-  return {
-    ...unwrap(mutation.data, mutation.isPending, mutation.error),
-    analyze: mutation.mutate,
-  }
-}
 
 /** 심볼을 경로 세그먼트로 / A symbol as a path segment */
 function path(symbol: string): string {

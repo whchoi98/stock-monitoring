@@ -16,6 +16,7 @@
  * - 그 외(500 `ai_failed`, 네트워크 실패, ALB/CloudFront가 만든 5xx) — 일반 문구.
  * **The branches key off `ApiError.status`** (plus `detail` for 502 alone; `api/client.ts` exposes both).
  */
+import type { AiPhase } from '../api/aiStream.ts'
 import { ApiError } from '../api/client.ts'
 
 /** 레이트리밋(429) 문구 / The rate-limit (429) wording */
@@ -52,4 +53,29 @@ export function aiErrorMessage(error: Error): string {
   if (error.status === 503) return AI_UNAVAILABLE
   if (error.status === 502 && error.detail === DETAIL_ARTICLE_UNAVAILABLE) return ARTICLE_UNAVAILABLE
   return AI_FAILED
+}
+
+/**
+ * 진행 단계 문구 — 두 화면이 같은 표를 쓴다 (오류 문구와 같은 이유).
+ * The phase wording, one table for both screens, for the same reason the error wording is shared.
+ *
+ * 문구는 백엔드 `phase` 이벤트를 그대로 옮긴 것이다: `fetching`은 기사 본문 수집(종목 분석에서는 시세·지표
+ * 수집), `analyzing`은 Bedrock 스트림, `waiting`은 **같은 대상을 이미 분석 중인 다른 요청**의 결과를
+ * 기다리는 상태(백엔드의 선점자-팔로워 구조)다. 마지막이 중요하다 — 그때 이 사용자의 요청은 모델을 부르지
+ * 않으므로, "분석 중"이라고 말하면 비용이 두 번 드는 것처럼 읽힌다.
+ * The wording mirrors the backend's `phase` event: `fetching` is the article (or quote) collection, `analyzing`
+ * is the Bedrock stream, and `waiting` means another request is already analysing the same subject and this one
+ * is waiting for its result (the backend's leader-follower arrangement). That last one matters: this request
+ * calls no model at all, so calling it "analysing" would read as paying twice.
+ *
+ * `null`은 요청은 보냈지만 첫 `phase`가 아직 오지 않은 사이다 (그리고 기사 화면의 첫 렌더). 그 짧은 구간에도
+ * 문구가 있어야 스피너만 도는 화면이 생기지 않는다.
+ * `null` covers the gap after the request but before the first `phase` (and the article screen's first render);
+ * wording there keeps a bare spinner from ever standing alone.
+ */
+export function aiPhaseLabel(phase: AiPhase | null): string {
+  if (phase === 'fetching') return '본문을 가져오는 중…'
+  if (phase === 'waiting') return '다른 요청의 결과를 기다리는 중…'
+  if (phase === 'analyzing') return '분석 중…'
+  return '분석 준비 중…'
 }

@@ -1004,17 +1004,29 @@ a {
   background: none;
 }
 
+/*
+ * 표 — remark-gfm이 붙은 뒤부터 실제로 렌더된다 (그 전에는 파이프 줄이 문단이었다). 칸이 좁으면 숫자
+ * 열이 붙어 읽히므로 격자를 그리고, 머리 행만 배경으로 눌러 준다. 색은 토큰만 쓴다.
+ * Tables only render now that remark-gfm is wired in (the pipe lines used to be a paragraph). Narrow cells run
+ * numbers together, so the grid is drawn and the header row alone is shaded. Colours come from tokens only.
+ */
 .markdown table {
   width: 100%;
+  margin: 8px 0 12px;
   border-collapse: collapse;
   font-size: 13px;
 }
 
 .markdown th,
 .markdown td {
-  padding: 6px 8px;
-  border-top: 1px solid var(--bg);
+  padding: 6px 10px;
+  border: 1px solid var(--bg);
   text-align: left;
+}
+
+.markdown th {
+  background: var(--bg);
+  color: var(--text-strong);
 }
 
 .markdown blockquote {
@@ -1060,25 +1072,12 @@ a {
 }
 
 /*
- * 진행 블록이 세 줄이라 스피너를 첫 줄에 맞춘다 (AIPanel은 한 줄이라 가운데 정렬이 맞다).
- * The block runs three lines here, so the spinner aligns to the first (AIPanel's single line wants centring).
+ * 진행 표시는 AIPanel과 같은 한 줄(스피너 + 단계 문구)이므로 `.ai-pending`을 그대로 쓴다 — 두 단계를
+ * 나열하던 세 줄 블록(`.article-steps`)은 서버가 단계를 알려주게 되면서 사라졌다.
+ * Progress is the same single line as AIPanel's (spinner plus phase wording), so `.ai-pending` serves as is;
+ * the three-line block that listed both stages (`.article-steps`) went away once the server began naming the
+ * stage itself.
  */
-.article .ai-pending {
-  align-items: flex-start;
-}
-
-/* 진행 단계 — 번호는 문구에 이미 있으므로(`[1/2]`) 목록 마커는 끈다 / The numbers are in the text already (`[1/2]`), so no list marker */
-.article-steps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 13px;
-}
-
-.article-steps-note {
-  margin: 6px 0 0;
-  font-size: 11px;
-}
 
 /* 안내 카드의 홈 링크 (잘못된 접근 / 404 / 에러 경계) / The home link on a notice card (bad entry, 404, error boundary) */
 .notice-back {
