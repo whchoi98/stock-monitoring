@@ -27,6 +27,28 @@ stock-monitoring is a real-time stock monitoring web service built on Yahoo Fina
 - **AI analysis with Amazon Bedrock** — Stock summaries and news-article analysis using Claude (`global.anthropic.claude-sonnet-4-6`), rate-limited per client IP
 - **Tiered caching** — In-memory L1 + DynamoDB L2 with TTL and single-flight key locking, and a 60-second quote overlay that keeps prices fresh on cached detail responses
 
+## Architecture
+
+```mermaid
+flowchart TD
+    User["User Browser"] -->|HTTPS| CF["CloudFront Distribution<br/>https://d2wa9w1vbqlndl.cloudfront.net"]
+    CF -->|"HTTP + X-Origin-Verify header"| SG["ALB Security Group<br/>(CloudFront origin-facing prefix list inbound only)"]
+    SG --> ALB["Application Load Balancer<br/>(fixed 403 on header mismatch)"]
+    ALB -->|":8000"| ECS["ECS Fargate (ARM64, 1 task, --workers 1)<br/>FastAPI + SPA static files<br/>market-hours-aware refresh scheduler"]
+    ECS <-->|"L2 cache R/W (TTL)"| DDB[("DynamoDB<br/>stock-monitoring-cache")]
+    ECS -->|"quotes / charts / fundamentals"| YF[("Yahoo Finance<br/>(yfinance)")]
+    ECS -->|"RSS + article fetch<br/>(SSRF-guarded)"| NEWS[("US/KR financial news feeds")]
+    ECS <-->|"AI analysis"| BR[("Amazon Bedrock<br/>global.anthropic.claude-sonnet-4-6")]
+    SM[("Secrets Manager<br/>stock-monitoring/origin-verify")] -.->|"custom origin header"| CF
+    SM -.->|"listener match rule"| ALB
+```
+
+- **Production**: https://d2wa9w1vbqlndl.cloudfront.net — a single CloudFront distribution serves both the SPA and `/api/*` (default behavior `CACHING_DISABLED`; `/assets/*` long-cached thanks to immutable Vite hashes).
+- The ALB accepts inbound traffic only from the CloudFront origin-facing managed prefix list; as a second layer of defense, the listener forwards only when the `X-Origin-Verify` header matches — direct ALB access gets a fixed 403.
+- A single Fargate task with `--workers 1` is deliberate: the in-memory L1 cache and the AI global semaphore are per-process, so scaling out requires a design review first.
+- The scheduler pre-refreshes hot cache keys on a market-hours-aware cadence, and DynamoDB (TTL) acts as the L2 cache that survives task restarts.
+- The stack reuses the existing `cc-on-bedrock-vpc` by lookup only — it never creates network resources.
+
 ## Prerequisites
 
 - Python 3.12+
@@ -170,6 +192,28 @@ stock-monitoring은 Yahoo Finance 데이터를 기반으로 한 실시간 주식
 - **재무지표·뉴스** — 종목별 재무 지표와 미국/한국 RSS 피드 기반 금융 뉴스 집계, SSRF 가드가 적용된 기사 본문 추출
 - **Amazon Bedrock AI 분석** — Claude(`global.anthropic.claude-sonnet-4-6`)를 이용한 종목 요약·뉴스 기사 분석, 클라이언트 IP당 레이트리밋 적용
 - **계층형 캐시** — 인메모리 L1 + DynamoDB L2(TTL)와 single-flight 키 락, 캐시된 상세 응답의 가격을 60초 시세로 덮어쓰는 가격 오버레이 적용
+
+## 아키텍처
+
+```mermaid
+flowchart TD
+    User["사용자 브라우저"] -->|HTTPS| CF["CloudFront Distribution<br/>https://d2wa9w1vbqlndl.cloudfront.net"]
+    CF -->|"HTTP + X-Origin-Verify 헤더"| SG["ALB Security Group<br/>(CloudFront origin-facing prefix list 인바운드만 허용)"]
+    SG --> ALB["Application Load Balancer<br/>(헤더 불일치 시 고정 403)"]
+    ALB -->|":8000"| ECS["ECS Fargate (ARM64, 태스크 1개, --workers 1)<br/>FastAPI + SPA 정적 파일<br/>장 운영 시간 인지 갱신 스케줄러"]
+    ECS <-->|"L2 캐시 R/W (TTL)"| DDB[("DynamoDB<br/>stock-monitoring-cache")]
+    ECS -->|"시세 / 차트 / 재무지표"| YF[("Yahoo Finance<br/>(yfinance)")]
+    ECS -->|"RSS + 기사 본문 조회<br/>(SSRF 가드)"| NEWS[("미국/한국 금융 뉴스 피드")]
+    ECS <-->|"AI 분석"| BR[("Amazon Bedrock<br/>global.anthropic.claude-sonnet-4-6")]
+    SM[("Secrets Manager<br/>stock-monitoring/origin-verify")] -.->|"커스텀 오리진 헤더"| CF
+    SM -.->|"리스너 매칭 규칙"| ALB
+```
+
+- **프로덕션**: https://d2wa9w1vbqlndl.cloudfront.net — 단일 CloudFront 배포가 SPA와 `/api/*`를 함께 서빙합니다 (기본 동작 `CACHING_DISABLED`, `/assets/*`는 Vite 불변 해시 덕분에 장기 캐시).
+- ALB는 CloudFront origin-facing 관리형 prefix list의 인바운드만 허용하며, 2차 방어로 리스너가 `X-Origin-Verify` 헤더 일치 시에만 forward합니다 — ALB 직접 접근은 고정 403.
+- Fargate 태스크 1개 + `--workers 1`은 의도된 값입니다: 인메모리 L1 캐시와 AI 전역 세마포어가 프로세스 단위이므로 스케일아웃 전 설계 재검토가 필요합니다.
+- 스케줄러가 장 운영 시간을 인지하는 주기로 핫 캐시 키를 선제 갱신하며, DynamoDB(TTL)가 태스크 재시작에도 유지되는 L2 캐시 역할을 합니다.
+- 스택은 기존 `cc-on-bedrock-vpc`를 lookup으로만 재사용하며 네트워크 리소스를 절대 생성하지 않습니다.
 
 ## 사전 요구 사항
 
