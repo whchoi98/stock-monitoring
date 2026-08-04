@@ -188,12 +188,36 @@ SAFE_CHARSETS = {
 # finite DoS bound, and the extraction regexes stay linear at it (constant work per candidate, above).
 MAX_ARTICLE_SIZE = 2_097_152
 # 기사 조회는 압축을 요청하지 않는다: 압축 해제 폭탄(작은 본문이 GB로 부푸는 응답)이 크기 상한을
-# 우회하지 못하게 한다. 오리진이 이를 무시해도 스트리밍 카운터가 상한에서 읽기를 끊고, 압축 해제
-# 자체가 아래 `DECOMPRESS_STEP` 단위로 묶인다.
+# 우회하지 못하게 한다. 오리진이 이를 무시하면 압축 해제를 우리가 수행하고, 세 가지가 함께 묶는다:
+# 해제된 바이트는 `MAX_ARTICLE_SIZE`, 원시 바이트는 `MAX_RAW_READ_BYTES`, 한 스텝의 출력은
+# `DECOMPRESS_STEP`. 해제 카운터 하나만으로는 부족하다 — 출력이 영원히 0인 스트림은 그 카운터를
+# 건드리지 못한다 (아래 `MAX_RAW_READ_BYTES` 참조, 2026-08-04 리뷰 F-1).
 # Article fetches ask for no compression, so a decompression bomb (a tiny body inflating to gigabytes)
-# cannot slip past the size cap. Should an origin ignore it, the streaming counter still stops at the cap
-# and the inflation itself is bounded per `DECOMPRESS_STEP` (below).
+# cannot slip past the size cap. When an origin ignores that, the inflation happens here under three
+# separate bounds: decompressed bytes by `MAX_ARTICLE_SIZE`, raw bytes by `MAX_RAW_READ_BYTES`, and one
+# step's output by `DECOMPRESS_STEP`. The decompressed counter alone is not enough - a stream whose output
+# stays at zero never touches it (see `MAX_RAW_READ_BYTES` below, review F-1 2026-08-04).
 IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
+
+# 원시(압축 해제 전) 읽기 상한 (바이트) = 캡의 8배. 크기 캡은 **해제된** 출력만 세므로, 출력이 영원히
+# 0인 압축 스트림은 캡을 절대 건드리지 못한다: gzip FLG=0x08(FNAME) 뒤에 NUL이 오지 않는 파일명이나
+# raw deflate 빈 stored block(`00 00 00 ff ff`) 반복이면 zlib이 입력만 소비하며 아무것도 내놓지 않고,
+# "출력 없음 = 다음 청크 대기" 루프가 `FETCH_TOTAL_DEADLINE`까지 회선 속도만큼 읽는다
+# (실측 5초에 ~6GB — 2026-08-04 적대적 리뷰 F-1). 데드라인은 크기 상한이 아니다.
+# 왜 8배인가: identity 응답은 원시 = 해제 후라서 2MB 캡이 언제나 먼저 걸리고(이 카운터는 보이지도
+# 않는다), 압축은 데이터를 부풀리지 않으므로(stored block 최악 +0.03%) 캡 크기의 정직한 압축 본문도
+# 원시 ~2MB다. 8배는 정상 응답에 8배 여유를 두면서 적대적 스트림의 읽기를 16MB로 못박는다.
+# Raw-read bound in bytes (before decompression) = 8x the cap. The size cap counts only *decompressed*
+# output, so a compressed stream that emits nothing never touches it: a gzip FLG=0x08 (FNAME) header whose
+# file name is never NUL-terminated, or a repeated raw-deflate empty stored block (`00 00 00 ff ff`), keeps
+# zlib consuming input while producing no output, and the "no output, await the next chunk" loop then reads
+# at line rate until `FETCH_TOTAL_DEADLINE` (~6GB measured in 5s; adversarial review F-1, 2026-08-04). The
+# deadline is not a size bound.
+# Why 8x: for an identity response raw == decompressed, so the 2MB cap always binds first (this counter is
+# invisible there), and compression never inflates data (a stored block adds at most ~0.03%), so even an
+# honest compressed body worth a full cap is ~2MB raw. 8x leaves legitimate responses 8x of headroom while
+# pinning a hostile stream's read at 16MB.
+MAX_RAW_READ_BYTES = 8 * MAX_ARTICLE_SIZE
 
 # 압축 해제 1스텝의 출력 상한 (바이트). `zlib.decompressobj().decompress(data, max_length=...)`는 이보다
 # 큰 출력을 한 번에 만들지 않으므로, **압축률과 무관하게** 스텝 하나의 추가 메모리가 이 값으로 묶인다.
@@ -219,6 +243,7 @@ DECOMPRESS_STEP = 65_536
 IDENTITY_ENCODINGS = {"", "identity"}
 GZIP_ENCODINGS = {"gzip", "x-gzip"}
 DEFLATE_ENCODINGS = {"deflate"}
+BOUNDED_ENCODINGS = GZIP_ENCODINGS | DEFLATE_ENCODINGS
 
 
 # ---------------------------------------------------------------------------
@@ -579,23 +604,42 @@ class _BoundedInflater:
     inflation at or below the bound, no matter how much the raw chunk expands - the heart of the F4 fix.
     """
 
+    # wbits 판정에 필요한 최소 바이트 수 (zlib 헤더 CMF+FLG) / Bytes needed to decide wbits (zlib CMF+FLG)
+    WBITS_SNIFF_BYTES = 2
+
     def __init__(self, encoding: str) -> None:
         self._gzip = encoding in GZIP_ENCODINGS
         self._zobj: Optional[Any] = None   # 첫 청크를 봐야 wbits를 정할 수 있다 / wbits needs the first chunk
+        self._pending = b""                # 판정 바이트가 모일 때까지 보류 (최대 1바이트) / held until sniffable (1 byte max)
 
     def feed(self, data: bytes) -> Iterator[bytes]:
         """원시 청크 1개를 상한 이하 조각들로 풀어 낸다 / Inflate one raw chunk into pieces of at most `DECOMPRESS_STEP`."""
-        if not data:
-            # 빈 청크로는 wbits를 정할 수 없다 (첫 바이트가 필요하다) - 상태를 만들지 않고 넘긴다
-            # An empty chunk cannot decide wbits (the first bytes are needed), so no state is created
-            return
         if self._zobj is None:
+            # 판정에 2바이트가 필요한데 오리진은 첫 청크를 1바이트로 보낼 수 있다 (chunked면 자유다).
+            # 모자라면 붙여 두고 다음 청크를 기다린다 - 부족한 바이트로 wbits를 단정하면 `zlib.error`가
+            # 나고 기사가 통째로 실패한다 (2026-08-04 리뷰 F-3; a0f562ef는 0바이트 창만 닫았다).
+            # The sniff needs two bytes, but an origin may send a 1-byte first chunk (chunked lets it).
+            # Short chunks are buffered until sniffable - deciding wbits on too few bytes raises `zlib.error`
+            # and loses the whole article (review F-3, 2026-08-04; a0f562ef closed only the 0-byte window).
+            data = self._pending + data
+            self._pending = b""
+            if not self._gzip and len(data) < self.WBITS_SNIFF_BYTES:
+                # gzip은 wbits가 고정이라 스니핑이 필요 없다 / gzip needs no sniffing (fixed wbits)
+                self._pending = data
+                return
+            if not data:
+                return
             self._zobj = zlib.decompressobj(self._wbits(data))
         while data:
             piece = self._zobj.decompress(data, DECOMPRESS_STEP)
             if not piece:
-                # 출력이 없다 = 입력이 모두 내부 상태로 들어갔다 (헤더/부분 블록) -> 다음 청크를 기다린다
-                # No output means the input went entirely into internal state (header or partial block)
+                # 출력이 없다 = 입력이 모두 내부 상태로 들어갔다 (헤더/부분 블록) -> 다음 청크를 기다린다.
+                # 이 대기는 무한하지 않다: 출력이 영원히 0인 스트림은 호출부의 원시 카운터
+                # (`MAX_RAW_READ_BYTES`)가 끊는다 — 이 자리에서 끊지 못한다는 것이 F-1이었다.
+                # No output means the input went entirely into internal state (header or partial block), so
+                # the next chunk is awaited. That wait is not unbounded: a stream whose output stays at zero
+                # is cut by the caller's raw counter (`MAX_RAW_READ_BYTES`) - not being able to stop it here
+                # is precisely what F-1 was.
                 return
             yield piece
             # 상한에 걸려 남은 **입력**이 다음 스텝의 입력이 된다 / the input left over by the bound feeds the next step
@@ -603,7 +647,11 @@ class _BoundedInflater:
 
     def _wbits(self, first_chunk: bytes) -> int:
         """
-        첫 청크로 zlib 창 크기를 정한다 / Pick the zlib window size from the first chunk.
+        첫 바이트들로 zlib 창 크기를 정한다 / Pick the zlib window size from the leading bytes.
+
+        호출부가 deflate에 대해 최소 `WBITS_SNIFF_BYTES`를 모아 주므로 아래 길이 검사는 방어용으로만
+        남는다 / The caller collects at least `WBITS_SNIFF_BYTES` for deflate, so the length check below
+        remains only as defense in depth.
 
         deflate는 실사용에서 zlib 래퍼(RFC 1950)와 헤더 없는 raw(RFC 1951)가 모두 돌아다니므로 첫 2바이트의
         zlib 헤더 검사식으로 고른다. httpx처럼 "zlib으로 시도하고 실패하면 raw로 재시도"는 스텝 단위
@@ -633,13 +681,23 @@ async def _limited_text(response: httpx.Response, url: str) -> str:
     declared content-length is the *compressed* size, so it passes the cap check and buffering the whole
     body would OOM the worker. Instead every chunk updates a running byte count that breaks out at the cap.
 
+    카운터는 **두 개**다 (2026-08-04 리뷰 F-1). 해제된 바이트만 세면 출력이 영원히 0인 압축 스트림을
+    못 막는다: gzip FNAME이 끝나지 않거나 deflate 빈 stored block이 반복되면 `total`은 0에 머문 채
+    데드라인까지 회선 속도로 원시 바이트를 읽는다(실측 5초 ~6GB). 그래서 `aiter_raw()`에서 실제로
+    끌어온 바이트를 따로 세어 `MAX_RAW_READ_BYTES`에서 끊는다 (`article_compressed_overrun`).
+    There are **two** counters (review F-1, 2026-08-04). Counting decompressed bytes alone cannot stop a
+    stream whose output stays at zero: an unterminated gzip FNAME or repeated deflate empty stored blocks
+    leave `total` at 0 while raw bytes keep arriving at line rate until the deadline (~6GB measured in 5s).
+    So the bytes actually pulled from `aiter_raw()` are counted separately and cut at `MAX_RAW_READ_BYTES`
+    (`article_compressed_overrun`).
+
     선언된 content-length는 **읽지 않는다** (정정 2026-08-03): 옛 사전 필터는 상한 초과 선언을 전면
     거부해, 큰 페이지를 정직하게 선언하는 실사이트의 기사 분석을 전멸시켰다 — 같은 페이지가
-    chunked면 잘라서 진행했으니 비일관이기도 했다. 방어는 아래 스트리밍 카운터 하나로 충분하다.
+    chunked면 잘라서 진행했으니 비일관이기도 했다. 방어는 아래 두 스트리밍 카운터가 맡는다.
     The declared content-length is **ignored** (corrected 2026-08-03): the old pre-filter hard-rejected
     oversized declarations, killing article analysis for real sites that declare big pages honestly —
-    while the same page sent chunked was truncated and processed. The streaming counter below is the
-    whole defense.
+    while the same page sent chunked was truncated and processed. The two streaming counters below carry
+    the whole defense.
 
     버퍼링 상한은 "상한 + 압축 해제 스텝 1개"다 (2026-08-04 리뷰 F4로 강화). 그래서 httpx가 풀어 준
     `aiter_bytes()`가 아니라 **원시** 스트림 `aiter_raw()`를 읽고, 압축 해제를 `DECOMPRESS_STEP`
@@ -659,26 +717,42 @@ async def _limited_text(response: httpx.Response, url: str) -> str:
     F4 fixed. Losing one article beats losing the worker's memory.
 
     Returns:
-        상한까지의 본문 문자열 (초과분은 잘리고 `article_truncated`로 남는다). 처리할 수 없는
+        상한까지의 본문 문자열 (초과분은 잘리고 `article_truncated`로 남는다). 원시 읽기 상한에
+        걸리면 그때까지 해제된 본문 + `article_compressed_overrun` 경고. 처리할 수 없는
         content-encoding이면 `article_encoding_unsupported` 경고 후 "".
-        The body text up to the cap; any excess is cut and logged as `article_truncated`. An unusable
-        content-encoding warns as `article_encoding_unsupported` and yields "".
+        The body text up to the cap; any excess is cut and logged as `article_truncated`. Hitting the
+        raw-read bound yields whatever inflated so far plus an `article_compressed_overrun` warning. An
+        unusable content-encoding warns as `article_encoding_unsupported` and yields "".
     """
     encoding = (response.headers.get("content-encoding") or "").strip().lower()
-    if encoding in IDENTITY_ENCODINGS:
+    # content-encoding은 목록일 수 있다 (`identity, gzip`; 중복 헤더도 httpx가 ", "로 합친다).
+    # `identity`는 실제 코덱이 아니므로 걸러낸 뒤 남은 코덱을 본다 — 걸러내지 않으면 httpx가 처리했던
+    # `identity, gzip`이 미지원으로 거부돼 기사가 502가 된다 (2026-08-04 리뷰 F-4).
+    # 진짜 다중 코덱(`gzip, br`)과 미지원 단일 코덱은 그대로 fail-closed다 (완화가 아니라 옛 동작 복구).
+    # A content-encoding can be a list (`identity, gzip`; httpx also joins duplicate headers with ", ").
+    # `identity` is not a real codec, so it is filtered out before the remaining codecs are checked -
+    # without that, `identity, gzip` (which httpx used to handle) is refused as unsupported and the article
+    # 502s (review F-4, 2026-08-04). Genuinely multi-codec values (`gzip, br`) and unknown single codecs stay
+    # fail-closed: this restores the old behavior instead of relaxing the guard.
+    codecs = [token.strip() for token in encoding.split(",")]
+    codecs = [token for token in codecs if token and token not in IDENTITY_ENCODINGS]
+    if not codecs:
         inflater = None      # 원시 바이트가 그대로 본문이다 / the raw bytes are the body
-    elif encoding in GZIP_ENCODINGS or encoding in DEFLATE_ENCODINGS:
-        inflater = _BoundedInflater(encoding)
+    elif len(codecs) == 1 and codecs[0] in BOUNDED_ENCODINGS:
+        inflater = _BoundedInflater(codecs[0])
     else:
         _warn("article_encoding_unsupported", url=url, encoding=encoding)
         return ""
 
     chunks: list = []
-    total = 0
+    total = 0        # 압축 해제된 바이트 / decompressed bytes
+    raw_total = 0    # 실제로 끌어온 원시 바이트 / raw bytes actually pulled
     truncated = False
+    overrun = False
     # `aiter_raw()`는 압축을 풀지 않는다 - 해제는 위 스텝 상한 아래에서 이루어진다 (`aiter_bytes()` 금지)
     # `aiter_raw()` performs no decoding; inflation happens under the step bound above (never `aiter_bytes()`)
     async for raw in response.aiter_raw():
+        raw_total += len(raw)
         for piece in (inflater.feed(raw) if inflater is not None else (raw,)):
             chunks.append(piece)
             total += len(piece)
@@ -687,9 +761,17 @@ async def _limited_text(response: httpx.Response, url: str) -> str:
                 break
         if truncated:
             break
+        # 출력이 0바이트여도 원시 입력은 여기서 끊긴다 (해제 카운터는 이 스트림을 못 본다)
+        # Even at zero output the raw input stops here (the decompressed counter cannot see this stream)
+        if raw_total > MAX_RAW_READ_BYTES:
+            overrun = True
+            break
 
     if truncated:
         _warn("article_truncated", url=url, read_bytes=total)
+    elif overrun:
+        _warn("article_compressed_overrun", url=url,
+              raw_bytes=raw_total, read_bytes=total, raw_limit=MAX_RAW_READ_BYTES)
 
     body = b"".join(chunks)
     # 조각 리스트를 즉시 놓아준다: join 결과와 이중으로 살아 있으면 peak가 캡의 2배가 된다

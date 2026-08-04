@@ -18,10 +18,14 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
   - 클라이언트 제공 URL fetch에 SSRF 가드(사설/내부 IP 차단) + 2MB 스트리밍 캡
     (2026-08-03 사용자 승인으로 256KB에서 상향 — 실측 Yahoo 기사 ~856KB, 본문 오프셋 ~310KB로
     옛 값이 기사 분석을 전멸시켰음. 캡은 유한해야 하며 선언 content-length가 아니라 **실제 읽은
-    바이트**에 걸린다 — 선언값 사전 거부는 같은 회귀를 재도입하므로 금지). 캡은 **원시 스트림**
-    (`aiter_raw()`)에 걸고 압축 해제는 `DECOMPRESS_STEP`(64KB) 스텝으로 묶는다 — `aiter_bytes()`는
+    바이트**에 걸린다 — 선언값 사전 거부는 같은 회귀를 재도입하므로 금지). 읽기는 **원시 스트림**
+    (`aiter_raw()`)에서 하고 압축 해제는 `DECOMPRESS_STEP`(64KB) 스텝으로 묶는다 — `aiter_bytes()`는
     청크 1개를 통째로 해제해 원시 64KB 읽기가 ~1029:1로 부풀 수 있었다(실측 청크 67MB, peak 148.6MB
-    — 2026-08-04 리뷰 F4). 스텝 상한을 걸 수 없는 코덱(br/zstd)은 무한 폴백 대신 경고 + "".
+    — 2026-08-04 리뷰 F4). 카운터는 2개다: 해제된 바이트(캡) + **원시 읽기 바이트**(`MAX_RAW_READ_BYTES`
+    = 캡×8) — 해제 출력이 0인 스트림(끝나지 않는 gzip FNAME, deflate 빈 stored block 반복)은 캡을
+    건드리지 못해 데드라인까지 무제한 읽었다(실측 5초 ~6GB, 2026-08-04 리뷰 F-1 → `article_compressed_overrun`).
+    스텝 상한을 걸 수 없는 코덱(br/zstd)은 무한 폴백 대신 경고 + "" (단, `identity` 토큰은 목록에서
+    걸러내 `identity, gzip`은 gzip으로 처리 — httpx 시절 동작 복구).
   - 캡 상향과 함께 들어온 가드 3종 (2026-08-03 적대적 보안 리뷰): **charset 화이트리스트**
     (`SAFE_CHARSETS` — 오리진 charset을 코덱 레지스트리에 그대로 넘기면 punycode 같은 순수 파이썬
     O(n²) 코덱으로 이벤트 루프가 분 단위 정지), **fetch 총 데드라인**(`FETCH_TOTAL_DEADLINE` —
