@@ -215,8 +215,17 @@ def test_fetch_quotes_kr_names_sectors_from_config(monkeypatch):
     assert kosdaq.currency == "KRW"
 
 
-def test_fetch_quotes_downloads_in_chunks_of_ten(monkeypatch):
-    """10개 단위 청크로 나누어 7d 기간 다운로드 / Chunks of 10 symbols, period 7d."""
+def test_fetch_quotes_downloads_the_whole_market_in_one_batch(monkeypatch):
+    """
+    시장 전체를 한 번의 download로 조회한다 / The whole market goes out as one download call.
+
+    2026-08-04 라이브 장애: Yahoo가 병렬 청크 버스트(10개×5워커)를 심볼 전부 빈 프레임으로
+    돌려주기 시작했다 — 같은 시점에 50심볼 단일 배치는 50/50 성공(실측 2회). 그래서 1차 경로는
+    단일 배치이고 청크는 직렬 폴백으로만 남는다.
+    Live incident 2026-08-04: Yahoo started answering the parallel chunk burst (10×5 workers) with
+    all-empty frames while a single 50-symbol batch succeeded 50/50 (measured twice). The primary
+    path is therefore one batch; chunks survive only as a serial fallback.
+    """
     calls = []
 
     def recording_download(symbols, **kw):
@@ -226,11 +235,64 @@ def test_fetch_quotes_downloads_in_chunks_of_ten(monkeypatch):
     monkeypatch.setattr(market_data.yf, "download", recording_download)
     out = market_data.fetch_quotes("us")
 
-    assert len(calls) == 5
-    assert all(len(chunk) == 10 for chunk, _ in calls)
-    assert sorted(s for chunk, _ in calls for s in chunk) == sorted(config.US_STOCKS)
-    assert all(kw["period"] == "7d" and kw["threads"] is False for _, kw in calls)
+    assert len(calls) == 1
+    requested, kwargs = calls[0]
+    assert requested == list(config.US_STOCKS)
+    assert kwargs["period"] == "7d" and kwargs["threads"] is False
     assert [q.symbol for q in out] == config.US_STOCKS  # 요청 순서 유지 / request order preserved
+
+
+def test_fetch_quotes_falls_back_to_serial_chunks_when_the_batch_fails(monkeypatch, caplog):
+    """단일 배치가 죽으면 직렬 청크로 폴백한다 / A dead batch falls back to serial chunks."""
+    calls = []
+
+    def flaky_download(symbols, **kw):
+        calls.append(list(symbols))
+        if len(calls) == 1:
+            raise RuntimeError("boom")  # 전체 배치 실패 / the whole batch dies
+        return fake_download(symbols, **kw)
+
+    sleeps = []
+    monkeypatch.setattr(market_data.yf, "download", flaky_download)
+    monkeypatch.setattr(market_data.time, "sleep", lambda s: sleeps.append(s))
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = market_data.fetch_quotes("us")
+
+    assert [q.symbol for q in out] == config.US_STOCKS
+    assert calls[0] == list(config.US_STOCKS)               # 1차: 전체 배치 / first: the whole batch
+    chunk_calls = calls[1:]
+    assert all(len(c) <= market_data.QUOTE_CHUNK_SIZE for c in chunk_calls)
+    # 직렬 + 순서 보존 (병렬이면 순서가 흔들린다) / serial and order-preserving (parallelism would shuffle)
+    assert [s for c in chunk_calls for s in c] == list(config.US_STOCKS)
+    # 청크 사이 지연 — 빈도 기반 스로틀을 자극하지 않는다 / inter-chunk delay to avoid poking the frequency throttle
+    assert sleeps == [market_data.QUOTE_CHUNK_DELAY] * (len(chunk_calls) - 1)
+    assert any(p.get("event") == "quote_batch_failed" for p in _warning_payloads(caplog))
+
+
+def test_fetch_quotes_raises_when_no_symbol_yields_a_price(monkeypatch, caplog):
+    """
+    전 심볼 빈 결과는 성공이 아니라 실패다 / An all-empty result is a failure, not a success.
+
+    빈 리스트가 캐시에 "성공"으로 저장되면 마지막 정상 데이터를 밀어내고 stale-while-error가
+    무력화된다 (2026-08-04 라이브 장애의 2차 원인 — US 목록이 빈 화면이 됐다). 예외로 승격하면
+    `deps.cached`의 stale 폴백이 마지막 정상 시세를 계속 서빙한다.
+    An empty list cached as "success" evicts the last good data and disarms stale-while-error (the
+    incident's second cause — the US table went blank). Raising instead lets `deps.cached`'s stale
+    fallback keep serving the last good quotes.
+    """
+    def empty_download(symbols, **kw):
+        if isinstance(symbols, str):
+            symbols = [symbols]
+        idx = pd.to_datetime(["2026-07-30", "2026-07-31"])
+        cols = pd.MultiIndex.from_product([symbols, ["Close", "Volume"]])
+        return pd.DataFrame(index=idx, columns=cols, dtype=float)  # 전부 NaN / all NaN
+
+    monkeypatch.setattr(market_data.yf, "download", empty_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        with pytest.raises(market_data.QuotesUnavailableError):
+            market_data.fetch_quotes("us")
+
+    assert any(p.get("event") == "quotes_empty" for p in _warning_payloads(caplog))
 
 
 def test_fetch_quotes_single_symbol_flat_frame(monkeypatch):
