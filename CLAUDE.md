@@ -47,7 +47,7 @@ infra/                - CDK v2 Python (venv: infra/.venv, cdk.json app = .venv/b
   stacks/stock_monitoring_stack.py - 단일 스택 전체 (캐시/시크릿/ECS/ALB/CloudFront/알람)
 docs/reference/       - 계층별 구현 레퍼런스 (아래 Implementation References)
 docs/superpowers/     - 승인된 설계 스펙 + backend/frontend/infra 구현 계획
-scripts/smoke.sh      - 배포 후 스모크 (CloudFront 경유 3종 + ALB 직접 차단 확인)
+scripts/smoke.sh      - 배포 후 스모크 (CloudFront 경유 4종 + ALB 직접 차단 확인)
 Dockerfile            - 멀티스테이지 (node:20-slim 프론트 빌드 → python:3.12-slim + static)
 Makefile              - build(프론트→backend/static) / run(:8000) / test(백엔드+프론트)
 ```

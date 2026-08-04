@@ -50,8 +50,8 @@ Run the smoke test with the stack outputs CloudFrontURL / AlbDNS. Current produc
 bash scripts/smoke.sh https://d2wa9w1vbqlndl.cloudfront.net stock-monitoring-alb-1937169801.ap-northeast-2.elb.amazonaws.com
 ```
 
-배포로 Outputs가 바뀌었으면 새 값을 사용한다. 검사 1~3은 CloudFront 경유 정상 동작, 검사 4는 ALB 직접 접근 차단(403 또는 타임아웃 = 통과)을 확인한다.
-If the deploy changed the outputs, use the new values. Checks 1-3 assert service health via CloudFront; check 4 asserts direct ALB access is blocked (403 or timeout = pass).
+배포로 Outputs가 바뀌었으면 새 값을 사용한다. 검사 1~4은 CloudFront 경유 정상 동작, 검사 5는 ALB 직접 접근 차단(403 또는 타임아웃 = 통과)을 확인한다.
+If the deploy changed the outputs, use the new values. Checks 1-4 assert service health via CloudFront; check 5 asserts direct ALB access is blocked (403 or timeout = pass).
 
 ## Step 5: 요약 / Summary
 
@@ -73,6 +73,6 @@ If the deploy changed the outputs, use the new values. Checks 1-3 assert service
 ### 배포 후 스모크 실패 시 (Step 4) / If smoke test fails after deployment
 - ECS Fargate 서비스 로그에서 기동 오류 확인 / check ECS service logs for startup errors
 - CACHE_TABLE, BEDROCK_REGION 환경변수 주입 확인 / verify injected env vars
-- X-Origin-Verify 헤더와 prefix-list SG 구성 확인 (검사 4 실패 시) / verify header + SG config if check 4 fails
+- X-Origin-Verify 헤더와 prefix-list SG 구성 확인 (검사 5 실패 시) / verify header + SG config if check 5 fails
 - 복구 불가면 직전 정상 커밋으로 되돌려 재배포 / if unrecoverable, revert to the last good commit and redeploy:
   `git revert HEAD` 후 Step 2부터 다시 / then repeat from Step 2
