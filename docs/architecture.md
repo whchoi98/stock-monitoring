@@ -190,10 +190,9 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 
 ## Operations
 
-- Deployment: see [docs/runbooks/deploy-production.md](runbooks/deploy-production.md) — `cd infra && .venv/bin/cdk deploy --require-approval never` (~4 min), then `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>`.
-- Rollback: see [docs/runbooks/rollback-production.md](runbooks/rollback-production.md).
-- Incident response: see [docs/runbooks/incident-response.md](runbooks/incident-response.md) — start from `GET /api/health` (source status + cache age) and the two CloudWatch alarms.
-- New runbooks follow [docs/runbooks/.template.md](runbooks/.template.md); architecture decisions are recorded in [docs/decisions/](decisions/) using [.template.md](decisions/.template.md).
+- Deployment: `cd infra && .venv/bin/cdk deploy --require-approval never` (~4 min), then `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>` — the step-by-step walkthrough lives in [docs/onboarding.md](onboarding.md).
+- Incident response: start from `GET /api/health` (source status + cache age) and the two CloudWatch alarms. The only incident runbook written so far is [docs/runbooks/quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md) (blank stock table = a fresh empty quotes cache entry).
+- **Not written yet**: dedicated deploy, rollback and general incident-response runbooks. New runbooks follow [docs/runbooks/.template.md](runbooks/.template.md); architecture decisions are recorded in [docs/decisions/](decisions/) using [.template.md](decisions/.template.md).
 
 ---
 
@@ -382,7 +381,6 @@ flowchart LR
 
 ## 운영
 
-- 배포: [docs/runbooks/deploy-production.md](runbooks/deploy-production.md) 참조 — `cd infra && .venv/bin/cdk deploy --require-approval never` (~4분) 후 `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>`.
-- 롤백: [docs/runbooks/rollback-production.md](runbooks/rollback-production.md) 참조.
-- 장애 대응: [docs/runbooks/incident-response.md](runbooks/incident-response.md) 참조 — `GET /api/health`(소스 상태 + 캐시 age)와 CloudWatch 알람 2종에서 시작한다.
-- 새 런북은 [docs/runbooks/.template.md](runbooks/.template.md)를, 아키텍처 결정 기록은 [docs/decisions/](decisions/)의 [.template.md](decisions/.template.md)를 따른다.
+- 배포: `cd infra && .venv/bin/cdk deploy --require-approval never` (~4분) 후 `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>` — 단계별 절차는 [docs/onboarding.md](onboarding.md)에 있다.
+- 장애 대응: `GET /api/health`(소스 상태 + 캐시 age)와 CloudWatch 알람 2종에서 시작한다. 현재까지 작성된 장애 런북은 [docs/runbooks/quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md)(빈 종목 테이블 = 신선한 빈 시세 캐시 항목) 하나뿐이다.
+- **아직 없음**: 전용 배포·롤백·일반 장애 대응 런북. 새 런북은 [docs/runbooks/.template.md](runbooks/.template.md)를, 아키텍처 결정 기록은 [docs/decisions/](decisions/)의 [.template.md](decisions/.template.md)를 따른다.

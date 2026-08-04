@@ -93,7 +93,7 @@ bash scripts/smoke.sh \
   stock-monitoring-alb-1937169801.ap-northeast-2.elb.amazonaws.com
 ```
 
-The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/market/overview` returns a valid envelope, (3) `/api/market/quotes?market=us` returns a **non-empty** data array (the 2026-08-04 blank-table incident answered 200 with `[]`), (4) the SPA fallback serves deep links (`/stocks/005930.KS` → 200), and (5) **direct ALB access is blocked** (403 or timeout — both are a pass). See `docs/runbooks/` for the full deploy and rollback runbooks.
+The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/market/overview` returns a valid envelope, (3) `/api/market/quotes?market=us` returns a **non-empty** data array (the 2026-08-04 blank-table incident answered 200 with `[]`), (4) the SPA fallback serves deep links (`/stocks/005930.KS` → 200), and (5) **direct ALB access is blocked** (403 or timeout — both are a pass). Dedicated deploy and rollback runbooks are **not written yet**: `docs/runbooks/` currently holds [quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md) plus the runbook template, so the commands above are the deploy procedure.
 
 ## Project Overview
 
@@ -231,7 +231,7 @@ bash scripts/smoke.sh \
   stock-monitoring-alb-1937169801.ap-northeast-2.elb.amazonaws.com
 ```
 
-스모크 스크립트는 5가지를 검증한다: (1) `/api/health` 응답, (2) `/api/market/overview`의 유효한 envelope, (3) `/api/market/quotes?market=us`의 **비어 있지 않은** data 배열(2026-08-04 빈 테이블 장애는 200 + `[]`로 응답했다), (4) SPA fallback의 딥링크 서빙(`/stocks/005930.KS` → 200), (5) **ALB 직접 접근 차단**(403 또는 타임아웃 — 둘 다 통과). 전체 배포/롤백 런북은 `docs/runbooks/`를 참조한다.
+스모크 스크립트는 5가지를 검증한다: (1) `/api/health` 응답, (2) `/api/market/overview`의 유효한 envelope, (3) `/api/market/quotes?market=us`의 **비어 있지 않은** data 배열(2026-08-04 빈 테이블 장애는 200 + `[]`로 응답했다), (4) SPA fallback의 딥링크 서빙(`/stocks/005930.KS` → 200), (5) **ALB 직접 접근 차단**(403 또는 타임아웃 — 둘 다 통과). 전용 배포/롤백 런북은 **아직 없다**: `docs/runbooks/`에는 현재 [quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md)와 런북 템플릿만 있으므로, 위 명령이 곧 배포 절차다.
 
 ## 프로젝트 개요
 

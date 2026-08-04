@@ -21,8 +21,12 @@ purges the poisoned L2 (DynamoDB) items and verifies recovery.
 - The US or KR stock table is blank in the UI while indices, indicators and news render fine.
 - `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>` fails check 3 with `rows: 0`.
 - `curl -fsS "<CloudFrontURL>/api/market/quotes?market=us"` returns HTTP 200 with `"data": []`.
-- `/api/health` reports `sources.yahoo` as `degraded` and a `quotes:*` age that keeps growing toward
-  24 hours instead of resetting every cycle.
+- `/api/health` reports `sources.yahoo` as `degraded` and the `quotes:*` entry in `cacheAge` stops
+  resetting every cycle — it either climbs toward 24 hours or **disappears entirely**. Both shapes mean
+  the same thing: the scheduler is not completing cycles. `cacheAge` reads **L1 only** (health answers
+  without touching DynamoDB) and L1 is per-task memory, so a task replaced during the outage starts
+  with no `quotes:*` entry and a failing scheduler never writes one. A missing key is therefore not
+  evidence of health, and the authoritative staleness signal is the `asOf` in the quotes response.
 
 ### Cause chain (2026-08-04 live incident)
 
@@ -148,8 +152,11 @@ behaviour — wait for upstream and let the scheduler repopulate the cache.
 - UI에서 US 또는 KR 종목 테이블만 비어 있고 지수·지표·뉴스는 정상 렌더링될 때.
 - `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>`의 검사 3이 `rows: 0`으로 실패할 때.
 - `curl -fsS "<CloudFrontURL>/api/market/quotes?market=us"`가 HTTP 200 + `"data": []`를 반환할 때.
-- `/api/health`의 `sources.yahoo`가 `degraded`이고 `quotes:*` age가 매 사이클 리셋되지 않고 24시간을
-  향해 계속 늘어날 때.
+- `/api/health`의 `sources.yahoo`가 `degraded`이고 `cacheAge`의 `quotes:*`가 매 사이클 리셋되지 않을 때
+  — 24시간을 향해 계속 늘어나거나 **아예 사라진다**. 두 모양의 뜻은 같다: 스케줄러가 사이클을 완주하지
+  못하고 있다. `cacheAge`는 **L1만** 읽고(헬스는 DynamoDB를 건드리지 않는다) L1은 태스크별 인메모리라,
+  장애 중에 태스크가 교체되면 `quotes:*` 항목이 없는 상태로 시작하고 실패하는 스케줄러는 그것을 채우지
+  못한다. 따라서 키가 없다는 것은 정상의 증거가 아니며, 신선도의 최종 근거는 시세 응답의 `asOf`다.
 
 ### 원인 연쇄 (2026-08-04 라이브 장애)
 
