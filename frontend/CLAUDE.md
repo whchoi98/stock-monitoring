@@ -8,7 +8,7 @@ Stock monitoring SPA with three pages, served by the FastAPI backend in producti
 - `src/api/` — `client.ts`(fetch 래퍼), `queries.ts`(**서버 데이터는 @tanstack/react-query 훅으로만**), `aiStream.ts`+`lib/sse.ts`(**유일한 예외**: 두 AI 엔드포인트는 SSE `phase`→`delta`*→`final`이라 fetch 직접 사용), `types.ts`(백엔드 `app/models.py` 응답 형태와 일치 유지).
 - `src/components/` — `common/`(Card, ChangeText, TickerBar, ThemeToggle...), `market/`(StockTable, IndexCards...), `stock/`(PriceChart, OrderBook, AIPanel...).
 - `src/components/stock/chartData.ts` — 차트 데이터 순수 변환 함수 (직접 단위 테스트 대상).
-- `src/pages/`, `src/lib/`(format 유틸), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
+- `src/pages/`, `src/lib/`(`format`, `aiMessages`(AI 오류 문구+phase 라벨), `articleLink`(뉴스 링크 분기 — 분석 가능 판정), `sse`(SSE 프레임 파서)), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
 
 ## 명령 / Commands
 ```bash

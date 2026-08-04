@@ -49,6 +49,8 @@ event: final   data: {"asOf", "marketOpen", "data": {...기존 envelope와 동�
 
 ### 캐시·동시성 상호작용
 - **캐시 히트**: 즉시 `final` 하나만 emit (같은 SSE 형식 — 프론트 코드 경로 단일).
+  (정정 2026-08-04: 위 "첫 이벤트는 즉시 emit"이 캐시 프로브에 선행하므로(TTFB 0) 실제 캐시 히트는
+  `phase 1개 + final`이다 — 테스트 `test_cache_hit_emits_the_first_phase_then_final_only`가 이 동작을 고정한다.)
 - **캐시 미스(선점자)**: 키 락 획득 → 재확인 → 스트리밍하며 텍스트 누적 → 완료 시 기존 캐시에
   저장(`AI_TTL` 불변) → `final`.
 - **팔로워** (같은 키 동시 요청): 락 대기 동안 `phase: waiting`을 ~5초 간격 하트비트로 emit
@@ -82,6 +84,7 @@ event: final   data: {"asOf", "marketOpen", "data": {...기존 envelope와 동�
 - 백엔드 (기존 FakeBedrock을 델타 시퀀스 제너레이터로 확장):
   - 이벤트 시퀀스: 첫 이벤트 즉시(phase) → delta들 → final(누적 == final의 analysis).
   - 캐시 히트 → final 단독. 팔로워 → waiting 하트비트 후 final.
+    (정정 2026-08-04: 캐시 히트는 `phase 1개 + final` — §2 "캐시·동시성 상호작용"의 같은 정정 참고.)
   - 스트림 도중 예외 → final에 오류 문구+status, 연결은 정상 종료.
   - `stop_reason == max_tokens` → `_warn` 기록.
   - 레이트리밋 429는 기존 JSON 유지.

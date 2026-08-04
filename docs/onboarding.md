@@ -47,15 +47,15 @@ cd ..
 ### 3. Verify
 
 ```bash
-# Full test suite: backend pytest + frontend vitest (405 tests, all green)
+# Full test suite: backend pytest + frontend vitest (485 tests, all green)
 make test
 ```
 
 Individually:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # backend (295 tests)
-cd frontend && npx vitest run            # frontend (110 tests)
+cd backend && .venv/bin/pytest -q        # backend (317 tests)
+cd frontend && npx vitest run            # frontend (168 tests)
 cd frontend && npm run lint              # oxlint
 ```
 
@@ -185,15 +185,15 @@ cd ..
 ### 3. 검증
 
 ```bash
-# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (405개, 전부 그린)
+# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (485개, 전부 그린)
 make test
 ```
 
 개별 실행:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # 백엔드 (295개)
-cd frontend && npx vitest run            # 프론트엔드 (110개)
+cd backend && .venv/bin/pytest -q        # 백엔드 (317개)
+cd frontend && npx vitest run            # 프론트엔드 (168개)
 cd frontend && npm run lint              # oxlint
 ```
 

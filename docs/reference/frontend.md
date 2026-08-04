@@ -29,7 +29,7 @@ A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboar
 - **Polling only via the two exported constants** (45s quotes / 120s news); hand-rolled `setInterval` is forbidden.
 - **UI branches on `ApiError.status`/`detail`** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`); `readDetail` never throws even on HTML error bodies from ALB/CloudFront.
 - **Deploy build goes into the backend**: `npm run build:deploy` outputs to `backend/static`, which FastAPI serves (`make build` wraps this).
-- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 110 tests); lint is oxlint.
+- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 168 tests); lint is oxlint.
 
 ### 4. Code Pointers
 - `frontend/src/main.tsx` — route table, query client, theme bootstrapping
@@ -70,7 +70,7 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, S
 - **폴링은 export된 상수 두 개만** (시세 45초 / 뉴스 120초). 수동 `setInterval` 금지.
 - **화면은 `ApiError.status`/`detail`로 분기** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`). `readDetail`은 ALB/CloudFront의 HTML 오류 본문에서도 절대 throw하지 않는다.
 - **배포 빌드는 백엔드로**: `npm run build:deploy`가 `backend/static`에 출력, FastAPI가 서빙 (`make build`가 래핑).
-- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 110개). 린트는 oxlint.
+- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 168개). 린트는 oxlint.
 
 ### 4. 코드 포인터
 - `frontend/src/main.tsx` — 라우트 테이블, 쿼리 클라이언트, 테마 부트스트랩

@@ -13,8 +13,8 @@ Automate the release process with validation checks.
 ### 1. 릴리스 전 점검 / Pre-release Checks
 - 워킹 트리 클린 확인 / verify working tree is clean: `git status`
 - 전체 테스트 통과 확인 (두 스위트 모두 — Makefile test는 fail-fast이므로 직접 실행) / verify all tests pass (run both suites directly; the Makefile target is fail-fast):
-  - `cd backend && .venv/bin/pytest -q` (295개)
-  - `cd frontend && npx vitest run` (110개)
+  - `cd backend && .venv/bin/pytest -q` (317개)
+  - `cd frontend && npx vitest run` (168개)
 - 미커밋 변경 확인 / check for uncommitted changes
 
 ### 2. 버전 결정 / Determine Version
