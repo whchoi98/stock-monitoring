@@ -202,8 +202,20 @@ class StockMonitoringStack(cdk.Stack):
         )
         # `global.` 추론 프로파일은 교차 리전 모델 ARN으로 해석되므로 리소스를 특정할 수 없다.
         # The `global.` inference profile resolves to cross-region model ARNs, so `*` is required.
+        # SSE 스트리밍(converse_stream)은 별도 IAM 액션이 필요하다: ConverseStream은
+        # `bedrock:InvokeModelWithResponseStream`으로 평가된다. 이 액션이 빠지면 스트리밍 호출이
+        # AccessDenied -> 503 ai_unavailable로 전멸한다 (2026-08-04 배포 직후 라이브 장애로 실증 —
+        # 로컬 EC2 자격증명은 더 넓어서 E2E가 못 잡았다). InvokeModel은 비스트리밍 폴백용으로 유지.
+        # SSE streaming (converse_stream) needs its own IAM action: ConverseStream is authorized as
+        # `bedrock:InvokeModelWithResponseStream`. Without it every streaming call dies as
+        # AccessDenied -> 503 ai_unavailable (proven live right after the 2026-08-04 deploy — the local
+        # EC2 credentials were broader, so E2E could not catch it). InvokeModel stays for any
+        # non-streaming fallback.
         task_def.task_role.add_to_principal_policy(
-            iam.PolicyStatement(actions=["bedrock:InvokeModel"], resources=["*"])
+            iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            )
         )
 
         # -------------------------------------------------------------------
