@@ -76,35 +76,73 @@ DOWNLOAD_TIMEOUT = 8
 # number.
 #
 # 60초 천장 배분 / Splitting the 60s ceiling:
-#   콜드 `/api/market/overview` 한 요청은 네 조각을 순차로 조회한다 — 지수 → 지표 → quotes:us →
-#   quotes:kr. CloudFront 오리진 read timeout(60s)이 요청 1건의 천장이므로:
-#     quotes 두 조각 = 2 × QUOTE_FETCH_DEADLINE_MAX(25s) = 50s
-#     INDEX_FETCH_DEADLINE(4s) + INDICATOR_FETCH_DEADLINE(6s)      = 10s
-#     합계                                                          = 60s = 천장
-#   조립(summary/sectors)은 ~100행 순수 CPU라 무시할 수 있다. 스케줄러(REFRESH_INTERVAL 45s)는 대기를
-#   갱신 *뒤*에 하므로 사이클이 밀릴 뿐 겹치지 않는다.
-#   위 crumb 주의사항 때문에 이 합계는 "요청을 더 내지 않는 시점"의 합이다 — 진행 중인 요청 1건이
-#   천장을 넘길 수 있고, 그때 손실은 그 overview 요청 1건의 504뿐이다 (캐시·스케줄러 경로는 무관하고
-#   다음 요청은 캐시된 값을 받는다).
-#   A cold `/api/market/overview` fetches four pieces serially - indices, indicators, quotes:us,
-#   quotes:kr - and CloudFront's 60s origin read timeout caps that one request: 2 × 25s of quotes plus
-#   4s + 6s of indices/indicators = exactly 60s (assembly is ~100 rows of pure CPU, negligible). The
-#   scheduler waits *after* each refresh, so a long cycle slips rather than overlaps. Per the crumb
-#   caveat these are sums of "stop issuing" points: one in-flight request can still exceed the
-#   ceiling, and the only casualty is a 504 on that single overview request - the cache and scheduler
-#   paths are untouched and the next request is served from cache.
+#   콜드 `/api/market/overview` 한 요청은 네 조각을 **순차로** 조회한다 — 지수 → 지표 → quotes:us →
+#   quotes:kr. 요청 1건의 벽시계 천장은 CloudFront 오리진 read timeout(`CLOUDFRONT_ORIGIN_READ_TIMEOUT`
+#   = 60s)이므로 "새 요청을 그만 내는" 시점의 합을 그 아래로 눌러 둔다:
+#     INDEX_FETCH_DEADLINE(3s) + INDICATOR_FETCH_DEADLINE(5s)       =  8s
+#     quotes 두 조각 = 2 × QUOTE_FETCH_DEADLINE_MAX(20s)             = 40s
+#     합계                                                            = 48s (천장까지 12s 여유)
+#   남은 12s는 pydantic 재검증·JSON 직렬화·ALB 홉·L2(DynamoDB) 왕복의 몫이다. 조립(summary/sectors)
+#   자체는 ~100행 순수 CPU로 무시할 만하지만, 여유를 0으로 둘 이유는 없다 — 예전 배분(4+6+25+25)은
+#   정확히 60s여서 이 여유가 존재하지 않았다.
+#   그리고 각 단계는 진행 중인 요청 1건만큼 예산을 넘길 수 있다 — 단계가 4개이므로 최대 4건이고,
+#   warm crumb에서 1건 ≈ 8s, cold crumb이면 ≈ 38s다(위 주의사항). 즉 48s는 상한이 아니라 "그만 내는"
+#   합이며, 초과 시 손실은 그 overview 요청 1건의 504뿐이다 (캐시·스케줄러 경로는 무관하고 다음
+#   요청은 캐시된 값을 받는다). 4단계가 동시에 늦어지는 최악은 어떤 배분으로도 막을 수 없다 —
+#   그것을 흡수하는 것은 예산이 아니라 stale-while-error와 스케줄러의 선제 갱신이다.
+#   스케줄러(REFRESH_INTERVAL 45s)는 대기를 갱신 *뒤*에 하므로 사이클이 밀릴 뿐 겹치지 않는다.
+#   A cold `/api/market/overview` fetches four pieces *serially* - indices, indicators, quotes:us,
+#   quotes:kr - and CloudFront's 60s origin read timeout (`CLOUDFRONT_ORIGIN_READ_TIMEOUT`) caps that
+#   one request, so the "stop issuing new requests" sum is held under it: 3s + 5s of
+#   indices/indicators plus 2 × 20s of quotes = 48s, leaving 12s of the ceiling for pydantic
+#   re-validation, JSON serialization, the ALB hop and L2 (DynamoDB) round-trips. The previous split
+#   (4+6+25+25) was exactly 60s, i.e. zero margin. Each stage can additionally overrun by one
+#   in-flight request - four stages, so up to four, ≈ 8s each with a warm crumb and ≈ 38s with a cold
+#   one (see the caveat above). 48s is therefore a "stop issuing" sum, not a bound; exceeding it costs
+#   a 504 on that single overview request (cache and scheduler paths untouched, the next request is
+#   served from cache). No split can prevent all four stages being slow at once - what absorbs that is
+#   stale-while-error plus the scheduler's pre-warming, not the budget. The scheduler waits *after*
+#   each refresh, so a long cycle slips rather than overlaps.
+#
+# 명시적으로 기각한 대안 — 네 조각을 `asyncio.gather`로 동시에 / Explicitly rejected alternative:
+#   `asyncio.gather` over the four pieces.
+#   합계가 max(3, 5, 20, 20) = 20s로 줄어 천장 여유가 커지지만, Yahoo를 향한 **동시성**이 정확히
+#   2026-08-04 장애의 방아쇠였다 (10심볼 × 5워커 병렬 버스트 → 전 심볼 빈 프레임 → 빈 리스트가
+#   "성공"으로 캐시되어 마지막 정상 시세를 밀어냄). 순차 실행은 게으름이 아니라 그 장애의 대응이고,
+#   지연은 예산 + 캐시 + 스케줄러로 흡수한다.
+#   It would cut the sum to max(3, 5, 20, 20) = 20s, but concurrency toward Yahoo is exactly what
+#   triggered the 2026-08-04 incident (a 10-symbols × 5-workers parallel burst answered with all-empty
+#   frames, whose empty list was cached as "success" and evicted the last good quotes). Serial is a
+#   deliberate consequence of that incident, not an oversight; latency is absorbed by the budgets, the
+#   cache and the scheduler instead.
+
+# CloudFront 오리진 read timeout(초) — 요청 1건의 벽시계 천장 (infra/stacks에 설정된 값).
+# 코드에 상수로 두어 위 배분 산술을 테스트가 검증할 수 있게 한다 (주석만으로는 드리프트한다).
+# CloudFront's origin read timeout in seconds - the wall-clock ceiling for one request, as configured in
+# infra/stacks. Kept as a constant so a test can assert the arithmetic above; a comment alone drifts.
+CLOUDFRONT_ORIGIN_READ_TIMEOUT = 60
 
 # 지수 5심볼(US 3 + KR 2)의 전체 예산(초) / Total budget for the 5 index symbols (US 3 + KR 2).
-# 4s / 5심볼 = 0.8s/심볼 = 실측의 2.7배. 만료 시 남은 심볼을 포기하고 파싱된 행만 반환한다 —
+# 3s / 5심볼 = 0.6s/심볼 = 실측의 2배. 만료 시 남은 심볼을 포기하고 파싱된 행만 반환한다 —
 # 지수는 시장 테이블이 아니라 대시보드의 추가 행이므로 예외를 던지지 않는다.
-# 4s over 5 symbols = 0.8s each = 2.7× the measured latency. On expiry the rest are dropped and the
+# 주의: 이 예산은 요청 1건 상한(`DOWNLOAD_TIMEOUT` = 8s)보다 **작다**. 느린 요청 1건이 타임아웃까지
+# 가면 예산이 그 자리에서 소진되어 남은 지수 행 전부를 잃는다. 그 대가로 천장 여유(위 12s)를 사는
+# 의도된 트레이드오프이고, 손실은 조용하지 않다 — 잘린 결과는 라우트의 커버리지 판정을 통해
+# `/api/health`의 yahoo를 degraded로 만든다 (`app/api/market.py`의 `ADDITIVE_MIN_COVERAGE`).
+# 3s over 5 symbols = 0.6s each = 2× the measured latency. On expiry the rest are dropped and the
 # parsed rows are returned: indices are additive dashboard rows, not the market table, so nothing raises.
-INDEX_FETCH_DEADLINE = 4
+# Note the budget is *below* the per-request cap (`DOWNLOAD_TIMEOUT` = 8s): one request that runs to its
+# timeout spends the whole budget and loses every remaining index row. That buys the ceiling margin
+# above (12s) and is deliberate - and the loss is not silent, because a truncated result degrades
+# `/api/health`'s yahoo through the route's coverage gate (`ADDITIVE_MIN_COVERAGE` in `app/api/market.py`).
+INDEX_FETCH_DEADLINE = 3
 
 # 경제지표 11심볼의 전체 예산(초) / Total budget for the 11 indicator symbols.
-# 6s / 11심볼 = 0.55s/심볼 = 실측의 1.8배. 지수와 동일한 부분 결과 규약.
-# 6s over 11 symbols = 0.55s each = 1.8× the measured latency; same partial-result contract as indices.
-INDICATOR_FETCH_DEADLINE = 6
+# 5s / 11심볼 = 0.45s/심볼 = 실측의 1.5배. 지수와 동일한 부분 결과 규약이며, 요청 1건 상한(8s)보다
+# 작다는 주의사항도 동일하게 적용된다.
+# 5s over 11 symbols = 0.45s each = 1.5× the measured latency; same partial-result contract as indices,
+# and the same "below the 8s per-request cap" caveat applies.
+INDICATOR_FETCH_DEADLINE = 5
 
 # `fetch_quotes` 한 호출의 전체 벽시계 예산 = 심볼 수 × QUOTE_BUDGET_PER_SYMBOL (상한 클램프).
 # Total wall-clock budget for one `fetch_quotes` call = symbol count × QUOTE_BUDGET_PER_SYMBOL, clamped.
@@ -121,16 +159,17 @@ INDICATOR_FETCH_DEADLINE = 6
 #     constant also changes meaning with the symbol count, whereas a per-symbol budget grows with the
 #     universe, gives up sooner on a small market, and makes the clamp point explicit.
 #
-# 현재 유니버스(50심볼)에서는 0.9 × 50 = 45s > 25s이므로 클램프가 유효하다. 즉 실효 헤드룸은 여전히
-# 1.7배이며, 그것은 예산 선택이 아니라 위 60s/45s 천장이 정한 한계다. 3배 열화의 완충은 예산이 아니라
-# 커버리지 게이트 + stale-while-error가 맡는다 — 부분 결과를 캐시에 밀어넣는 대신 마지막 정상 시세를
-# 계속 서빙한다.
-# At the current 50-symbol universe 0.9 × 50 = 45s > 25s, so the clamp binds and the effective headroom
-# is still 1.7×. That is a limit set by the 60s/45s ceilings above, not by this constant; what absorbs a
+# 현재 유니버스(50심볼)에서는 0.9 × 50 = 45s > 20s이므로 클램프가 유효하다. 즉 실효 헤드룸은
+# 20/50 = 0.4s/심볼 = 실측의 1.33배이며, 그것은 예산 선택이 아니라 위 60s(overview 4단계 순차) /
+# 45s(스케줄러 주기) 천장이 정한 한계다. 3배 열화의 완충은 예산이 아니라 커버리지 게이트 +
+# stale-while-error가 맡는다 — 부분 결과를 캐시에 밀어넣는 대신 마지막 정상 시세를 계속 서빙한다.
+# At the current 50-symbol universe 0.9 × 50 = 45s > 20s, so the clamp binds and the effective headroom
+# is 20/50 = 0.4s per symbol = 1.33× the measured latency. That is a limit set by the ceilings above (60s
+# across the overview's four serial stages, 45s per scheduler cycle), not by this constant; what absorbs a
 # 3× degradation is the coverage gate plus stale-while-error, which keeps serving the last good quotes
 # instead of pushing a thin partial into the cache.
 QUOTE_BUDGET_PER_SYMBOL = 0.9  # 실측 0.3s/심볼 × 3배 열화 허용 / measured 0.3s × 3× degradation
-QUOTE_FETCH_DEADLINE_MAX = 25
+QUOTE_FETCH_DEADLINE_MAX = 20
 
 # 부분 성공 허용 하한 = 파싱 성공 심볼 / 요청 심볼. 이 값 이상이면 부분 결과를 반환하고(경고),
 # 미달이면 예외를 던져 캐시의 마지막 정상 시세를 지킨다.
@@ -321,6 +360,19 @@ def _change(value: float, prev: float) -> tuple:
 # 지수 / Indices
 # ---------------------------------------------------------------------------
 
+def index_symbols() -> list[str]:
+    """
+    지수 조회가 요청하는 심볼 유니버스 (US + KR) / The index symbol universe one fetch requests.
+
+    `market_symbols`와 같은 이음새다: 호출부가 "반환 행 / 요청 심볼"로 커버리지를 계산해 데드라인에
+    잘린 결과를 `/api/health`에 드러낼 수 있게 공개한다. 서비스는 AppState를 모르는 상태로 남는다.
+    The same seam as `market_symbols`: public so callers can compute coverage (rows returned over
+    symbols requested) and surface a deadline-truncated result in `/api/health`, while the service
+    itself stays unaware of AppState.
+    """
+    return [*config.US_INDICES, *config.KR_INDICES]
+
+
 def fetch_indices() -> list[IndexQuote]:
     """
     US + KR 주요 지수를 한 번의 일괄 다운로드로 조회 / Fetch US + KR major indices in one batch download.
@@ -338,7 +390,7 @@ def fetch_indices() -> list[IndexQuote]:
         IndexQuote 리스트 (실패·예산 초과 심볼은 제외) / List of IndexQuote (failed and unbudgeted symbols omitted).
     """
     names = {**config.US_INDICES, **config.KR_INDICES}
-    symbols = list(names)
+    symbols = index_symbols()  # 커버리지 판정과 같은 목록 / the very list the coverage gate counts
     results: list[IndexQuote] = []
 
     frames = _serial_frames(
@@ -386,6 +438,16 @@ def fetch_indices() -> list[IndexQuote]:
 # 경제지표 / Economic indicators
 # ---------------------------------------------------------------------------
 
+def indicator_symbols() -> list[str]:
+    """
+    경제지표 조회가 요청하는 심볼 유니버스 / The indicator symbol universe one fetch requests.
+
+    공개 이유는 `index_symbols`와 같다 (호출부의 커버리지 판정용 이음새).
+    Public for the same reason as `index_symbols`: the caller's coverage seam.
+    """
+    return list(config.INDICATORS)
+
+
 def fetch_indicators() -> list[Indicator]:
     """
     환율/금리/원자재 등 경제지표를 한 번의 일괄 다운로드로 조회 / Fetch economic indicators in one batch download.
@@ -399,7 +461,7 @@ def fetch_indicators() -> list[Indicator]:
     Returns:
         Indicator 리스트 (실패·예산 초과 심볼은 제외) / List of Indicator (failed and unbudgeted symbols omitted).
     """
-    symbols = list(config.INDICATORS)
+    symbols = indicator_symbols()  # 커버리지 판정과 같은 목록 / the very list the coverage gate counts
     results: list[Indicator] = []
 
     frames = _serial_frames(

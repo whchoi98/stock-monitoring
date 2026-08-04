@@ -14,7 +14,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 |---|---|---|
 | App factory | `backend/app/main.py` | Router registration, lifespan (swap `NullL2`→`DynamoCache`, start scheduler), SPA static serving (`/api` 404s are never rewritten to `index.html`) |
 | Health route | `backend/app/api/health.py` | `GET /api/health` — liveness only, always 200, no external calls; reports per-source status (yahoo/rss/bedrock) + pre-warmed cache ages |
-| Market routes | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, news feed; payload builders reused by the scheduler |
+| Market routes | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, news feed; payload builders reused by the scheduler. `overview_payload` returns a `Partial` whenever a piece falls short (`coverage_shortfall`: full coverage for quotes, a 60% floor for the additive indices/indicators), so the outer `cached()` cannot re-mark yahoo `ok` over a short table |
 | Stock routes | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`); price overlay; simulated data flagged |
 | AI routes | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}`, `POST /api/ai/articles` — the only `text/event-stream` responses (`phase` → `delta`* → `final`; §3), cost defense in [agent-llm.md](agent-llm.md) |
 | Shared deps | `backend/app/api/deps.py` | `get_state`, `resolve_symbol` (universe gate, 404 outside US 50 + KR 50), cache key builders, `cached()` wrapper (503 + source degraded on failure; a fetcher returning `Partial` is cached and served but still degrades the source) |
@@ -62,7 +62,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 |---|---|---|
 | 앱 팩토리 | `backend/app/main.py` | 라우터 등록, lifespan(`NullL2`→`DynamoCache` 교체, 스케줄러 기동), SPA 정적 서빙 (`/api` 404는 절대 `index.html`로 바꾸지 않음) |
 | 헬스 라우트 | `backend/app/api/health.py` | `GET /api/health` — 생존 판정 전용, 항상 200, 외부 호출 없음. 소스별 상태(yahoo/rss/bedrock) + 선제 갱신 캐시 age 보고 |
-| 시장 라우트 | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, 뉴스 피드. 페이로드 빌더를 스케줄러가 재사용 |
+| 시장 라우트 | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, 뉴스 피드. 페이로드 빌더를 스케줄러가 재사용. 조각 중 하나라도 결손이면 `overview_payload`가 `Partial`을 반환한다(`coverage_shortfall` — 시세는 전량, 추가 행인 지수·지표는 60% 하한) → 바깥쪽 `cached()`가 짧은 테이블 위에 yahoo `ok`를 덮어쓰지 못한다 |
 | 종목 라우트 | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`). 가격 오버레이, 시뮬레이션 표시 |
 | AI 라우트 | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}`, `POST /api/ai/articles` — 유일한 `text/event-stream` 응답(`phase` → `delta`* → `final`, §3). 비용 방어 상세는 [agent-llm.md](agent-llm.md) |
 | 공용 의존성 | `backend/app/api/deps.py` | `get_state`, `resolve_symbol`(유니버스 게이트 — US 50 + KR 50 밖은 404), 캐시 키 빌더, `cached()` 래퍼(실패 시 503 + 소스 degraded. fetcher가 `Partial`을 반환하면 값은 캐시·서빙하되 소스는 degraded) |

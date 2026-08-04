@@ -154,6 +154,22 @@ async def refresh_market(state: AppState) -> None:
     #    Refresh the overview from whatever is cached, so one empty market still leaves the rest fresh
     try:
         overview = await market_api.overview_payload(state)
+        # 부분 결과는 `deps.Partial`로 온다 (라우트의 소스 마킹을 고치는 래퍼). 스케줄러는 캐시에
+        # 직접 쓰므로 감싼 값을 그대로 넘기면 L2 JSON 직렬화가 깨진다 — 풀어서 쓰고 degraded만 남긴다.
+        # 지수·지표가 데드라인에 잘린 경우가 여기로 온다 (시세 결손은 위 1)에서 이미 잡힌다).
+        # A partial arrives as `deps.Partial` (the wrapper that fixes the route's source marking). The
+        # scheduler writes to the cache directly, so it must unwrap - a wrapped value breaks L2's JSON
+        # serialization - and keep only the degraded mark. Deadline-truncated indices/indicators land
+        # here; a quote shortfall was already caught in step 1.
+        if isinstance(overview, deps.Partial):
+            degraded = True
+            # 라우트와 같은 병합 규칙을 쓴다 (detail의 임의 키가 예약 필드를 밀어내지 않게)
+            # The same merge rule the routes use, so arbitrary detail keys cannot displace reserved fields
+            _warn(
+                "scheduler_overview_partial",
+                **deps.partial_log_fields(deps.KEY_OVERVIEW, deps.SOURCE_YAHOO, overview.detail),
+            )
+            overview = overview.value
         await state.cache.put(deps.KEY_OVERVIEW, overview, config.L2_TTL)
     except Exception as exc:
         degraded = True

@@ -178,6 +178,22 @@ class FakeServices:
         """
         return [quote.symbol for quote in FAKE_QUOTES[market]]
 
+    def index_symbols(self) -> list[str]:
+        """
+        페이크 지수와 같은 유니버스 / The same universe the fake indices cover.
+
+        `market_symbols`와 같은 이유로 패치한다: overview는 지수·지표 커버리지도 함께 보므로, 실제
+        config(지수 5개)를 돌려주면 페이크 2행이 영구 shortfall이 된다.
+        Patched for the same reason as `market_symbols`: the overview also judges index/indicator
+        coverage, so returning the real config universe (5 indices) would make the 2 fake rows a
+        permanent shortfall.
+        """
+        return [index.symbol for index in FAKE_INDICES]
+
+    def indicator_symbols(self) -> list[str]:
+        """페이크 지표와 같은 유니버스 / The same universe the fake indicators cover."""
+        return [indicator.symbol for indicator in FAKE_INDICATORS]
+
     # --- charts (동기 / sync) ---
     def fetch_chart(self, symbol: str, period: str) -> ChartResponse:
         self._enter("fetch_chart")
@@ -241,6 +257,8 @@ def services(monkeypatch) -> FakeServices:
     monkeypatch.setattr(market_data, "fetch_indicators", fake.fetch_indicators)
     monkeypatch.setattr(market_data, "fetch_quotes", fake.fetch_quotes)
     monkeypatch.setattr(market_data, "market_symbols", fake.market_symbols)
+    monkeypatch.setattr(market_data, "index_symbols", fake.index_symbols)
+    monkeypatch.setattr(market_data, "indicator_symbols", fake.indicator_symbols)
     monkeypatch.setattr(charts, "fetch_chart", fake.fetch_chart)
     monkeypatch.setattr(fundamentals, "fetch_detail", fake.fetch_detail)
     monkeypatch.setattr(news, "fetch_news", fake.fetch_news)

@@ -9,6 +9,8 @@ stop event is what wakes the loops.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -217,6 +219,35 @@ async def test_refresh_market_marks_degraded_on_a_partial_market(state, services
     us_quotes, _as_of = state.cache.l1.get(deps.key_quotes("us"))
     assert len(us_quotes) == len(market_data.market_symbols("us")) - 1
     assert deps.key_quotes("us") in l2.store
+    assert state.source_status["yahoo"] == STATUS_DEGRADED
+
+
+async def test_refresh_market_marks_degraded_on_a_partial_overview(state, services, l2, monkeypatch, caplog):
+    """
+    지수·지표가 잘린 overview도 degraded다 (Partial은 캐시 전에 풀린다).
+    A truncated index/indicator overview is degraded too, and the `Partial` is unwrapped before caching.
+
+    `overview_payload`는 부분 결과를 `deps.Partial`로 감싸 라우트의 소스 마킹을 고친다. 스케줄러는
+    같은 빌더를 쓰지만 캐시에 직접 쓰므로, 감싼 값을 그대로 `cache.put`하면 JSON 직렬화가 깨진다 —
+    풀어서 쓰고 degraded는 그대로 반영해야 한다.
+    `overview_payload` wraps a partial in `deps.Partial` to fix the route's source marking. The scheduler
+    shares that builder but writes to the cache directly, so the wrapper must be unwrapped before
+    `cache.put` (a wrapped value is not JSON-serializable) while the degraded mark still lands.
+    """
+    monkeypatch.setattr(market_data, "fetch_indicators", lambda: [])
+
+    with caplog.at_level(logging.WARNING, logger="app.core.scheduler"):
+        await scheduler.refresh_market(state)
+
+    # 조용한 실패 금지: 결손은 단일 라인 JSON으로 남는다 / no silent failure: the shortfall is logged
+    payload = json.loads(caplog.records[-1].getMessage())
+    assert payload["event"] == "scheduler_overview_partial"
+    assert [item["kind"] for item in payload["shortfall"]] == ["indicators"]
+
+    overview, _as_of = state.cache.l1.get(deps.KEY_OVERVIEW)
+    assert overview["indicators"] == []          # 잘린 결과는 그대로 서빙 / the truncated rows are still served
+    assert overview["summary"]["us"]["advancing"] == 1
+    assert deps.KEY_OVERVIEW in l2.store         # 직렬화 계약 통과 = Partial이 풀렸다 / the wrapper is gone
     assert state.source_status["yahoo"] == STATUS_DEGRADED
 
 

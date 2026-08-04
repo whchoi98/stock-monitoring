@@ -11,7 +11,7 @@ The cache holds JSON-serialized dicts rather than pydantic models, because L2 st
 from __future__ import annotations
 
 import asyncio
-from typing import Literal, Tuple
+from typing import List, Literal, Optional, Tuple, Union
 
 from fastapi import APIRouter, Depends
 
@@ -25,6 +25,22 @@ router = APIRouter(prefix="/api/market", tags=["market"])
 
 # 잘못된 값은 FastAPI가 422로 거절한다 / FastAPI rejects any other value with 422
 Market = Literal["us", "kr"]
+
+# 시세 커버리지 임계값 = 전량. 시세 행은 제품 그 자체이므로 한 행이 빠지면 사용자가 보려던 종목이
+# 사라진다 (`fetch_quotes`는 60% 이상을 성공으로 반환하므로 호출부가 이 판정을 해야 한다).
+# Quote coverage threshold = full. A quote row *is* the product: one missing row is a symbol the user
+# wanted and cannot see (`fetch_quotes` returns anything above 60% as a success, so the caller must judge).
+FULL_COVERAGE = 1.0
+
+# 지수·지표 커버리지 하한. 시세와 달리 "한 행이라도 빠지면 degraded"를 쓰지 않는다: 지수·지표는
+# 대시보드의 추가 행이고 한 심볼이 NaN/휴장으로 빠지는 일은 일상이라, 전량 기준을 쓰면 yahoo가
+# 사실상 상시 degraded가 되어 신호의 뜻이 사라진다. 하한(시세와 같은 60%)은 데드라인이 여러 행을
+# 한꺼번에 삼키는 모양(예: 5심볼 중 1행만 파싱)을 잡아내고 한두 행의 잡음은 흘려보낸다.
+# Coverage floor for indices and indicators. Unlike quotes this is not "any missing row degrades": these
+# are additive dashboard rows where a single NaN/holiday gap is routine, so a full-coverage rule would pin
+# yahoo to degraded and drain the signal of meaning. The floor (the same 60% quotes use) catches the
+# deadline shape - many rows lost at once, e.g. 1 of 5 indices parsed - and lets one- or two-row noise pass.
+ADDITIVE_MIN_COVERAGE = market_data.QUOTE_MIN_COVERAGE
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +70,25 @@ def quote_coverage(market: str, quotes: list) -> Tuple[int, int]:
     judge it identically.
     """
     return len(quotes), len(market_data.market_symbols(market))
+
+
+def coverage_shortfall(kind: str, parsed: int, requested: int, minimum: float) -> Optional[dict]:
+    """
+    커버리지가 하한 미달이면 경고용 detail dict, 충분하면 None / Detail dict when coverage is short, else None.
+
+    Args:
+        kind: 로그에 남을 조각 이름 (예: "indices", "quotes:us") / Piece name for the log.
+        parsed: 실제로 파싱된 행 수 / Rows actually parsed.
+        requested: 요청한 심볼 수 / Symbols requested.
+        minimum: 하한 비율 (`FULL_COVERAGE` 또는 `ADDITIVE_MIN_COVERAGE`) / Floor ratio.
+
+    Returns:
+        `{"kind", "parsed", "requested", "minimum"}` 또는 None / The detail dict, or None.
+    """
+    if requested <= 0 or parsed >= requested * minimum:
+        # requested == 0은 판정할 것이 없다 (0으로 나누지 않는다) / nothing to judge, and never divide by zero
+        return None
+    return {"kind": kind, "parsed": parsed, "requested": requested, "minimum": minimum}
 
 
 async def cached_quotes(state: AppState, market: str) -> Tuple[list, str]:
@@ -106,16 +141,62 @@ def build_overview(indices: list, indicators: list, us_quotes: list, kr_quotes: 
     }
 
 
-async def overview_payload(state: AppState) -> dict:
+def overview_shortfalls(indices: list, indicators: list, quotes: dict) -> List[dict]:
+    """
+    overview 네 조각의 커버리지 결손 목록 / Coverage shortfalls across the overview's four pieces.
+
+    Args:
+        indices: 파싱된 IndexQuote 리스트 / Parsed IndexQuote list.
+        indicators: 파싱된 Indicator 리스트 / Parsed Indicator list.
+        quotes: {시장: 시세 dict 리스트} / {market: quote dict list}.
+
+    Returns:
+        결손 detail dict 리스트 (없으면 빈 리스트) / A list of shortfall details, empty when complete.
+    """
+    found = [
+        coverage_shortfall(
+            "indices", len(indices), len(market_data.index_symbols()), ADDITIVE_MIN_COVERAGE
+        ),
+        coverage_shortfall(
+            "indicators", len(indicators), len(market_data.indicator_symbols()), ADDITIVE_MIN_COVERAGE
+        ),
+    ]
+    for market, rows in quotes.items():
+        parsed, requested = quote_coverage(market, rows)
+        found.append(coverage_shortfall(deps.key_quotes(market), parsed, requested, FULL_COVERAGE))
+    return [shortfall for shortfall in found if shortfall is not None]
+
+
+async def overview_payload(state: AppState) -> Union[dict, deps.Partial]:
     """
     지수·지표를 새로 조회하고 시세는 캐시에서 가져와 overview를 만든다.
     Fetch indices and indicators fresh, take quotes from the cache, and build the overview.
+
+    불완전한 조각이 하나라도 있으면 `deps.Partial`로 감싸 반환한다. 안쪽 `cached_quotes`가 부분 시세를
+    degraded로 마킹해도, 바깥쪽 `deps.cached(KEY_OVERVIEW, ...)`가 평범한 dict를 받으면 무조건 ok로
+    다시 마킹해 그것을 지운다(last-writer-wins). 그래서 콜드 overview 한 번이 `yahoo: ok`와 짧은
+    테이블을 동시에 내놓았다 — 감싸서 반환하면 바깥쪽도 degraded로 마킹한다. 지수·지표의 결손도 같은
+    경로로 흘려보낸다 (데드라인이 남은 행을 삼켜도 헬스가 정상이라고 말하지 않게).
+    Returns a `deps.Partial` when any piece is incomplete. The inner `cached_quotes` marks a partial
+    degraded, but the outer `deps.cached(KEY_OVERVIEW, ...)` re-marks ok for any plain dict and erases it
+    (last-writer-wins), which is how one cold overview reported `yahoo: ok` while serving a short table.
+    Wrapping makes the outer call degrade too, and index/indicator shortfalls ride the same path so a
+    deadline-truncated dashboard never looks healthy.
+
+    Returns:
+        overview dict, 또는 결손이 있으면 그 dict를 담은 `deps.Partial`.
+        The overview dict, or a `deps.Partial` carrying it when a piece fell short.
     """
     indices = await asyncio.to_thread(market_data.fetch_indices)
     indicators = await asyncio.to_thread(market_data.fetch_indicators)
     us_quotes, _ = await cached_quotes(state, "us")
     kr_quotes, _ = await cached_quotes(state, "kr")
-    return build_overview(indices, indicators, us_quotes, kr_quotes)
+
+    payload = build_overview(indices, indicators, us_quotes, kr_quotes)
+    shortfalls = overview_shortfalls(indices, indicators, {"us": us_quotes, "kr": kr_quotes})
+    if shortfalls:
+        return deps.Partial(payload, {"shortfall": shortfalls})
+    return payload
 
 
 async def news_payload() -> list:

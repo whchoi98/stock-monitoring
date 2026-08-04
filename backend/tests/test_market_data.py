@@ -155,6 +155,64 @@ def test_fetch_indices_requests_every_symbol_serially_with_an_explicit_timeout(m
     assert all(i.change == pytest.approx(10.0) for i in out)
 
 
+def test_index_and_indicator_universes_are_public_and_drive_the_fetch(monkeypatch):
+    """
+    지수·지표의 요청 유니버스를 공개한다 (quotes의 `market_symbols`와 같은 이음새).
+    The index/indicator request universes are public, the same seam `market_symbols` gives quotes.
+
+    호출부가 "요청 심볼 수 대비 반환 행 수"를 계산할 수 있어야 데드라인에 잘린 결과가
+    `/api/health`에 드러난다. 조회 함수가 같은 목록을 쓰는지도 함께 확인한다 — 두 목록이 갈라지면
+    커버리지 판정이 조용히 틀린다.
+    Callers need "rows returned over symbols requested" for a deadline-truncated result to reach
+    `/api/health`. The fetchers must consume the very same lists, or the coverage judgement silently lies.
+    """
+    assert market_data.index_symbols() == list(config.US_INDICES) + list(config.KR_INDICES)
+    assert market_data.indicator_symbols() == list(config.INDICATORS)
+
+    calls = []
+
+    def recording_download(symbols, **kw):
+        calls.append(list(symbols))
+        return fake_download(symbols, **kw)
+
+    monkeypatch.setattr(market_data.yf, "download", recording_download)
+    market_data.fetch_indices()
+    assert calls == [[symbol] for symbol in market_data.index_symbols()]
+
+    calls.clear()
+    market_data.fetch_indicators()
+    assert calls == [[symbol] for symbol in market_data.indicator_symbols()]
+
+
+def test_serial_overview_budgets_leave_margin_under_the_origin_ceiling():
+    """
+    콜드 overview의 4단계 순차 예산 합은 오리진 천장(60s) 아래로 여유를 남겨야 한다.
+    The four serial stages of a cold overview must sum to well under the 60s origin ceiling.
+
+    `overview_payload`는 지수 → 지표 → quotes:us → quotes:kr을 **순차로** 조회한다. 합이 천장과
+    같으면(이전 4+6+25+25 = 60) 검증·직렬화·ALB·L2 왕복에 쓸 시간이 0이고, 게다가 각 단계가
+    진행 중인 요청 1건만큼 예산을 넘길 수 있어(4단계 = 최대 4건) 천장 초과가 상시화된다.
+    `overview_payload` fetches indices -> indicators -> quotes:us -> quotes:kr *serially*. A sum equal
+    to the ceiling (the previous 4+6+25+25 = 60) leaves nothing for validation, serialization, ALB and
+    L2 round-trips, and each stage can overrun by one in-flight request (four stages = up to four).
+    """
+    stop_issuing = (
+        market_data.INDEX_FETCH_DEADLINE
+        + market_data.INDICATOR_FETCH_DEADLINE
+        + 2 * market_data.QUOTE_FETCH_DEADLINE_MAX
+    )
+    assert stop_issuing == 48
+    # 천장까지 최소 10초는 남긴다 / at least 10s of the ceiling stays unspent
+    assert market_data.CLOUDFRONT_ORIGIN_READ_TIMEOUT - stop_issuing >= 10
+
+    # 지수·지표 예산은 요청 1건 상한(8s)보다 작다 — 느린 요청 1건이 남은 행을 삼키는 것은 의도된
+    # 트레이드오프다(추가 행 < 천장 여유). 상향하면 위 여유가 사라진다.
+    # Both additive budgets sit below the 8s per-request cap: one slow request eating the remaining rows
+    # is the deliberate trade-off (additive rows lose to ceiling margin). Raising them spends the margin.
+    assert market_data.INDEX_FETCH_DEADLINE < market_data.DOWNLOAD_TIMEOUT
+    assert market_data.INDICATOR_FETCH_DEADLINE < market_data.DOWNLOAD_TIMEOUT
+
+
 def test_fetch_indices_stops_issuing_requests_when_the_deadline_expires(monkeypatch, caplog):
     """
     데드라인이 만료되면 남은 지수 요청을 내지 않고, 파싱된 행만 반환한다 (예외 없음).
@@ -414,10 +472,10 @@ def test_quote_budget_scales_with_symbol_count_and_clamps_to_the_ceiling():
     예산 = 심볼 수 × 심볼당 예산, 60s/45s 천장이 정한 상한에서 클램프된다.
     Budget = symbol count × per-symbol budget, clamped at the ceiling the 60s/45s limits dictate.
 
-    고정 상수는 심볼 수가 바뀌면 의미가 바뀐다 (50심볼에서 25s = 0.5s/심볼 = 실측 0.3s/심볼의
-    1.7배뿐). 심볼당으로 쓰면 유니버스가 커질 때 예산도 함께 자라고, 상한에 걸리는 지점이 명시된다.
-    A flat constant silently changes meaning with the symbol count (25s over 50 symbols is 0.5s each,
-    only 1.7× the measured 0.3s). A per-symbol budget grows with the universe and makes the point where
+    고정 상수는 심볼 수가 바뀌면 의미가 바뀐다 (50심볼에서 20s = 0.4s/심볼 = 실측 0.3s/심볼의
+    1.33배뿐). 심볼당으로 쓰면 유니버스가 커질 때 예산도 함께 자라고, 상한에 걸리는 지점이 명시된다.
+    A flat constant silently changes meaning with the symbol count (20s over 50 symbols is 0.4s each,
+    only 1.33× the measured 0.3s). A per-symbol budget grows with the universe and makes the point where
     the ceiling binds explicit.
     """
     assert market_data._quote_budget(10) == pytest.approx(market_data.QUOTE_BUDGET_PER_SYMBOL * 10)
@@ -430,7 +488,7 @@ def test_quote_budget_scales_with_symbol_count_and_clamps_to_the_ceiling():
 
 def test_fetch_quotes_deadline_scales_down_for_a_small_universe(monkeypatch, caplog):
     """
-    작은 시장은 50심볼용 상한(25s)을 받지 않는다 — 예산이 심볼 수에 비례해 더 빨리 포기한다.
+    작은 시장은 50심볼용 상한(20s)을 받지 않는다 — 예산이 심볼 수에 비례해 더 빨리 포기한다.
     A small market does not get the 50-symbol ceiling: the budget scales down, so it gives up sooner.
     """
     symbols = list(config.US_STOCKS[:5])

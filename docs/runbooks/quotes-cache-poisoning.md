@@ -25,8 +25,11 @@ purges the poisoned L2 (DynamoDB) items and verifies recovery.
   resetting every cycle — it either climbs toward 24 hours or **disappears entirely**. Both shapes mean
   the same thing: the scheduler is not completing cycles. `cacheAge` reads **L1 only** (health answers
   without touching DynamoDB) and L1 is per-task memory, so a task replaced during the outage starts
-  with no `quotes:*` entry and a failing scheduler never writes one. A missing key is therefore not
-  evidence of health, and the authoritative staleness signal is the `asOf` in the quotes response.
+  with no `quotes:*` entry and a failing scheduler never writes one. Task replacement is not the only
+  route to that shape: L1 entries carry the same 24h TTL, so an outage that outlives it lets
+  `MemoryCache` expire (and sweep) the key inside a task that was never replaced — the absent key looks
+  identical either way. A missing key is therefore not evidence of health, and the authoritative
+  staleness signal is the `asOf` in the quotes response.
 
 ### Cause chain (2026-08-04 live incident)
 
@@ -156,7 +159,10 @@ behaviour — wait for upstream and let the scheduler repopulate the cache.
   — 24시간을 향해 계속 늘어나거나 **아예 사라진다**. 두 모양의 뜻은 같다: 스케줄러가 사이클을 완주하지
   못하고 있다. `cacheAge`는 **L1만** 읽고(헬스는 DynamoDB를 건드리지 않는다) L1은 태스크별 인메모리라,
   장애 중에 태스크가 교체되면 `quotes:*` 항목이 없는 상태로 시작하고 실패하는 스케줄러는 그것을 채우지
-  못한다. 따라서 키가 없다는 것은 정상의 증거가 아니며, 신선도의 최종 근거는 시세 응답의 `asOf`다.
+  못한다. 태스크 교체만이 이 모양을 만드는 것은 아니다: L1 항목도 같은 24시간 TTL을 갖기 때문에 장애가
+  그보다 길어지면 교체되지 않은 태스크 안에서도 `MemoryCache`가 키를 만료(및 sweep)시킨다 — 사라진 키의
+  모양은 두 경로 모두 동일하다. 따라서 키가 없다는 것은 정상의 증거가 아니며, 신선도의 최종 근거는 시세
+  응답의 `asOf`다.
 
 ### 원인 연쇄 (2026-08-04 라이브 장애)
 

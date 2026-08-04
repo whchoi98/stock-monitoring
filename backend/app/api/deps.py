@@ -71,6 +71,31 @@ def _warn(event: str, **fields: Any) -> None:
     logger.warning(json.dumps(payload, default=str, ensure_ascii=False))
 
 
+# 부분 성공 로그 한 줄이 소유하는 필드 이름 / Field names owned by the partial-warning line itself
+_RESERVED_LOG_FIELDS = ("event", "key", "source")
+
+
+def partial_log_fields(key: str, source: str, detail: dict) -> dict:
+    """
+    `Partial.detail`을 경고 필드로 병합 (예약 이름 충돌 방어) / Merge `Partial.detail` into warning fields.
+
+    `detail`은 fetcher가 만드는 임의의 dict다. 거기에 `key`/`source`/`event`가 들어오면
+    `_warn(event, key=..., source=..., **detail)`이 "multiple values for argument" TypeError로 죽어
+    부분 성공 경고 자체가 사라진다 — 조용한 실패를 막으려고 넣은 로그가 조용히 사라지는 셈이다.
+    충돌한 값은 버리지 않고 `detail_*`로 옮겨 보존한다. 라우트(`cached`)와 스케줄러가 같은 병합
+    규칙을 쓰도록 공개한다.
+    `detail` is an arbitrary dict built by the fetcher. A `key`/`source`/`event` inside it would make
+    `_warn(event, key=..., source=..., **detail)` die with a "multiple values for argument" TypeError,
+    deleting the very warning that exists to prevent silent failure. Colliding entries are preserved
+    under a `detail_` prefix rather than dropped. Public so the routes (`cached`) and the scheduler share
+    one merge rule.
+    """
+    fields: dict = {"key": key, "source": source}
+    for name, value in detail.items():
+        fields[f"detail_{name}" if name in _RESERVED_LOG_FIELDS else name] = value
+    return fields
+
+
 # ---------------------------------------------------------------------------
 # 의존성 / Dependencies
 # ---------------------------------------------------------------------------
@@ -188,7 +213,7 @@ async def cached(
         if isinstance(value, Partial):
             # 부분 성공: 값은 캐시·응답에 쓰지만 헬스에서는 정상이 아니다 / cached and served, but not healthy
             state.mark_source(source, STATUS_DEGRADED)
-            _warn("route_fetch_partial", key=key, source=source, **value.detail)
+            _warn("route_fetch_partial", **partial_log_fields(key, source, value.detail))
             return value.value
         state.mark_source(source, STATUS_OK)
         return value
