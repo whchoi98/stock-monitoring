@@ -20,7 +20,7 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
 - @tanstack/react-query (서버 상태·폴링), react-router-dom v6, lightweight-charts, react-markdown, @fontsource/pretendard
-- 테스트 / Tests: vitest + @testing-library/react 168개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
+- 테스트 / Tests: vitest + @testing-library/react 176개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
 
 ### Infrastructure (`infra/`)
 - AWS CDK v2 (Python), 단일 스택: CloudFront → ALB(CloudFront prefix-list SG) → ECS Fargate(ARM64) + DynamoDB(TTL 캐시)
@@ -57,7 +57,7 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 ```bash
 # 테스트 / Tests
 cd backend && .venv/bin/pytest -q          # 백엔드 (320)
-cd frontend && npx vitest run              # 프론트 (168)
+cd frontend && npx vitest run              # 프론트 (176)
 make test                                  # 전체
 
 # 로컬 실행 / Local run

@@ -38,6 +38,8 @@ Every data endpoint (everything except `/api/health`) wraps its payload:
 - `marketOpen` — whether any tracked market (US or KR) is currently open.
 - `data` — the endpoint-specific payload documented below.
 
+The two AI endpoints carry this same envelope **inside their SSE `final` event** rather than as the response body — see the AI (Bedrock) section below.
+
 ## Symbols
 
 Routes with a `{symbol}` path parameter only accept the fixed universe of **US 50 + KR 50** symbols (case-insensitive, normalized to upper case):
@@ -211,6 +213,16 @@ Ten days of investor flows **derived** from daily volume and close direction —
 
 Both routes call Amazon Bedrock (`global.anthropic.claude-sonnet-4-6`) and are the only endpoints that cost money. They are defended in this order: **(1) per-IP rate limit → (2) result cache → (3) global concurrency cap (2)**. The rate limit precedes the cache, so even cache hits spend budget. Error bodies are fixed strings — exception details never reach the client.
 
+Both are also the only **streaming** endpoints: they answer `text/event-stream` and emit `phase` → `delta`* → `final`. The first event leaves immediately and every delta resets the CloudFront/ALB idle counters, which removes the wall-clock ceiling a long analysis used to hit; every wait (a queued Bedrock or fetch permit, or a follower behind another request for the same key) heartbeats `phase: waiting` every 5 s. A `final` is always the last event.
+
+| Event | Payload |
+|---|---|
+| `phase` | `{"phase": "fetching" \| "analyzing" \| "waiting"}` |
+| `delta` | `{"text": "…"}` — one chunk of the markdown answer |
+| `final` | the usual envelope on success, or `{"error": "<fixed string>", "status": <code>}` on failure |
+
+**Statuses after the stream opens are 200.** Only decisions made before the first byte keep a real HTTP status (`429`, `422`, `404` — all plain JSON, as documented below); `503 ai_unavailable`, `500 ai_failed` and `502 article_unavailable` are delivered *inside* the `final` event.
+
 #### Analyze stock
 ```
 POST /api/ai/stocks/{symbol}
@@ -218,15 +230,15 @@ POST /api/ai/stocks/{symbol}
 
 AI stock analysis as Korean markdown. **No request body.** Prompt inputs (price, P/E, 52-week range, sector, recent news titles) come from the already-cached detail and per-symbol news.
 
-**Response** `200 OK` — envelope; `data`:
+**Response** `200 OK`, `text/event-stream`; the `final` event carries the envelope whose `data` is:
 
 ```json
 { "symbol": "AAPL", "analysis": "## 요약\n..." }
 ```
 
-**Caching**: key `ai:stock:{symbol}`, TTL **6 h** (`AI_TTL=21600`). Concurrent requests for the same symbol trigger a single Bedrock call (per-key lock).
+**Caching**: key `ai:stock:{symbol}`, TTL **6 h** (`AI_TTL=21600`). Concurrent requests for the same symbol trigger a single Bedrock call: one leader streams and caches, the others heartbeat `phase: waiting` and inherit its outcome.
 
-**Errors**: `404` unknown symbol · `429` rate limited · `503 {"detail": "ai_unavailable"}` (no credentials / no model access) · `500 {"detail": "ai_failed"}` (any other failure).
+**Errors**: `404` unknown symbol · `429` rate limited (both before the stream starts) · `ai_unavailable` (503) and `ai_failed` (500) arrive inside `final`.
 
 #### Analyze article
 ```
@@ -243,7 +255,7 @@ Article summary, insights, and (for English articles) Korean translation, as Kor
 | `title` | string | Yes | 1–512 chars | Article title (goes into the prompt) |
 | `language` | `"ko"` \| `"en"` | Yes | | `ko`: summary/analysis only; `en`: adds Korean translation |
 
-**Response** `200 OK` — envelope; `data`:
+**Response** `200 OK`, `text/event-stream`; the `final` event carries the envelope whose `data` is:
 
 ```json
 { "url": "https://…", "title": "…", "language": "en", "analysis": "## 요약\n..." }
@@ -251,7 +263,7 @@ Article summary, insights, and (for English articles) Korean translation, as Kor
 
 **Caching**: key `ai:article:{sha1(url)[:16]}` — **URL only**, TTL **6 h**. Re-requesting the same URL with a different title returns the first analysis.
 
-**Errors**: `422` body validation · `429` rate limited · `502 {"detail": "article_unavailable"}` (article body could not be obtained — not cached, Bedrock not called) · `503 ai_unavailable` · `500 ai_failed`.
+**Errors**: `422` body validation · `429` rate limited (both before the stream starts) · `article_unavailable` (502 — body unobtainable, not cached, Bedrock never called), `ai_unavailable` (503) and `ai_failed` (500) arrive inside `final`.
 
 ## Error Codes
 
@@ -261,10 +273,10 @@ Article summary, insights, and (for English articles) Korean translation, as Kor
 | 404 | `{symbol}` routes | `{"detail": "unknown symbol: <input>"}` — outside the US 50 + KR 50 universe |
 | 422 | Any validated param/body | FastAPI validation error (bad `market`, `period`, or article body) |
 | 429 | AI routes | `{"detail": "rate_limited", "retryAfter": 60}` + `Retry-After: 60` header |
-| 500 | AI routes | `{"detail": "ai_failed"}` — Bedrock call failed (non-availability) |
-| 502 | `POST /api/ai/articles` | `{"detail": "article_unavailable"}` — article body unobtainable |
+| 500 | AI routes | `{"detail": "ai_failed"}` — Bedrock call failed (non-availability). Carried in the SSE `final` as `{"error": "ai_failed", "status": 500}` |
+| 502 | `POST /api/ai/articles` | `{"detail": "article_unavailable"}` — article body unobtainable. Carried in the SSE `final` |
 | 503 | Data routes | `{"detail": "data unavailable: <key>"}` — cache (stale included) and upstream both failed |
-| 503 | AI routes | `{"detail": "ai_unavailable"}` — no credentials or model access |
+| 503 | AI routes | `{"detail": "ai_unavailable"}` — no credentials or model access. Carried in the SSE `final` |
 | 503 | Any (except health) | `{"detail": "app_not_ready"}` — app context not initialized |
 
 <a id="rate-limits"></a>
@@ -317,6 +329,8 @@ Notes:
 - `asOf` — 데이터를 조회한 시각(캐시 기록 시각)의 ISO 8601 타임스탬프. 가격 오버레이가 적용된 종목 상세에서는 시세의 타임스탬프다.
 - `marketOpen` — 추적 중인 시장(미국 또는 한국) 중 하나라도 장중인지 여부.
 - `data` — 아래에 문서화된 엔드포인트별 페이로드.
+
+두 AI 엔드포인트는 이 envelope을 응답 본문이 아니라 **SSE `final` 이벤트 안에** 실어 보낸다 — 아래 AI (Bedrock) 절 참조.
 
 ## 심볼
 
@@ -491,6 +505,16 @@ GET /api/stocks/{symbol}/investors
 
 두 라우트 모두 Amazon Bedrock(`global.anthropic.claude-sonnet-4-6`)을 호출하며 비용이 드는 유일한 엔드포인트다. 방어 순서: **① IP당 레이트리밋 → ② 결과 캐시 → ③ 전역 동시 실행 제한(2)**. 레이트리밋이 캐시보다 앞이라 캐시 히트도 예산을 소비한다. 오류 본문은 고정 문구다 — 예외 상세는 절대 클라이언트로 나가지 않는다.
 
+또한 유일한 **스트리밍** 엔드포인트다: `text/event-stream`으로 `phase` → `delta`* → `final`을 낸다. 첫 이벤트가 즉시 나가고 델타마다 CloudFront/ALB idle 카운터가 리셋되므로 긴 분석이 걸리던 wall-clock 제약이 사라졌다. 모든 대기 구간(Bedrock·fetch permit 대기, 같은 키를 이미 분석 중인 요청 뒤의 팔로워 대기)은 5초마다 `phase: waiting` 하트비트를 낸다. `final`은 항상 마지막 이벤트다.
+
+| 이벤트 | 페이로드 |
+|---|---|
+| `phase` | `{"phase": "fetching" \| "analyzing" \| "waiting"}` |
+| `delta` | `{"text": "…"}` — 마크다운 답변의 한 조각 |
+| `final` | 성공은 기존 envelope, 실패는 `{"error": "<고정 문구>", "status": <코드>}` |
+
+**스트림이 열린 뒤의 상태 코드는 200이다.** 첫 바이트 전에 결정되는 것만 실제 HTTP 상태를 유지하고(`429`·`422`·`404` — 아래 표대로 평범한 JSON), `503 ai_unavailable`·`500 ai_failed`·`502 article_unavailable`은 `final` 이벤트 **안에** 실려 온다.
+
 #### 종목 분석
 ```
 POST /api/ai/stocks/{symbol}
@@ -498,15 +522,15 @@ POST /api/ai/stocks/{symbol}
 
 한국어 마크다운 형식의 AI 종목 분석. **요청 본문 없음.** 프롬프트 입력(가격, PER, 52주 범위, 섹터, 최근 뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져온다.
 
-**응답** `200 OK` — envelope; `data`:
+**응답** `200 OK`, `text/event-stream`. `final` 이벤트가 envelope을 실어 오고 그 `data`는:
 
 ```json
 { "symbol": "AAPL", "analysis": "## 요약\n..." }
 ```
 
-**캐싱**: 키 `ai:stock:{symbol}`, TTL **6시간**(`AI_TTL=21600`). 같은 심볼의 동시 요청은 Bedrock을 한 번만 호출한다(키별 락).
+**캐싱**: 키 `ai:stock:{symbol}`, TTL **6시간**(`AI_TTL=21600`). 같은 심볼의 동시 요청은 Bedrock을 한 번만 호출한다 — 선점자가 스트리밍·캐싱하고 나머지는 `phase: waiting` 하트비트 후 그 결과를 승계한다.
 
-**오류**: `404` 유니버스 밖 심볼 · `429` 레이트리밋 · `503 {"detail": "ai_unavailable"}`(자격 증명/모델 접근 불가) · `500 {"detail": "ai_failed"}`(그 외 실패).
+**오류**: `404` 유니버스 밖 심볼 · `429` 레이트리밋(둘 다 스트림 시작 전) · `ai_unavailable`(503)·`ai_failed`(500)은 `final` 안에 실려 온다.
 
 #### 기사 분석
 ```
@@ -523,7 +547,7 @@ POST /api/ai/articles
 | `title` | string | 예 | 1–512자 | 기사 제목 (프롬프트에 포함) |
 | `language` | `"ko"` \| `"en"` | 예 | | `ko`: 요약·분석만; `en`: 한국어 번역 추가 |
 
-**응답** `200 OK` — envelope; `data`:
+**응답** `200 OK`, `text/event-stream`. `final` 이벤트가 envelope을 실어 오고 그 `data`는:
 
 ```json
 { "url": "https://…", "title": "…", "language": "en", "analysis": "## 요약\n..." }
@@ -531,7 +555,7 @@ POST /api/ai/articles
 
 **캐싱**: 키 `ai:article:{sha1(url)[:16]}` — **URL만** 사용, TTL **6시간**. 같은 URL을 다른 제목으로 재요청하면 먼저 생성된 분석이 반환된다.
 
-**오류**: `422` 본문 검증 실패 · `429` 레이트리밋 · `502 {"detail": "article_unavailable"}`(기사 본문 조회 실패 — 캐시하지 않으며 Bedrock도 호출하지 않음) · `503 ai_unavailable` · `500 ai_failed`.
+**오류**: `422` 본문 검증 실패 · `429` 레이트리밋(둘 다 스트림 시작 전) · `article_unavailable`(502 — 본문 조회 실패, 캐시하지 않고 Bedrock도 호출하지 않음)·`ai_unavailable`(503)·`ai_failed`(500)은 `final` 안에 실려 온다.
 
 ## 오류 코드
 
@@ -541,10 +565,10 @@ POST /api/ai/articles
 | 404 | `{symbol}` 라우트 | `{"detail": "unknown symbol: <입력값>"}` — 미국 50 + 한국 50 유니버스 밖 |
 | 422 | 검증되는 파라미터/본문 | FastAPI 검증 오류 (잘못된 `market`, `period`, 기사 본문) |
 | 429 | AI 라우트 | `{"detail": "rate_limited", "retryAfter": 60}` + `Retry-After: 60` 헤더 |
-| 500 | AI 라우트 | `{"detail": "ai_failed"}` — Bedrock 호출 실패 (가용성 외 원인) |
-| 502 | `POST /api/ai/articles` | `{"detail": "article_unavailable"}` — 기사 본문 조회 불가 |
+| 500 | AI 라우트 | `{"detail": "ai_failed"}` — Bedrock 호출 실패 (가용성 외 원인). SSE `final`의 `{"error": "ai_failed", "status": 500}`으로 전달 |
+| 502 | `POST /api/ai/articles` | `{"detail": "article_unavailable"}` — 기사 본문 조회 불가. SSE `final`로 전달 |
 | 503 | 데이터 라우트 | `{"detail": "data unavailable: <key>"}` — 캐시(stale 포함)와 업스트림 모두 실패 |
-| 503 | AI 라우트 | `{"detail": "ai_unavailable"}` — 자격 증명 또는 모델 접근 불가 |
+| 503 | AI 라우트 | `{"detail": "ai_unavailable"}` — 자격 증명 또는 모델 접근 불가. SSE `final`로 전달 |
 | 503 | 전체 (health 제외) | `{"detail": "app_not_ready"}` — 앱 컨텍스트 미초기화 |
 
 <a id="레이트리밋"></a>

@@ -14,7 +14,7 @@ Stock monitoring SPA with three pages, served by the FastAPI backend in producti
 ```bash
 cd frontend
 npm run dev            # dev 서버 (백엔드는 make run으로 :8000)
-npx vitest run         # 테스트 168개 (colocated *.test.tsx / *.test.ts)
+npx vitest run         # 테스트 176개 (colocated *.test.tsx / *.test.ts)
 npx oxlint             # 린트
 npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 배포 산출물)
 ```

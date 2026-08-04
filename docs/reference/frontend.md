@@ -7,7 +7,7 @@
 ## English
 
 ### 1. Overview
-A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboard, StockDetail, ArticleAnalysis — share an app shell (top nav / `Outlet` / bottom ticker). All server state flows through TanStack Query hooks that unwrap the backend envelope; polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
+A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboard, StockDetail, ArticleAnalysis — share an app shell (top nav / `Outlet` / bottom ticker). All server state flows through TanStack Query hooks that unwrap the backend envelope, the two AI endpoints excepted: they stream SSE and are consumed by `api/aiStream.ts` (§3). Polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
 
 ### 2. Components
 | Component | Path | Purpose |
@@ -15,11 +15,12 @@ A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboar
 | Entry + routes | `frontend/src/main.tsx` | `RouterProvider` and the route table (routes deliberately not in `App.tsx` — oxlint `react/only-export-components` preserves HMR) |
 | App shell | `frontend/src/App.tsx` | Nav / `Outlet` / `TickerBar`, plus `NotFound` (child `*` route) and `RouteError` (shell `errorElement`) so one dead link never sinks the app |
 | HTTP client | `frontend/src/api/client.ts` | Same-origin `/api/...` paths (no base URL); `ApiError { status, detail }`; network failures propagate unwrapped |
-| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 |
+| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET data only, no AI |
+| AI streaming hooks | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`; the two AI endpoints are SSE, so this file (and only this file) calls fetch directly — see §3 |
 | API types | `frontend/src/api/types.ts` | `Envelope<T>` and every payload type |
 | Pages | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
 | Components | `frontend/src/components/` | `common/` (Card, ChangeText, TickerBar, ThemeToggle, badges), `market/` (StockTable, IndexCards, NewsFeed, SectorBars), `stock/` (PriceChart, OrderBook, AIPanel, FundamentalCards, …) |
-| Utilities | `frontend/src/lib/` | `format.ts` (number/price formatting), `aiMessages.ts` (AI error-detail → user wording) |
+| Utilities | `frontend/src/lib/` | `format.ts` (number/price formatting), `aiMessages.ts` (AI error → user wording + `phase` labels), `articleLink.ts` (news-link fork: analysis screen vs. source in a new tab), `sse.ts` (incremental SSE frame parser) |
 | Build config | `frontend/vite.config.ts` | Dev proxy `/api → http://localhost:8000`; vitest jsdom + `globals: true` (testing-library auto-cleanup needs a global `afterEach`) |
 
 ### 3. Key Decisions
@@ -29,12 +30,29 @@ A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboar
 - **Polling only via the two exported constants** (45s quotes / 120s news); hand-rolled `setInterval` is forbidden.
 - **UI branches on `ApiError.status`/`detail`** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`); `readDetail` never throws even on HTML error bodies from ALB/CloudFront.
 - **Deploy build goes into the backend**: `npm run build:deploy` outputs to `backend/static`, which FastAPI serves (`make build` wraps this).
-- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 168 tests); lint is oxlint.
+- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 176 tests); lint is oxlint.
+
+#### AI streaming (SSE)
+The two AI endpoints answer with `text/event-stream` instead of the envelope, so `frontend/src/api/aiStream.ts` is the **one** file that calls fetch directly — a deliberate, bounded exception to "server state lives in react-query", which caches a single settled result per key and has nowhere to hold a response that grows. Everything else stays in query hooks.
+
+| Event | Payload | Handling in the hook |
+|---|---|---|
+| `phase` | `{"phase": "fetching" \| "analyzing" \| "waiting"}` | Latest wins (`waiting` heartbeats interleave and `analyzing` can repeat); wording comes from `lib/aiMessages.ts`. `waiting` means *queued* — it covers a follower wait **and** a Bedrock/fetch permit queue, so its label stays neutral about the cause |
+| `delta` | `{"text": "…"}` | Appended to `streamText` and rendered as markdown while it grows; the settled `data.analysis` takes over once `final` lands |
+| `final` | the envelope, or `{"error", "status"}` | Settles the hook into `data`+`asOf` or an `ApiError`. The backend emits one on **every** path, so its absence is a lost stream: the hook settles such a stream as `stream_incomplete` rather than spinning forever |
+
+- **Failures before the stream starts stay JSON** (429 rate limit with `Retry-After`, 422, 404) and become `ApiError` through `client.ts`'s exported `readDetail` — one detail rule for both paths, HTML 5xx fallback included.
+- **`error` is always `ApiError`**: a rejected fetch has no HTTP status, so it is wrapped as status 0 / `network_error`, which keeps the UI free of a second error type.
+- **`lib/sse.ts` parses frames incrementally**: a chunk can split a frame, and the body is decoded with `TextDecoder(…, {stream: true})` so a Korean character straddling two chunks is not mangled.
+- **A re-run or an unmount discards the in-flight attempt** (abort the fetch, cancel the reader, bump a run counter), so a superseded stream can never write to state.
 
 ### 4. Code Pointers
 - `frontend/src/main.tsx` — route table, query client, theme bootstrapping
-- `frontend/src/api/queries.ts` — `useEnvelopeQuery` / `unwrap`: the shared GET+poll+unwrap path; AI hooks add `analyze` (mutation)
-- `frontend/src/api/client.ts` — `ApiError` and `readDetail` fallback rules
+- `frontend/src/api/queries.ts` — `useEnvelopeQuery` / `unwrap`: the shared GET+poll+unwrap path (data routes only; the AI endpoints are not here)
+- `frontend/src/api/aiStream.ts` — `useAiStream`: the SSE consume loop, the stale-update guard, and why this file may call fetch
+- `frontend/src/lib/sse.ts` — frame parser (chunk boundaries, `\n\n` framing)
+- `frontend/src/api/client.ts` — `ApiError` and the `readDetail` fallback rules (shared with the SSE path)
+- `frontend/src/lib/articleLink.ts` — `isAnalyzable`: which news links reach `/articles`, and why an empty link is one of them
 - `frontend/src/App.tsx` — shell layout; `NotFound`/`RouteError` rationale (spec 7: no total collapse)
 - `frontend/src/components/stock/chartData.ts` — candle/MA transforms for lightweight-charts
 - `frontend/vite.config.ts` — proxy + vitest `globals` rationale
@@ -48,7 +66,7 @@ A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboar
 ## 한국어
 
 ### 1. 개요
-React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, StockDetail, ArticleAnalysis — 가 앱 셸(상단 네비 / `Outlet` / 하단 티커)을 공유한다. 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거치고, 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
+React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, StockDetail, ArticleAnalysis — 가 앱 셸(상단 네비 / `Outlet` / 하단 티커)을 공유한다. 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거친다 — 단 두 AI 엔드포인트는 예외로, SSE로 흘러오며 `api/aiStream.ts`가 소비한다(§3). 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
 
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
@@ -56,11 +74,12 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, S
 | 엔트리 + 라우트 | `frontend/src/main.tsx` | `RouterProvider`와 라우트 테이블 (의도적으로 `App.tsx`에 두지 않음 — oxlint `react/only-export-components`가 HMR 보존) |
 | 앱 셸 | `frontend/src/App.tsx` | 네비 / `Outlet` / `TickerBar` + `NotFound`(`*` 자식 라우트)·`RouteError`(셸 `errorElement`) — 죽은 링크 하나가 앱 전체를 내려앉히지 않는다 |
 | HTTP 클라이언트 | `frontend/src/api/client.ts` | 같은 오리진 `/api/...` 경로(base URL 없음). `ApiError { status, detail }`. 네트워크 실패는 감싸지 않고 전파 |
-| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 |
+| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET 데이터 전용(AI 없음) |
+| AI 스트리밍 훅 | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`. 두 AI 엔드포인트가 SSE라 이 파일만 fetch를 직접 쓴다 — §3 참조 |
 | API 타입 | `frontend/src/api/types.ts` | `Envelope<T>`와 모든 페이로드 타입 |
 | 페이지 | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
 | 컴포넌트 | `frontend/src/components/` | `common/`(Card, ChangeText, TickerBar, ThemeToggle, 배지), `market/`(StockTable, IndexCards, NewsFeed, SectorBars), `stock/`(PriceChart, OrderBook, AIPanel, FundamentalCards 등) |
-| 유틸리티 | `frontend/src/lib/` | `format.ts`(숫자/가격 포맷), `aiMessages.ts`(AI 오류 detail → 사용자 문구) |
+| 유틸리티 | `frontend/src/lib/` | `format.ts`(숫자/가격 포맷), `aiMessages.ts`(AI 오류 → 사용자 문구 + `phase` 라벨), `articleLink.ts`(뉴스 링크 분기 — 분석 화면 vs 원문 새 탭), `sse.ts`(SSE 프레임 파서) |
 | 빌드 설정 | `frontend/vite.config.ts` | dev 프록시 `/api → http://localhost:8000`. vitest jsdom + `globals: true` (testing-library 자동 cleanup은 전역 `afterEach` 필요) |
 
 ### 3. 주요 결정
@@ -70,12 +89,29 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, S
 - **폴링은 export된 상수 두 개만** (시세 45초 / 뉴스 120초). 수동 `setInterval` 금지.
 - **화면은 `ApiError.status`/`detail`로 분기** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`). `readDetail`은 ALB/CloudFront의 HTML 오류 본문에서도 절대 throw하지 않는다.
 - **배포 빌드는 백엔드로**: `npm run build:deploy`가 `backend/static`에 출력, FastAPI가 서빙 (`make build`가 래핑).
-- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 168개). 린트는 oxlint.
+- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 176개). 린트는 oxlint.
+
+#### AI 스트리밍 (SSE)
+두 AI 엔드포인트는 envelope 대신 `text/event-stream`으로 답한다. 그래서 `frontend/src/api/aiStream.ts`가 fetch를 직접 쓰는 **유일한** 파일이다 — "서버 상태는 react-query로만"의 의도적이고 좁은 예외다(react-query는 키마다 완결된 결과 하나를 캐시하므로 자라나는 응답을 담을 자리가 없다). 그 밖의 서버 상태는 전부 쿼리 훅에 남는다.
+
+| 이벤트 | 페이로드 | 훅의 처리 |
+|---|---|---|
+| `phase` | `{"phase": "fetching" \| "analyzing" \| "waiting"}` | 최신 값이 이긴다(`waiting` 하트비트가 섞이고 `analyzing`이 두 번 올 수 있다). 문구는 `lib/aiMessages.ts`. `waiting`은 **줄 서 있다**는 뜻으로 팔로워 대기와 Bedrock/fetch permit 대기를 모두 덮으므로 라벨은 원인에 중립이다 |
+| `delta` | `{"text": "…"}` | `streamText`에 이어 붙이고 자라는 동안 마크다운으로 렌더. `final` 도착 후에는 완결된 `data.analysis`가 우선한다 |
+| `final` | envelope 또는 `{"error", "status"}` | 훅을 `data`+`asOf` 또는 `ApiError`로 마감한다. 백엔드가 **모든** 경로에서 하나를 내므로 없이 끝난 스트림은 유실이며, 훅은 그것을 `stream_incomplete` 오류로 마감한다(스피너가 영원히 돌지 않는다) |
+
+- **스트림 시작 전 실패는 그대로 JSON이다**(429 + `Retry-After`, 422, 404). `client.ts`가 export한 `readDetail`을 거쳐 `ApiError`가 된다 — ALB/CloudFront의 HTML 5xx 폴백까지 두 경로가 같은 규칙을 쓴다.
+- **`error`는 언제나 `ApiError`**: reject된 fetch에는 HTTP 상태가 없으므로 status 0 / `network_error`로 감싼다 — 화면에 두 번째 오류 타입이 생기지 않는다.
+- **`lib/sse.ts`는 프레임을 점진적으로 파싱한다**: 청크가 프레임을 가를 수 있고, 본문은 `TextDecoder(…, {stream: true})`로 디코딩해 청크 경계에 걸친 한글이 깨지지 않게 한다.
+- **재실행·언마운트는 진행 중 시도를 폐기한다**(fetch abort + reader cancel + 실행 번호 증가) — 밀려난 스트림이 상태를 쓰는 경로가 없다.
 
 ### 4. 코드 포인터
 - `frontend/src/main.tsx` — 라우트 테이블, 쿼리 클라이언트, 테마 부트스트랩
-- `frontend/src/api/queries.ts` — `useEnvelopeQuery` / `unwrap`: 공통 GET+폴링+언래핑 경로. AI 훅은 `analyze`(mutation) 추가
-- `frontend/src/api/client.ts` — `ApiError`와 `readDetail` 폴백 규칙
+- `frontend/src/api/queries.ts` — `useEnvelopeQuery` / `unwrap`: 공통 GET+폴링+언래핑 경로 (데이터 라우트 전용 — AI 엔드포인트는 여기 없다)
+- `frontend/src/api/aiStream.ts` — `useAiStream`: SSE 소비 루프, 낡은 갱신 차단 장치, 이 파일이 fetch를 직접 쓰는 근거
+- `frontend/src/lib/sse.ts` — 프레임 파서 (청크 경계, `\n\n` 프레이밍)
+- `frontend/src/api/client.ts` — `ApiError`와 `readDetail` 폴백 규칙 (SSE 경로와 공유)
+- `frontend/src/lib/articleLink.ts` — `isAnalyzable`: 어떤 뉴스 링크가 `/articles`로 가는지, 빈 링크가 왜 그중 하나인지
 - `frontend/src/App.tsx` — 셸 레이아웃, `NotFound`/`RouteError` 근거 (스펙 7: 전체 붕괴 방지)
 - `frontend/src/components/stock/chartData.ts` — lightweight-charts용 캔들/MA 변환
 - `frontend/vite.config.ts` — 프록시 + vitest `globals` 근거

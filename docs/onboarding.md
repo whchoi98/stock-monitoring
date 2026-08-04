@@ -54,8 +54,8 @@ make test
 Individually:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # backend (317 tests)
-cd frontend && npx vitest run            # frontend (168 tests)
+cd backend && .venv/bin/pytest -q        # backend (320 tests)
+cd frontend && npx vitest run            # frontend (176 tests)
 cd frontend && npm run lint              # oxlint
 ```
 
@@ -192,8 +192,8 @@ make test
 개별 실행:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # 백엔드 (317개)
-cd frontend && npx vitest run            # 프론트엔드 (168개)
+cd backend && .venv/bin/pytest -q        # 백엔드 (320개)
+cd frontend && npx vitest run            # 프론트엔드 (176개)
 cd frontend && npm run lint              # oxlint
 ```
 

@@ -80,6 +80,8 @@ event: final   data: {"asOf", "marketOpen", "data": {...기존 envelope와 동�
   상태: `phase` → 누적 텍스트(delta 합류, 실시간 렌더) → `final`(성공/오류).
 - `AIPanel`(주식)·`ArticleAnalysis`(기사) 모두 누적 마크다운을 **실시간 렌더** (2048토큰 규모에서
   react-markdown 재렌더 비용은 무시 가능).
+  (참고 2026-08-04: 기사 상한은 §1의 `ARTICLE_MAX_TOKENS` 정정으로 **4096**이 됐다 — 위 근거는
+  그 두 배 규모에서도 그대로 유효하다. 정정 원문과 근거는 §1을 보라.)
 - **마크다운 개선**: `remark-gfm` 추가 (표·취소선·자동링크·체크리스트), 표/코드블록 CSS 보강 —
   색상은 `tokens.css` 변수만 사용 (다크/라이트 모두).
 
