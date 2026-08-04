@@ -18,7 +18,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { createSseParser } from '../lib/sse.ts'
-import { ApiError } from './client.ts'
+import { ApiError, readDetail } from './client.ts'
 import type { ArticleAnalysis, ArticleAnalysisRequest, Envelope, StockAnalysis } from './types.ts'
 
 /** 진행 단계 — 백엔드 `phase` 이벤트의 값 그대로 / The phase values, exactly as the backend emits them */
@@ -97,8 +97,10 @@ function discard(attempt: Attempt | null): void {
 }
 
 /**
- * POST init — 본문이 없으면 Content-Type도 붙이지 않는다 (`client.ts`의 `apiPost`와 같은 규칙).
- * The POST init; without a body no Content-Type is sent either, exactly as `client.ts`'s `apiPost` does.
+ * POST init — 본문이 없으면 Content-Type도 붙이지 않는다: `POST /api/ai/stocks/{symbol}`은 본문을 받지
+ * 않으므로 없는 본문의 타입을 선언할 이유가 없다.
+ * The POST init; without a body no Content-Type is sent either, because `POST /api/ai/stocks/{symbol}` takes
+ * no body and there is no point declaring the type of a body that is not there.
  */
 function requestInit(body: unknown, signal: AbortSignal): RequestInit {
   const accept = { Accept: 'text/event-stream' }
@@ -174,23 +176,14 @@ function readFinal<TData>(payload: unknown): Final<TData> | null {
  * 스트림 시작 전에 결정된 HTTP 실패 / An HTTP failure decided before the stream starts.
  *
  * 429(레이트리밋, Retry-After 포함)·422(검증)·404는 스트림이 아니라 평범한 JSON으로 온다
- * (`backend/app/api/ai.py`). detail 추출 규칙은 `client.ts`의 비공개 `readDetail`과 같다 — 그 파일의
- * `request`는 본문을 곧바로 JSON으로 소비하므로 SSE 경로에서는 재사용할 수 없다.
- * The 429 (rate limit, with Retry-After), 422 and 404 answers are plain JSON, not streams. The detail rule
- * mirrors `client.ts`'s private `readDetail`; its `request` consumes the body as JSON outright, so the SSE
- * path cannot reuse it.
+ * (`backend/app/api/ai.py`). 그래서 detail 추출은 `client.ts`의 `readDetail`을 그대로 쓴다 — 규칙이
+ * 갈라지면(HTML 5xx 폴백 포함) 같은 응답이 두 경로에서 다른 문구로 읽힌다.
+ * The 429 (rate limit, with Retry-After), 422 and 404 answers are plain JSON, not streams, so the detail
+ * comes from `client.ts`'s `readDetail` itself: a diverging rule (the HTML 5xx fallback included) would word
+ * one response two ways depending on the path.
  */
 async function httpError(response: Response): Promise<ApiError> {
-  try {
-    const body: unknown = await response.json()
-    if (body !== null && typeof body === 'object') {
-      const detail = (body as { detail?: unknown }).detail
-      if (typeof detail === 'string') return new ApiError(response.status, detail)
-    }
-  } catch {
-    // 본문이 JSON이 아니다 (ALB/CloudFront가 만든 HTML 5xx) / Not a JSON body (an ALB or CloudFront HTML 5xx)
-  }
-  return new ApiError(response.status, `http_${response.status}`)
+  return new ApiError(response.status, await readDetail(response))
 }
 
 /**

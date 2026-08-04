@@ -38,8 +38,13 @@ export class ApiError extends Error {
  * 만든 5xx는 HTML일 수 있다. 어느 경우든 여기서 예외가 나가서는 안 되므로 상태 코드로 폴백한다.
  * Backend errors are `{"detail": "..."}`, but a 422's detail is an array of objects and an ALB or
  * CloudFront 5xx can be HTML. This must never throw, so it falls back to the status code.
+ *
+ * SSE 경로(`api/aiStream.ts`)도 이 함수를 쓴다 — 스트림 시작 전 실패(429/422/404)는 평범한 JSON이라
+ * 규칙이 같아야 한다. 사본이 갈라지면 같은 응답이 화면에서 다른 문구로 읽힌다.
+ * The SSE path (`api/aiStream.ts`) uses this too: a pre-stream failure (429/422/404) is plain JSON and
+ * must follow the same rule — a diverging copy would word one response two ways.
  */
-async function readDetail(response: Response): Promise<string> {
+export async function readDetail(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json()
     if (body !== null && typeof body === 'object') {
@@ -68,22 +73,16 @@ async function request<T>(path: string, init: RequestInit): Promise<Envelope<T>>
   return (await response.json()) as Envelope<T>
 }
 
-/** GET 요청 / A GET request */
+/**
+ * GET 요청 / A GET request.
+ *
+ * POST는 여기에 없다 — envelope을 돌려주는 POST 엔드포인트가 남아 있지 않다. 두 AI 엔드포인트는
+ * `text/event-stream`으로 답하므로 `api/aiStream.ts`가 fetch를 직접 쓴다 (본문을 한 번에 JSON으로
+ * 소비하는 `request`로는 스트림을 읽을 수 없다). 되살릴 일이 생기면 그때 테스트와 함께 다시 만든다.
+ * There is no POST here: no POST endpoint returns an envelope any more. The two AI endpoints answer with
+ * `text/event-stream`, so `api/aiStream.ts` calls fetch directly — `request` consumes the body as JSON in one
+ * go and cannot read a stream. If a POST is ever needed again it comes back with its own test.
+ */
 export function apiGet<T>(path: string): Promise<Envelope<T>> {
   return request<T>(path, { method: 'GET' })
-}
-
-/**
- * POST 요청 / A POST request.
- *
- * `body`가 없으면 Content-Type도 붙이지 않는다 — `POST /api/ai/stocks/{symbol}`은 본문을 받지 않는다.
- * Without a `body` no Content-Type is sent either, because `POST /api/ai/stocks/{symbol}` takes none.
- */
-export function apiPost<T>(path: string, body?: unknown): Promise<Envelope<T>> {
-  if (body === undefined) return request<T>(path, { method: 'POST' })
-  return request<T>(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
 }
