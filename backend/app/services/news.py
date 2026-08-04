@@ -585,6 +585,10 @@ class _BoundedInflater:
 
     def feed(self, data: bytes) -> Iterator[bytes]:
         """원시 청크 1개를 상한 이하 조각들로 풀어 낸다 / Inflate one raw chunk into pieces of at most `DECOMPRESS_STEP`."""
+        if not data:
+            # 빈 청크로는 wbits를 정할 수 없다 (첫 바이트가 필요하다) - 상태를 만들지 않고 넘긴다
+            # An empty chunk cannot decide wbits (the first bytes are needed), so no state is created
+            return
         if self._zobj is None:
             self._zobj = zlib.decompressobj(self._wbits(data))
         while data:
