@@ -28,6 +28,19 @@ FAKE_CAPS = {"AAPL": 3.0e12, "005930.KS": 4.0e11}
 # 기존 캐시 유지를 확인하기 위한 표식 값 / Sentinel used to prove an existing cache entry survives
 SENTINEL = [{"symbol": "SENTINEL"}]
 
+# 직전 정상 US 시세 (한 시장이 실패해도 overview가 이 값으로 계속 만들어진다)
+# Last good US quotes: the overview keeps being built from these even when that market fails
+LAST_GOOD_US = [
+    {
+        "symbol": "AAPL", "name": "Apple", "price": 100.0, "change": 1.0, "change_pct": 1.5,
+        "volume": 1_000, "market": "us", "currency": "USD", "sector": "Technology", "market_cap": None,
+    },
+    {
+        "symbol": "JPM", "name": "JPMorgan Chase", "price": 100.0, "change": 1.0, "change_pct": -0.5,
+        "volume": 2_000, "market": "us", "currency": "USD", "sector": "Financial", "market_cap": None,
+    },
+]
+
 # 루프 테스트에서 쓰는 짧은 대기(초) / Short wait used by the loop tests
 TICK = 0.01
 # 루프 테스트 상한(초) - 대기가 stop으로 깨지지 않으면 여기서 실패한다
@@ -142,6 +155,61 @@ async def test_refresh_market_keeps_cache_and_marks_degraded_on_failure(state, s
     for key in (deps.key_quotes("us"), deps.key_quotes("kr"), deps.KEY_OVERVIEW):
         value, _as_of = state.cache.l1.get(key)
         assert value == SENTINEL, key
+    assert state.source_status["yahoo"] == STATUS_DEGRADED
+
+
+async def test_refresh_market_isolates_a_single_market_failure(state, services, l2, monkeypatch):
+    """
+    한 시장의 시세 실패가 다른 시장 쓰기와 overview 갱신을 죽이지 않는다.
+    One market's quote failure kills neither the other market's write nor the overview refresh.
+
+    `fetch_quotes`는 커버리지 미달/전체 공백에서 `QuotesUnavailableError`를 던진다. US가 던졌다고
+    KR 테이블과 overview까지 최대 24시간 묵은 값으로 방치하면 한 시장의 장애가 화면 전체가 된다.
+    `fetch_quotes` raises `QuotesUnavailableError` on low coverage or an all-empty market. If a US
+    failure also froze the KR table and the overview at up to 24h-old values, one market's outage
+    would become the whole screen's.
+    """
+    def us_down(market: str):
+        """US만 던지고 KR은 정상 시세를 준다 / Only US raises; KR still returns quotes."""
+        if market == "us":
+            raise market_data.QuotesUnavailableError("no quotes for market 'us'")
+        return services.fetch_quotes(market)
+
+    # 직전 US 시세는 캐시에 남아 있다 (실패한 시장은 캐시를 건드리지 않는다)
+    # The last good US quotes stay in the cache: a failed market's key is never touched
+    await state.cache.put(deps.key_quotes("us"), LAST_GOOD_US, config.L2_TTL)
+    monkeypatch.setattr(market_data, "fetch_quotes", us_down)
+
+    await scheduler.refresh_market(state)
+
+    kr_quotes, _as_of = state.cache.l1.get(deps.key_quotes("kr"))
+    assert [q["symbol"] for q in kr_quotes] == ["005930.KS", "005380.KS"]
+    assert deps.key_quotes("kr") in l2.store
+    us_quotes, _as_of = state.cache.l1.get(deps.key_quotes("us"))
+    assert us_quotes == LAST_GOOD_US
+    # overview는 캐시에 있는 US 시세로라도 갱신된다 / the overview is still refreshed from cached US quotes
+    overview, _as_of = state.cache.l1.get(deps.KEY_OVERVIEW)
+    assert overview["summary"]["us"]["advancing"] == 1
+    assert overview["summary"]["kr"]["advancing"] == 1
+    assert deps.KEY_OVERVIEW in l2.store
+    assert state.source_status["yahoo"] == STATUS_DEGRADED
+
+
+async def test_refresh_market_skips_market_caps_when_no_quotes_arrived(state, services, caps, l2):
+    """
+    시세가 하나도 안 왔으면 시가총액 조회 자체를 건너뛴다 / With no quote at all, the cap lookup is skipped.
+
+    빈 심볼 목록으로 조회하면 빈 맵이 10분 창(`MARKET_CAP_TTL`) 동안 캐시되어, 그 사이 회복된
+    사이클의 `Quote.market_cap`이 계속 빈다.
+    Looking up an empty symbol list would cache an empty map for the 10-minute window
+    (`MARKET_CAP_TTL`), blanking `Quote.market_cap` on the cycles that recover in between.
+    """
+    services.errors["fetch_quotes"] = market_data.QuotesUnavailableError("both markets empty")
+
+    await scheduler.refresh_market(state)
+
+    assert caps.calls == []
+    assert scheduler.KEY_MARKET_CAPS not in l2.store
     assert state.source_status["yahoo"] == STATUS_DEGRADED
 
 

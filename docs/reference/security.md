@@ -36,7 +36,7 @@ Defense in depth across the edge and the app: the ALB is reachable only through 
 - `backend/app/api/ai.py` — `client_ip` / `viewer_ip`: the full key-selection rationale; `RATE_LIMITED_BODY` and the fixed error details
 - `backend/app/api/ratelimit.py` — `SlidingWindowLimiter`
 - `infra/stacks/stock_monitoring_stack.py` — §7–§9: SG, listener 403 default, origin request policy whitelisting the viewer-address header
-- `scripts/smoke.sh` — check 4 asserts direct ALB access stays blocked after every deploy
+- `scripts/smoke.sh` — check 5 asserts direct ALB access stays blocked after every deploy
 - `backend/tests/test_news.py`, `backend/tests/test_api_ai.py` — guard and limit contracts
 
 ### 5. Cross-references
@@ -77,7 +77,7 @@ Defense in depth across the edge and the app: the ALB is reachable only through 
 - `backend/app/api/ai.py` — `client_ip` / `viewer_ip`: 키 선택 근거 전체. `RATE_LIMITED_BODY`와 고정 오류 문구
 - `backend/app/api/ratelimit.py` — `SlidingWindowLimiter`
 - `infra/stacks/stock_monitoring_stack.py` — §7–§9: SG, 리스너 기본 403, viewer-address 헤더를 화이트리스트하는 origin request policy
-- `scripts/smoke.sh` — 검사 4가 매 배포 후 ALB 직접 접근 차단을 확인
+- `scripts/smoke.sh` — 검사 5가 매 배포 후 ALB 직접 접근 차단을 확인
 - `backend/tests/test_news.py`, `backend/tests/test_api_ai.py` — 가드·리밋 계약 테스트
 
 ### 5. 상호 참조

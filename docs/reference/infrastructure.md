@@ -18,7 +18,7 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 | ALB + listener | `infra/stacks/stock_monitoring_stack.py` (§7–8) | Dedicated SG with a single CloudFront prefix-list rule (`pl-22a6434b`); listener default 403, forwards only on `X-Origin-Verify` match |
 | CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | HTTP_ONLY origin, `CACHING_DISABLED` default behavior, `/assets/*` long-cache (immutable vite hashes), custom origin header injection |
 | Alarms | `infra/stacks/stock_monitoring_stack.py` (§10) | `stock-monitoring-alb-5xx` (ELB-generated 5xx spike) and `stock-monitoring-task-count` (`LiveTaskCount` < 1, missing = breaching) |
-| Smoke test | `scripts/smoke.sh` | Post-deploy: health/overview/SPA fallback via CloudFront + assert direct ALB access is blocked (403 or timeout both pass) |
+| Smoke test | `scripts/smoke.sh` | Post-deploy: health/overview/quote-rows/SPA fallback via CloudFront + assert direct ALB access is blocked (403 or timeout both pass) |
 
 ### 3. Key Decisions
 - **Shared VPC, reference-only**: `cc-on-bedrock-vpc` (`vpc-0dfa5610180dfa628`) is looked up, never created; every resource name carries the `stock-monitoring` prefix to avoid collisions.
@@ -37,7 +37,7 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 ### 5. Cross-references
 - Related modules: [iac.md](iac.md) (how the stack is defined), [security.md](security.md) (origin verification, SG rationale), [data.md](data.md) (DynamoDB cache table)
 - Related ADRs: none yet — see `docs/superpowers/specs/2026-08-01-stock-monitoring-design.md` for the approved design
-- Related runbooks: none yet (deploy = `cd infra && .venv/bin/cdk deploy --require-approval never`, then `scripts/smoke.sh`)
+- Related runbooks: [quotes-cache-poisoning.md](../runbooks/quotes-cache-poisoning.md) (blank stock table = a fresh empty quotes cache entry). Deploy = `cd infra && .venv/bin/cdk deploy --require-approval never`, then `scripts/smoke.sh`
 
 <a id="korean"></a>
 ## 한국어
@@ -54,7 +54,7 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 | ALB + 리스너 | `infra/stacks/stock_monitoring_stack.py` (§7–8) | CloudFront prefix-list 단일 규칙(`pl-22a6434b`)의 전용 SG. 리스너 기본 403, `X-Origin-Verify` 일치 시에만 forward |
 | CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | 오리진 HTTP_ONLY, 기본 동작 `CACHING_DISABLED`, `/assets/*` 장기 캐시(vite 불변 해시), 커스텀 오리진 헤더 주입 |
 | 알람 | `infra/stacks/stock_monitoring_stack.py` (§10) | `stock-monitoring-alb-5xx` (ELB 생성 5xx 급증), `stock-monitoring-task-count` (`LiveTaskCount` < 1, 결측 = breaching) |
-| 스모크 테스트 | `scripts/smoke.sh` | 배포 후: CloudFront 경유 health/overview/SPA fallback + ALB 직접 접근 차단 확인 (403·타임아웃 모두 통과) |
+| 스모크 테스트 | `scripts/smoke.sh` | 배포 후: CloudFront 경유 health/overview/시세 행 수/SPA fallback + ALB 직접 접근 차단 확인 (403·타임아웃 모두 통과) |
 
 ### 3. 주요 결정
 - **공유 VPC, 참조만**: `cc-on-bedrock-vpc`(`vpc-0dfa5610180dfa628`)를 lookup으로만 쓰고 절대 생성하지 않는다. 모든 리소스 이름에 `stock-monitoring` 프리픽스 (충돌·오인 방지).
@@ -73,4 +73,4 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 ### 5. 상호 참조
 - 관련 모듈: [iac.md](iac.md) (스택 정의 방식), [security.md](security.md) (오리진 검증·SG 근거), [data.md](data.md) (DynamoDB 캐시 테이블)
 - 관련 ADR: 아직 없음 — 승인된 설계는 `docs/superpowers/specs/2026-08-01-stock-monitoring-design.md`
-- 관련 런북: 아직 없음 (배포 = `cd infra && .venv/bin/cdk deploy --require-approval never` 후 `scripts/smoke.sh`)
+- 관련 런북: [quotes-cache-poisoning.md](../runbooks/quotes-cache-poisoning.md) (빈 종목 테이블 = 신선한 빈 시세 캐시 항목). 배포 = `cd infra && .venv/bin/cdk deploy --require-approval never` 후 `scripts/smoke.sh`

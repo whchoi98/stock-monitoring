@@ -100,29 +100,56 @@ async def refresh_market(state: AppState) -> None:
     Order matters: quotes are written first so `overview_payload` (which reads quotes from the cache)
     sees this cycle's numbers.
 
-    예외는 전파하지 않는다. 실패하면 캐시를 건드리지 않고(=직전 값 유지) degraded로 마킹한다.
-    Nothing is raised: on failure the cache is left as it was (previous values keep serving) and the
-    source is marked degraded.
+    시장별로 격리한다: `fetch_quotes`는 커버리지 미달/전체 공백에서 `QuotesUnavailableError`를
+    던지므로(2026-08-04 장애 대응), 한 시장의 실패가 다른 시장 쓰기나 overview 갱신까지 건너뛰면
+    한 시장의 장애가 화면 전체를 최대 24시간 묵은 값으로 얼려버린다.
+    Isolated per market: `fetch_quotes` raises `QuotesUnavailableError` on low coverage or an
+    all-empty market (post-2026-08-04), so letting one market's failure skip the other market's write
+    or the overview refresh would freeze the whole screen at up to 24h-old values.
+
+    예외는 전파하지 않는다. 실패한 부분은 캐시를 건드리지 않고(=직전 값 유지) degraded로 마킹한다.
+    Nothing is raised: whatever failed leaves its cache entry alone (previous values keep serving) and
+    the source is marked degraded.
     """
-    try:
-        quotes_by_market = {market: await market_api.quotes_payload(market) for market in MARKETS}
+    quotes_by_market: Dict[str, List[dict]] = {}
+    degraded = False
 
-        # 시가총액은 실제로 시세가 온 심볼만 조회 / Only look up caps for symbols that actually returned a quote
-        symbols = [quote["symbol"] for quotes in quotes_by_market.values() for quote in quotes]
-        caps = await _market_caps(state, symbols)
+    # 1) 시장별 독립 조회 / Fetch each market independently
+    for market in MARKETS:
+        try:
+            quotes_by_market[market] = await market_api.quotes_payload(market)
+        except Exception as exc:
+            degraded = True
+            _warn("scheduler_market_quotes_failed", market=market, error=str(exc))
 
-        for market, quotes in quotes_by_market.items():
+    # 2) 시가총액은 실제로 시세가 온 심볼만 조회 / Only look up caps for symbols that actually returned a quote
+    #    심볼이 하나도 없으면 조회를 건너뛴다 — 빈 맵이 10분 창(MARKET_CAP_TTL) 동안 캐시되면
+    #    회복된 사이클의 market_cap까지 빈 채로 남는다.
+    #    Skipped entirely when no symbol arrived: an empty map cached for the 10-minute window
+    #    (MARKET_CAP_TTL) would blank market_cap on the cycles that recover in between.
+    symbols = [quote["symbol"] for quotes in quotes_by_market.values() for quote in quotes]
+    caps = await _market_caps(state, symbols) if symbols else {}
+
+    # 3) 조회에 성공한 시장만 캐시에 쓴다 (실패한 시장의 키는 직전 값 유지)
+    #    Write only the markets that succeeded; a failed market's key keeps its previous value
+    for market, quotes in quotes_by_market.items():
+        try:
             _apply_market_caps(quotes, caps)
             await state.cache.put(deps.key_quotes(market), quotes, config.L2_TTL)
+        except Exception as exc:
+            degraded = True
+            _warn("scheduler_market_write_failed", market=market, error=str(exc))
 
+    # 4) overview는 캐시에 있는 값으로라도 갱신한다 (한 시장이 비어도 나머지는 최신)
+    #    Refresh the overview from whatever is cached, so one empty market still leaves the rest fresh
+    try:
         overview = await market_api.overview_payload(state)
         await state.cache.put(deps.KEY_OVERVIEW, overview, config.L2_TTL)
     except Exception as exc:
-        state.mark_source(deps.SOURCE_YAHOO, STATUS_DEGRADED)
-        _warn("scheduler_market_refresh_failed", error=str(exc))
-        return
+        degraded = True
+        _warn("scheduler_overview_refresh_failed", error=str(exc))
 
-    state.mark_source(deps.SOURCE_YAHOO, STATUS_OK)
+    state.mark_source(deps.SOURCE_YAHOO, STATUS_DEGRADED if degraded else STATUS_OK)
 
 
 async def refresh_news(state: AppState) -> None:

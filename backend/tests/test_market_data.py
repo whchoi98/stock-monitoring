@@ -15,6 +15,27 @@ LOGGER_NAME = "app.services.market_data"
 
 
 # ---------------------------------------------------------------------------
+# 픽스처 / Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch) -> list:
+    """
+    재시도 백오프를 가로챈다 (어떤 테스트도 실제 초를 태우지 않는다).
+    Intercept the retry backoff so no test burns real seconds.
+
+    autouse: `fetch_quotes`는 심볼이 빠지면 항상 백오프 후 재시도하므로, 패치를 잊은 테스트가
+    스위트에 수 초를 더한다. 지연을 검증하는 테스트는 이 픽스처를 인자로 받아 기록을 읽는다.
+    autouse because `fetch_quotes` always backs off before its retry whenever a symbol is missing, so
+    an unpatched test silently adds seconds to the suite. Tests that assert on the delay take this
+    fixture as an argument and read the recorded values.
+    """
+    recorded: list = []
+    monkeypatch.setattr(market_data.time, "sleep", lambda seconds: recorded.append(seconds))
+    return recorded
+
+
+# ---------------------------------------------------------------------------
 # Fake yfinance frames / 가짜 yfinance 프레임
 # ---------------------------------------------------------------------------
 
@@ -48,6 +69,24 @@ def _flat_frame(closes=(100.0, 110.0), volumes=(1000.0, 2000.0)):
     """단일 티커 평면 프레임 (컬럼 레벨 1개) / Single-ticker flat frame (single column level)."""
     idx = pd.to_datetime(["2026-07-30", "2026-07-31"])
     return pd.DataFrame({"Close": list(closes), "Volume": list(volumes)}, index=idx)
+
+
+def _partial_download(alive):
+    """`alive` 심볼만 가격을 주고 나머지는 전부 NaN인 가짜 download / Fake download pricing only `alive`."""
+    def download(symbols, **kw):
+        symbols = [symbols] if isinstance(symbols, str) else list(symbols)
+        closes = {s: [float("nan"), float("nan")] for s in symbols if s not in alive}
+        return _multi_frame(symbols, closes=closes)
+
+    return download
+
+
+def _empty_frame(symbols):
+    """전 심볼이 NaN인 프레임 (2026-08-04 장애의 실제 모양) / All-NaN frame, the incident's actual shape."""
+    symbols = [symbols] if isinstance(symbols, str) else list(symbols)
+    idx = pd.to_datetime(["2026-07-30", "2026-07-31"])
+    cols = pd.MultiIndex.from_product([symbols, ["Close", "Volume"]])
+    return pd.DataFrame(index=idx, columns=cols, dtype=float)
 
 
 def _warning_payloads(caplog):
@@ -99,6 +138,8 @@ def test_fetch_indices_covers_us_and_kr_in_one_batch(monkeypatch):
     assert kwargs["group_by"] == "ticker"
     assert kwargs["threads"] is False
     assert kwargs["progress"] is False
+    # yfinance 기본값(10s)에 기대지 않고 명시한다 / explicit, never yfinance's 10s default
+    assert kwargs["timeout"] == market_data.DOWNLOAD_TIMEOUT
 
     assert [i.symbol for i in out] == requested
     names = {i.symbol: i.name for i in out}
@@ -215,16 +256,19 @@ def test_fetch_quotes_kr_names_sectors_from_config(monkeypatch):
     assert kosdaq.currency == "KRW"
 
 
-def test_fetch_quotes_downloads_the_whole_market_in_one_batch(monkeypatch):
+def test_fetch_quotes_requests_every_symbol_serially_with_an_explicit_timeout(monkeypatch):
     """
-    시장 전체를 한 번의 download로 조회한다 / The whole market goes out as one download call.
+    심볼당 요청 1건을 순차로 보내고, 요청마다 명시적 타임아웃을 준다.
+    One serial request per symbol, each carrying an explicit timeout.
 
-    2026-08-04 라이브 장애: Yahoo가 병렬 청크 버스트(10개×5워커)를 심볼 전부 빈 프레임으로
-    돌려주기 시작했다 — 같은 시점에 50심볼 단일 배치는 50/50 성공(실측 2회). 그래서 1차 경로는
-    단일 배치이고 청크는 직렬 폴백으로만 남는다.
-    Live incident 2026-08-04: Yahoo started answering the parallel chunk burst (10×5 workers) with
-    all-empty frames while a single 50-symbol batch succeeded 50/50 (measured twice). The primary
-    path is therefore one batch; chunks survive only as a serial fallback.
+    `yf.download(..., threads=False)`는 배치를 받아도 내부적으로 심볼당 순차 HTTP 요청을 보낸다
+    (yfinance/multi.py의 `_download_one` 루프) — "50심볼 배치 = 호출 1회"는 사실이 아니다.
+    Yahoo가 스로틀한 것은 배치 크기가 아니라 동시성이었으므로 심볼별로 직접 요청해도 업스트림이
+    보는 트래픽은 같고, 그 대신 요청 사이에서 데드라인을 확인할 수 있다.
+    `yf.download(..., threads=False)` issues one sequential HTTP request per symbol even for a batch
+    (the `_download_one` loop in yfinance/multi.py): "a 50-symbol batch is one call" is false. What
+    Yahoo throttled was concurrency, not batch size, so issuing the requests ourselves shows upstream
+    the exact same traffic while letting us check the deadline between them.
     """
     calls = []
 
@@ -235,38 +279,141 @@ def test_fetch_quotes_downloads_the_whole_market_in_one_batch(monkeypatch):
     monkeypatch.setattr(market_data.yf, "download", recording_download)
     out = market_data.fetch_quotes("us")
 
-    assert len(calls) == 1
-    requested, kwargs = calls[0]
-    assert requested == list(config.US_STOCKS)
-    assert kwargs["period"] == "7d" and kwargs["threads"] is False
+    # 심볼당 1건, config 순서 그대로 / one request per symbol, in config order
+    assert [symbols for symbols, _kwargs in calls] == [[s] for s in config.US_STOCKS]
+    for _symbols, kwargs in calls:
+        assert kwargs["period"] == "7d"
+        assert kwargs["threads"] is False
+        assert kwargs["timeout"] == market_data.DOWNLOAD_TIMEOUT
     assert [q.symbol for q in out] == config.US_STOCKS  # 요청 순서 유지 / request order preserved
 
 
-def test_fetch_quotes_falls_back_to_serial_chunks_when_the_batch_fails(monkeypatch, caplog):
-    """단일 배치가 죽으면 직렬 청크로 폴백한다 / A dead batch falls back to serial chunks."""
+def test_fetch_quotes_retries_only_the_missing_symbols(monkeypatch, caplog, sleeps):
+    """
+    재시도는 빠진 심볼만 다시 요청한다 (전체 재실행 금지) / The retry re-requests only the missing symbols.
+
+    전체를 다시 돌리면 이미 받은 심볼까지 두 번 때려 스로틀을 자극한다. 재시도 앞에는 고정 지연
+    열차가 아니라 지터 백오프 1회만 넣는다.
+    Re-running everything would hit the already-parsed symbols twice and poke the throttle. The retry
+    is preceded by a single jittered backoff, not a train of fixed delays.
+    """
+    missing = list(config.US_STOCKS[:3])
+    primary_calls = len(config.US_STOCKS)
     calls = []
 
     def flaky_download(symbols, **kw):
-        calls.append(list(symbols))
-        if len(calls) == 1:
-            raise RuntimeError("boom")  # 전체 배치 실패 / the whole batch dies
+        symbols = list(symbols)
+        calls.append(symbols)
+        # 1차 패스에서만 실패하고 재시도에서는 성공 / fails in the primary pass, succeeds on retry
+        if len(calls) <= primary_calls and set(symbols) & set(missing):
+            raise RuntimeError("symbol boom")
         return fake_download(symbols, **kw)
 
-    sleeps = []
     monkeypatch.setattr(market_data.yf, "download", flaky_download)
-    monkeypatch.setattr(market_data.time, "sleep", lambda s: sleeps.append(s))
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         out = market_data.fetch_quotes("us")
 
-    assert [q.symbol for q in out] == config.US_STOCKS
-    assert calls[0] == list(config.US_STOCKS)               # 1차: 전체 배치 / first: the whole batch
-    chunk_calls = calls[1:]
-    assert all(len(c) <= market_data.QUOTE_CHUNK_SIZE for c in chunk_calls)
-    # 직렬 + 순서 보존 (병렬이면 순서가 흔들린다) / serial and order-preserving (parallelism would shuffle)
-    assert [s for c in chunk_calls for s in c] == list(config.US_STOCKS)
-    # 청크 사이 지연 — 빈도 기반 스로틀을 자극하지 않는다 / inter-chunk delay to avoid poking the frequency throttle
-    assert sleeps == [market_data.QUOTE_CHUNK_DELAY] * (len(chunk_calls) - 1)
-    assert any(p.get("event") == "quote_batch_failed" for p in _warning_payloads(caplog))
+    assert [q.symbol for q in out] == config.US_STOCKS  # 재시도로 전량 복구 / the retry restores the full set
+    assert calls[:primary_calls] == [[s] for s in config.US_STOCKS]
+    assert calls[primary_calls:] == [[s] for s in missing]  # 빠진 심볼만 / only the missing ones
+    low, high = market_data.QUOTE_RETRY_BACKOFF
+    assert len(sleeps) == 1 and low <= sleeps[0] <= high
+    assert any(p.get("event") == "quote_download_failed" for p in _warning_payloads(caplog))
+
+
+def test_fetch_quotes_retries_and_raises_when_the_primary_pass_is_all_empty(monkeypatch, caplog, sleeps):
+    """
+    예외 없이 "전부 빈 프레임"으로 온 1차 패스도 재시도 대상이고, 그래도 비면 예외다.
+    An all-empty primary pass (no exception thrown) is retried too, and still raises when empty.
+
+    2026-08-04 장애의 실제 모양이 이것이었다: 예외가 아니라 빈 프레임이었고, 그래서 빈 리스트가
+    "성공"으로 캐시에 저장돼 마지막 정상 시세를 밀어냈다.
+    This was the incident's actual shape: not an exception but empty frames, which is how the empty
+    list got cached as "success" and evicted the last good quotes.
+    """
+    calls = []
+
+    def empty_download(symbols, **kw):
+        calls.append(list(symbols))
+        return _empty_frame(symbols)
+
+    monkeypatch.setattr(market_data.yf, "download", empty_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        with pytest.raises(market_data.QuotesUnavailableError):
+            market_data.fetch_quotes("us")
+
+    # 1차 패스 + 빠진 전 심볼 재시도 / the primary pass plus a retry of every missing symbol
+    assert calls == [[s] for s in config.US_STOCKS] * 2
+    assert len(sleeps) == 1
+    assert "quotes_empty" in {p.get("event") for p in _warning_payloads(caplog)}
+
+
+def test_fetch_quotes_stops_issuing_requests_when_the_deadline_expires(monkeypatch, caplog):
+    """
+    총 데드라인이 만료되면 새 요청을 내지 않고 가진 것으로 판정한다.
+    Once the total deadline expires, no new request is issued and what we have is evaluated.
+
+    `fetch_quotes`는 `asyncio.to_thread`(공용 기본 executor)에서 돈다 — 느린 업스트림에 심볼 수 ×
+    요청 타임아웃만큼 워커를 붙잡아두면 안 된다 (50×8s = 400s).
+    `fetch_quotes` runs on `asyncio.to_thread`'s shared default executor, so a slow upstream must not
+    hold a worker for symbols × per-request timeout (50 × 8s = 400s).
+    """
+    clock = {"t": 0.0}
+    calls = []
+
+    def slow_download(symbols, **kw):
+        calls.append(list(symbols))
+        # 요청 2건이면 예산을 소진한다 / two requests exhaust the budget
+        clock["t"] += market_data.QUOTE_FETCH_DEADLINE / 2
+        return fake_download(symbols, **kw)
+
+    monkeypatch.setattr(market_data, "_now", lambda: clock["t"])
+    monkeypatch.setattr(market_data.yf, "download", slow_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        with pytest.raises(market_data.QuotesUnavailableError):
+            market_data.fetch_quotes("us")
+
+    assert len(calls) == 2  # 50심볼이 아니라 예산이 허용한 만큼만 / only what the budget allowed
+    events = {p.get("event") for p in _warning_payloads(caplog)}
+    assert "quote_deadline_reached" in events
+    assert "quotes_coverage_too_low" in events
+
+
+def test_fetch_quotes_returns_a_partial_result_at_the_coverage_floor(monkeypatch, caplog):
+    """
+    커버리지가 하한(60%)이면 부분 결과를 반환하고 누락 수를 경고한다.
+    At the coverage floor (60%) a partial result is returned, with the missing count warned.
+    """
+    floor = int(len(config.US_STOCKS) * market_data.QUOTE_MIN_COVERAGE)  # 30/50 = 60%
+    alive = set(config.US_STOCKS[:floor])
+
+    monkeypatch.setattr(market_data.yf, "download", _partial_download(alive))
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = market_data.fetch_quotes("us")
+
+    assert [q.symbol for q in out] == config.US_STOCKS[:floor]
+    partial = next(p for p in _warning_payloads(caplog) if p.get("event") == "quotes_partial")
+    assert partial["missing"] == len(config.US_STOCKS) - floor
+    assert partial["parsed"] == floor
+
+
+def test_fetch_quotes_raises_just_below_the_coverage_floor(monkeypatch, caplog):
+    """
+    하한 미달(29/50 = 58%)은 예외다 — 심하게 빈 결과가 마지막 정상 시세를 밀어내지 못하게 한다.
+    Just below the floor (29/50 = 58%) raises, so a severely partial result cannot evict the last
+    good quotes from the cache.
+    """
+    floor = int(len(config.US_STOCKS) * market_data.QUOTE_MIN_COVERAGE)
+    alive = set(config.US_STOCKS[:floor - 1])
+
+    monkeypatch.setattr(market_data.yf, "download", _partial_download(alive))
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        with pytest.raises(market_data.QuotesUnavailableError):
+            market_data.fetch_quotes("us")
+
+    too_low = next(p for p in _warning_payloads(caplog) if p.get("event") == "quotes_coverage_too_low")
+    assert too_low["parsed"] == floor - 1
+    assert too_low["requested"] == len(config.US_STOCKS)
 
 
 def test_fetch_quotes_raises_when_no_symbol_yields_a_price(monkeypatch, caplog):
@@ -280,14 +427,7 @@ def test_fetch_quotes_raises_when_no_symbol_yields_a_price(monkeypatch, caplog):
     incident's second cause — the US table went blank). Raising instead lets `deps.cached`'s stale
     fallback keep serving the last good quotes.
     """
-    def empty_download(symbols, **kw):
-        if isinstance(symbols, str):
-            symbols = [symbols]
-        idx = pd.to_datetime(["2026-07-30", "2026-07-31"])
-        cols = pd.MultiIndex.from_product([symbols, ["Close", "Volume"]])
-        return pd.DataFrame(index=idx, columns=cols, dtype=float)  # 전부 NaN / all NaN
-
-    monkeypatch.setattr(market_data.yf, "download", empty_download)
+    monkeypatch.setattr(market_data.yf, "download", lambda symbols, **kw: _empty_frame(symbols))
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         with pytest.raises(market_data.QuotesUnavailableError):
             market_data.fetch_quotes("us")
@@ -332,13 +472,18 @@ def test_fetch_quotes_skips_nan_price_rows(monkeypatch, caplog):
     assert {"AAPL", "MSFT"} <= warned
 
 
-def test_fetch_quotes_chunk_failure_does_not_kill_batch(monkeypatch, caplog):
-    """청크 하나가 예외를 던져도 나머지 청크는 반환 / One failing chunk must not kill the batch."""
-    first_chunk = set(config.US_STOCKS[:10])
+def test_fetch_quotes_symbol_failure_does_not_kill_the_pass(monkeypatch, caplog):
+    """
+    한 심볼의 요청 예외가 남은 심볼 조회를 죽이지 않는다 / One symbol's exception must not kill the pass.
+
+    40/50 = 80% ≥ QUOTE_MIN_COVERAGE 이므로 부분 결과를 반환한다.
+    40/50 = 80% is at or above QUOTE_MIN_COVERAGE, so the partial result is returned.
+    """
+    dead = set(config.US_STOCKS[:10])
 
     def flaky_download(symbols, **kw):
-        if first_chunk & set(symbols):
-            raise RuntimeError("chunk boom")
+        if dead & set(symbols):
+            raise RuntimeError("symbol boom")
         return fake_download(symbols, **kw)
 
     monkeypatch.setattr(market_data.yf, "download", flaky_download)
@@ -346,9 +491,9 @@ def test_fetch_quotes_chunk_failure_does_not_kill_batch(monkeypatch, caplog):
         out = market_data.fetch_quotes("us")
 
     assert len(out) == len(config.US_STOCKS) - 10
-    assert not (first_chunk & {q.symbol for q in out})
+    assert not (dead & {q.symbol for q in out})
     payloads = _warning_payloads(caplog)
-    assert any("chunk boom" in p.get("error", "") for p in payloads)
+    assert any("symbol boom" in p.get("error", "") for p in payloads)
 
 
 def test_fetch_quotes_rejects_unknown_market(monkeypatch):

@@ -16,9 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Iterable, Literal, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
 
 import yfinance as yf
 
@@ -30,12 +31,13 @@ logger = logging.getLogger(__name__)
 
 class QuotesUnavailableError(RuntimeError):
     """
-    시장 전체 시세 조회가 완전히 비었다 / A market's quote fetch came back completely empty.
+    시장 시세 조회가 쓸 수 없는 수준이다 (전체 공백 또는 커버리지 하한 미달).
+    A market's quote fetch is unusable: all-empty, or below the coverage floor.
 
-    빈 결과를 반환(=성공)하는 대신 이 예외를 던져야 `deps.cached`의 stale-while-error 폴백이
-    마지막 정상 데이터를 계속 서빙한다 (2026-08-04 라이브 장애 교훈).
-    Raised instead of returning an empty list so `deps.cached`'s stale-while-error fallback keeps
-    serving the last good data (lesson from the 2026-08-04 live incident).
+    빈/심하게 부족한 결과를 반환(=성공)하는 대신 이 예외를 던져야 `deps.cached`의
+    stale-while-error 폴백이 마지막 정상 데이터를 계속 서빙한다 (2026-08-04 라이브 장애 교훈).
+    Raised instead of returning an empty or severely partial list so `deps.cached`'s
+    stale-while-error fallback keeps serving the last good data (lesson from the 2026-08-04 incident).
     """
 
 # 지수/지표 조회 기간 - 휴장일 NaN 행을 흡수할 만큼 넉넉히 / Period for indices & indicators (absorbs holiday NaN rows)
@@ -43,11 +45,46 @@ INDEX_PERIOD = "5d"
 INDICATOR_PERIOD = "5d"
 # 시세 조회 기간 / Period for quotes
 QUOTE_PERIOD = "7d"
-# 시세 폴백용 청크 크기 (직렬) — 1차 경로는 시장 전체 단일 배치다 (fetch_quotes 참조, 2026-08-04)
-# Chunk size for the serial quotes fallback; the primary path is one whole-market batch (see fetch_quotes)
-QUOTE_CHUNK_SIZE = 10
-# 폴백 청크 사이 지연(초) / Delay between fallback chunks in seconds
-QUOTE_CHUNK_DELAY = 1.0
+
+# yfinance HTTP 요청 1건의 타임아웃(초). `threads=False`인 `yf.download`는 배치를 받아도 심볼당
+# 순차 HTTP 요청을 보내므로(yfinance/multi.py의 `_download_one` 루프) 이 값은 "배치 전체"가 아니라
+# "요청 1건"의 상한이다. yfinance 기본값(10s)에 기대지 않고 명시한다.
+# Timeout for one yfinance HTTP request. With `threads=False`, `yf.download` issues one sequential
+# request per symbol even for a batch (the `_download_one` loop in yfinance/multi.py), so this bounds
+# a single request, not a whole batch. Explicit rather than relying on yfinance's 10s default.
+DOWNLOAD_TIMEOUT = 8
+
+# `fetch_quotes` 한 호출의 전체 벽시계 예산(초) / Total wall-clock budget for one `fetch_quotes` call.
+#
+# 예산 산술 / Budget arithmetic:
+#   - 요청 1건 상한 = DOWNLOAD_TIMEOUT(8s). 심볼 50개면 1차 패스만으로도 50×8 = 400s가 가능하고
+#     재시도까지 더하면 그 두 배다. `fetch_quotes`는 `asyncio.to_thread`(공용 기본 executor)에서
+#     돌기 때문에 총 데드라인이 없으면 워커가 분 단위로 묶인다.
+#   - CloudFront 오리진 read timeout = 60s (infra `read_timeout`). `/api/market/overview`는 한
+#     요청에서 두 시장을 조회할 수 있으므로 25×2 = 50s < 60s 여야 지수·지표 몫도 남는다.
+#   - 스케줄러 장중 사이클 = 45s (config.REFRESH_INTERVAL). 시장 1개 = 25s < 45s.
+#     (스케줄러는 두 시장을 순차로 조회하므로 최악의 경우 사이클이 밀린다 — 대기가 갱신 *뒤*라
+#      사이클이 겹치지는 않는다.)
+#   - Per-request cap is 8s; a 50-symbol primary pass alone could reach 400s, doubled with the retry,
+#     and this runs on the shared default executor, so the total deadline is what frees the worker.
+#     CloudFront's origin read timeout is 60s and the overview route may fetch both markets in one
+#     request (25×2 = 50s < 60s, leaving room for indices/indicators). The scheduler's in-hours cycle
+#     is 45s, so one market at 25s fits; two markets slip the cycle rather than overlap it, because
+#     the loop waits *after* the refresh.
+QUOTE_FETCH_DEADLINE = 25
+
+# 부분 성공 허용 하한 = 파싱 성공 심볼 / 요청 심볼. 이 값 이상이면 부분 결과를 반환하고(경고),
+# 미달이면 예외를 던져 캐시의 마지막 정상 시세를 지킨다.
+# Partial-success floor (parsed/requested): at or above it the partial result is returned with a
+# warning, below it we raise so the cache's last good quotes survive.
+QUOTE_MIN_COVERAGE = 0.6
+
+# 재시도 패스 앞의 지터 백오프 범위(초). 고정 지연은 요청 간격을 예측 가능한 열차로 만들어
+# 빈도 기반 스로틀에 그대로 걸린다.
+# Jittered backoff range before the retry pass; a fixed delay makes the request spacing a predictable
+# train that a frequency-based throttle can lock onto.
+QUOTE_RETRY_BACKOFF = (0.4, 1.2)
+
 # 시가총액 병렬 조회 / Market cap parallel fetch
 MARKET_CAP_WORKERS = 10
 MARKET_CAP_TIMEOUT = 20  # seconds
@@ -97,14 +134,31 @@ def _warn(event: str, **fields: Any) -> None:
     logger.warning(json.dumps(payload, default=str, ensure_ascii=False))
 
 
+def _now() -> float:
+    """
+    데드라인 계산용 단조 시계 / Monotonic clock used for deadlines.
+
+    함수로 감싼 이유는 테스트가 가짜 시계를 주입할 수 있게 하기 위해서다.
+    Wrapped in a function so tests can inject a fake clock.
+    """
+    return time.monotonic()
+
+
 def _download(symbols: Sequence[str], period: str):
-    """yfinance 일괄 다운로드 (모든 호출 경로가 동일한 인자를 쓰도록 단일화) / Single yfinance batch download entry point."""
+    """
+    yfinance 다운로드 (모든 호출 경로가 동일한 인자를 쓰도록 단일화) / Single yfinance download entry point.
+
+    `threads=False`는 동시성을 없앤다 — 여러 심볼을 넘겨도 yfinance가 심볼당 순차 HTTP 요청을 보낸다.
+    `threads=False` removes concurrency: yfinance sends one sequential HTTP request per symbol even
+    when several are passed. `timeout` therefore bounds a single request.
+    """
     return yf.download(
         list(symbols),
         period=period,
         group_by="ticker",
         threads=False,
         progress=False,
+        timeout=DOWNLOAD_TIMEOUT,
     )
 
 
@@ -328,19 +382,100 @@ def _parse_quotes(
     return quotes
 
 
+def _retry_delay(remaining: float) -> float:
+    """
+    남은 예산 안에서 지터 백오프를 뽑는다 / Draw a jittered backoff that fits the remaining budget.
+
+    Args:
+        remaining: 데드라인까지 남은 초 / Seconds left until the deadline.
+    """
+    low, high = QUOTE_RETRY_BACKOFF
+    return max(0.0, min(random.uniform(low, high), remaining))
+
+
+def _quote_pass(
+    symbols: Sequence[str],
+    market: str,
+    currency: str,
+    names: dict,
+    sectors: dict,
+    deadline: float,
+    attempt: str,
+) -> Dict[str, Quote]:
+    """
+    심볼별 순차 요청 한 패스 / One serial pass of per-symbol requests.
+
+    심볼당 `yf.download` 1회다. `threads=False` 배치도 내부적으로는 심볼당 순차 요청이라 Yahoo가
+    보는 트래픽은 동일하지만, 이렇게 하면 요청 사이에서 데드라인을 확인할 수 있다 — 배치 호출
+    하나는 중간에 끊을 방법이 없다.
+    One `yf.download` per symbol. A `threads=False` batch is per-symbol serial requests internally, so
+    upstream sees the same traffic, but this way the deadline can be checked between requests: a
+    single batch call cannot be interrupted mid-flight.
+
+    Args:
+        symbols: 이 패스에서 요청할 심볼 / Symbols to request in this pass.
+        deadline: `_now()` 기준 종료 시각 — 지나면 새 요청을 내지 않는다 / `_now()`-based cutoff.
+        attempt: 로그용 패스 이름 ("primary"/"retry") / Pass name for logs.
+
+    Returns:
+        {심볼: Quote} - 실패하거나 가격이 없는 심볼은 빠진다 / {symbol: Quote}; failures and priceless symbols absent.
+    """
+    parsed: Dict[str, Quote] = {}
+    for issued, symbol in enumerate(symbols):
+        if _now() >= deadline:
+            # 예산 소진: 남은 심볼은 포기하고 가진 것으로 판정한다 (워커를 붙잡아두지 않는다)
+            # Budget spent: give up the rest and evaluate what we have (never hold the worker)
+            _warn(
+                "quote_deadline_reached",
+                market=market, attempt=attempt,
+                requested=len(symbols), issued=issued, parsed=len(parsed),
+            )
+            break
+        try:
+            frame = _download([symbol], QUOTE_PERIOD)
+        except Exception as exc:
+            # 한 심볼의 실패가 남은 심볼을 죽이지 않는다 / One symbol's failure must not kill the pass
+            _warn("quote_download_failed", market=market, attempt=attempt, symbol=symbol, error=str(exc))
+            continue
+        for quote in _parse_quotes(frame, [symbol], market, currency, names, sectors):
+            parsed[quote.symbol] = quote
+    return parsed
+
+
 def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
     """
-    시장 전체 종목 시세를 청크 병렬 다운로드로 조회 / Fetch a market's quotes via chunked parallel download.
+    시장 전체 종목 시세를 심볼별 순차 요청으로 조회 / Fetch a market's quotes with serial per-symbol requests.
+
+    전략 (2026-08-04 라이브 장애 이후) / Strategy (after the 2026-08-04 live incident):
+      1. 1차 패스: config 심볼 순서대로 심볼당 요청 1건, 순차. 동시성 없음 — Yahoo가 심볼 전부를
+         빈 프레임으로 돌려주게 만든 건 배치 크기가 아니라 병렬 버스트(10심볼×5워커)였다.
+         Primary pass: one request per symbol, serial, in config order. No concurrency: what made
+         Yahoo answer with all-empty frames was the parallel burst (10 symbols × 5 workers), not size.
+      2. 재시도 패스: 빠진 심볼만 한 번 더 (지터 백오프 후, 예산이 남아 있을 때만). 전체 재실행은
+         이미 받은 심볼까지 두 번 때리므로 하지 않는다.
+         Retry pass: only the missing symbols, once, after a jittered backoff and only while budget
+         remains; re-running everything would hit the already-parsed symbols twice.
+      3. 커버리지 판정: 파싱 성공/요청 비율이 `QUOTE_MIN_COVERAGE` 이상이면 부분 결과를 반환하고
+         경고, 미달이면 `QuotesUnavailableError`.
+         Coverage gate: at or above `QUOTE_MIN_COVERAGE` the partial result is returned with a
+         warning; below it, `QuotesUnavailableError`.
+      4. 전체 예산 `QUOTE_FETCH_DEADLINE`: 만료되면 새 요청을 내지 않고 가진 것으로 판정한다.
+         `QUOTE_FETCH_DEADLINE` caps the whole sequence: on expiry no new request is issued and what
+         we have is evaluated.
 
     Args:
         market: "us" 또는 "kr" / "us" or "kr"
 
     Returns:
-        Quote 리스트 (config 심볼 순서 유지, 실패 심볼/청크는 제외)
-        List of Quote in config symbol order; failed symbols and chunks are omitted.
+        Quote 리스트 (config 심볼 순서 유지, 실패 심볼은 제외)
+        List of Quote in config symbol order; failed symbols are omitted.
 
     Raises:
         ValueError: 지원하지 않는 market / Unsupported market argument.
+        QuotesUnavailableError: 전 심볼이 비었거나 커버리지가 `QUOTE_MIN_COVERAGE` 미달 - 빈/심하게
+            부족한 결과가 "성공"으로 캐시되어 마지막 정상 시세를 밀어내는 것을 막는다.
+            All symbols empty, or coverage below `QUOTE_MIN_COVERAGE`; keeps an empty or severely
+            partial result from being cached as "success" and evicting the last good quotes.
     """
     if market not in _MARKETS:
         raise ValueError(f"unsupported market: {market!r} (expected 'us' or 'kr')")
@@ -352,51 +487,49 @@ def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
     if not symbols:
         return []
 
-    # 1차: 시장 전체 단일 배치 (2026-08-04 라이브 장애 대응). Yahoo가 병렬 청크 버스트(10×5워커)를
-    # 심볼 전부 빈 프레임으로 돌려주기 시작했다 — 같은 시점 50심볼 단일 배치는 50/50 성공(실측 2회).
-    # 단일 배치는 호출 1회라 레이트리밋 표면도 최소다.
-    # Primary path: one whole-market batch (live incident 2026-08-04). Yahoo began answering the
-    # parallel chunk burst (10×5 workers) with all-empty frames while a single 50-symbol batch
-    # succeeded 50/50 (measured twice). One batch is also the smallest rate-limit surface.
-    quotes: list[Quote] = []
-    try:
-        frame = _download(symbols, QUOTE_PERIOD)
-        quotes = _parse_quotes(frame, symbols, market, currency, names, sectors)
-    except Exception as exc:
-        _warn("quote_batch_failed", market=market, error=str(exc))
+    deadline = _now() + QUOTE_FETCH_DEADLINE
+    parsed = _quote_pass(symbols, market, currency, names, sectors, deadline, "primary")
 
-    # 폴백: 직렬 청크 — 배치가 통째로 죽거나 전부 비었을 때만. 직렬인 이유: 병렬 버스트가 바로
-    # 위 장애의 원인이었다.
-    # Fallback: serial chunks, only when the batch died or came back empty. Serial on purpose —
-    # the parallel burst is exactly what triggered the incident above.
-    if not quotes:
-        chunks = [
-            symbols[i:i + QUOTE_CHUNK_SIZE]
-            for i in range(0, len(symbols), QUOTE_CHUNK_SIZE)
-        ]
-        for index, chunk in enumerate(chunks):
-            if index > 0:
-                # 청크 사이 지연 — Yahoo의 빈도 기반 스로틀을 자극하지 않는다 (동기 함수: 호출부가
-                # to_thread로 감싸므로 이벤트 루프는 안 막힌다)
-                # Inter-chunk delay so the fallback doesn't poke Yahoo's frequency throttle (sync
-                # function: callers wrap it in to_thread, so the event loop never blocks)
-                time.sleep(QUOTE_CHUNK_DELAY)
-            try:
-                frame = _download(chunk, QUOTE_PERIOD)
-                quotes.extend(_parse_quotes(frame, chunk, market, currency, names, sectors))
-            except Exception as exc:
-                # 한 청크 실패가 전체 폴백을 죽이지 않는다 / One bad chunk must not kill the fallback
-                _warn("quote_chunk_failed", market=market, chunk=index, symbols=chunk, error=str(exc))
+    missing = [symbol for symbol in symbols if symbol not in parsed]
+    if missing:
+        remaining = deadline - _now()
+        if remaining > 0:
+            # 지연은 동기 sleep이다 — 호출부가 `asyncio.to_thread`로 감싸므로 이벤트 루프는 막히지 않는다
+            # A synchronous sleep: callers wrap this in `asyncio.to_thread`, so the event loop is safe
+            time.sleep(_retry_delay(remaining))
+            parsed.update(_quote_pass(missing, market, currency, names, sectors, deadline, "retry"))
+            missing = [symbol for symbol in symbols if symbol not in parsed]
+        else:
+            _warn("quote_retry_skipped", market=market, missing=len(missing), reason="deadline")
 
-    # 전 심볼 빈 결과는 성공이 아니라 실패다: 빈 리스트가 캐시에 저장되면 마지막 정상 데이터를
-    # 밀어내고 stale-while-error가 무력화된다 (이번 장애의 2차 원인 — US 목록이 빈 화면이 됐다).
+    quotes: List[Quote] = [parsed[symbol] for symbol in symbols if symbol in parsed]
+    coverage = len(quotes) / len(symbols)
+
+    # 빈/심하게 부족한 결과는 성공이 아니라 실패다: 그대로 캐시에 저장되면 마지막 정상 데이터를
+    # 밀어내고 stale-while-error가 무력화된다 (2026-08-04 장애의 2차 원인 — US 목록이 빈 화면이 됐다).
     # 예외로 승격하면 `deps.cached`의 stale 폴백이 마지막 정상 시세를 계속 서빙한다.
-    # An all-empty result is a failure, not a success: cached as "success" it evicts the last good
-    # data and disarms stale-while-error (the incident's second cause — a blank US table). Raising
-    # lets `deps.cached`'s stale fallback keep serving the last good quotes.
+    # An empty or severely partial result is a failure, not a success: cached as "success" it evicts
+    # the last good data and disarms stale-while-error (the 2026-08-04 incident's second cause — a
+    # blank US table). Raising lets `deps.cached`'s stale fallback keep serving the last good quotes.
     if not quotes:
         _warn("quotes_empty", market=market, symbols=len(symbols))
         raise QuotesUnavailableError(f"no quotes for market {market!r} ({len(symbols)} symbols)")
+    if coverage < QUOTE_MIN_COVERAGE:
+        _warn(
+            "quotes_coverage_too_low",
+            market=market, parsed=len(quotes), requested=len(symbols),
+            coverage=round(coverage, 3), minimum=QUOTE_MIN_COVERAGE,
+        )
+        raise QuotesUnavailableError(
+            f"quote coverage {len(quotes)}/{len(symbols)} below {QUOTE_MIN_COVERAGE:.0%} "
+            f"for market {market!r}"
+        )
+    if missing:
+        _warn(
+            "quotes_partial",
+            market=market, parsed=len(quotes), requested=len(symbols),
+            missing=len(missing), coverage=round(coverage, 3),
+        )
     return quotes
 
 
