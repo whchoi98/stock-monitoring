@@ -395,11 +395,15 @@ async def _bedrock_deltas(
     Run a Bedrock stream inside the global concurrency cap, yielding phase and delta events.
 
     permit은 **스트림 완료까지** 보유한다 - 블로킹 경로가 호출 하나를 감쌌던 것과 같은 동시성 의미다
-    (요청 하나가 끝날 때까지 permit 하나). 소비자가 사라지면 `GeneratorExit`이 이 제너레이터를 닫으며
-    `finally`가 permit을 반납하고, 서비스 계층이 펌프 스레드를 멈춘다.
+    (요청 하나가 끝날 때까지 permit 하나). 소비자가 사라지면 Starlette가 응답 태스크를 **취소**하므로 이
+    제너레이터는 `CancelledError`로 풀린다 (`GeneratorExit`은 명시적 `aclose()`/파이널라이저 경로에서만
+    온다 - 결과는 같다: 어느 쪽이든 `finally`가 실행된다). 그 `finally`가 permit을 반납하고, 서비스 계층이
+    펌프 스레드를 멈춘다.
     The permit is held until the stream ends - the same concurrency meaning the blocking path had when it
-    wrapped one call. If the consumer leaves, `GeneratorExit` closes this generator, the `finally` returns
-    the permit, and the service layer stops its pump thread.
+    wrapped one call. If the consumer leaves, Starlette **cancels** the response task, so this generator
+    unwinds via `CancelledError` (`GeneratorExit` arrives only from an explicit `aclose()` or the finalizer -
+    the outcome is the same, every `finally` runs). That `finally` returns the permit, and the service layer
+    stops its pump thread.
 
     **permit 대기 중에도 `phase: waiting` 하트비트를 낸다** (`_permit_wait`). 상한이
     `AI_GLOBAL_CONCURRENCY`(2)라 뒤늦은 요청은 앞선 두 스트림이 끝날 때까지 수십 초를 기다릴 수
@@ -500,12 +504,14 @@ async def _analysis_stream(
                 inflight[key] = own_future
                 try:
                     parts: list[str] = []
-                    # aclosing: 소비자가 사라지면(`GeneratorExit`) `produce()`를 GC 시점이 아니라
-                    # 지금 닫는다 - Bedrock permit 반납과 fetch permit 반납이 그 안의 `finally`에
-                    # 있으므로, 닫히는 시점이 정산되는 시점이다.
-                    # aclosing: when the consumer leaves (`GeneratorExit`) `produce()` is closed here, not
-                    # at some GC tick - the Bedrock and fetch permit returns live in its `finally`s, so
-                    # when it closes is when they settle.
+                    # aclosing: 소비자가 사라지면(ASGI disconnect -> 태스크 취소 -> `CancelledError`가
+                    # 이 프레임을 풀고, `aclose()`로 닫는 경로에서는 `GeneratorExit`) `produce()`를 GC
+                    # 시점이 아니라 지금 닫는다 - Bedrock permit 반납과 fetch permit 반납이 그 안의
+                    # `finally`에 있으므로, 닫히는 시점이 정산되는 시점이다.
+                    # aclosing: when the consumer leaves (an ASGI disconnect cancels the task, so
+                    # `CancelledError` unwinds this frame; an explicit `aclose()` raises `GeneratorExit`
+                    # instead) `produce()` is closed here, not at some GC tick - the Bedrock and fetch permit
+                    # returns live in its `finally`s, so when it closes is when they settle.
                     async with contextlib.aclosing(produce()) as events:
                         async for event, payload in events:
                             if event == EVENT_DELTA:
@@ -542,9 +548,11 @@ async def _analysis_stream(
                     return
                 finally:
                     if not own_future.done():
-                        # 소비자 이탈(GeneratorExit) 등으로 결과가 없으면 팔로워가 영원히 기다린다
-                        # Without a result (e.g. the consumer left, raising GeneratorExit) a follower
-                        # would wait forever, so the abandoned attempt is reported as a failure.
+                        # 소비자 이탈(태스크 취소 -> `CancelledError`) 등으로 결과가 없으면 팔로워가
+                        # 영원히 기다린다
+                        # Without a result (e.g. the consumer left, so the task was cancelled and
+                        # `CancelledError` unwound the leader) a follower would wait forever, so the
+                        # abandoned attempt is reported as a failure.
                         _warn("ai_stream_leader_gone", key=key)
                         own_future.set_result((OUTCOME_ERROR, DETAIL_AI_FAILED, 500))
                     inflight.pop(key, None)
