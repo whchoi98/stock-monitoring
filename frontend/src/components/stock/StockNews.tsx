@@ -3,6 +3,11 @@
  * The per-stock news feed: this symbol's RSS items (up to eight) as a list whose entries open the article AI
  * analysis screen.
  *
+ * 단, 본문 추출이 불가능한 링크(KR 종목뉴스의 Google News 래퍼)는 분석 화면 대신 원문을 새 탭으로 연다 —
+ * 판정과 링크는 `lib/articleLink.ts`가 소유하고 `NewsFeed`(F4)와 공유한다.
+ * Links we cannot extract (the Google News wrappers behind KR per-symbol news) open the source in a new tab
+ * instead; the verdict and the link both live in `lib/articleLink.ts`, shared with `NewsFeed` (F4).
+ *
  * 시장 뉴스(F4 `NewsFeed`)와 같은 목록 스타일·같은 링크 형식을 쓴다 — 발행 시각 표기는 `lib/format.ts`의
  * `formatPublished`를 공유한다. 폴링 주기는 뉴스 계열이라 120초다 (`useStockNews`).
  * It reuses the market feed's (F4's `NewsFeed`) list styling and link shape, and shares the publication-time
@@ -12,26 +17,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { useStockNews } from '../../api/queries.ts'
-import type { NewsItem } from '../../api/types.ts'
+import { articleHref, isAnalyzable } from '../../lib/articleLink.ts'
 import { formatPublished } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { Card } from '../common/Card.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-
-/**
- * 기사 분석 화면 링크 / The link to the article analysis screen.
- *
- * `NewsFeed`(F4)에 같은 함수가 있다. 쿼리 파라미터 이름은 `/articles`와의 계약이므로 F7이 그 라우트를
- * 만들 때 한 곳으로 모으는 것이 옳다 — 지금 공용 파일로 빼면 라우트 소유자가 없는 채로 헬퍼가 떠돈다.
- * `NewsFeed` (F4) holds the same function. The parameter names are a contract with `/articles`, so the right
- * time to centralise them is when F7 builds that route; extracting a shared helper now would leave it
- * ownerless.
- */
-function articleHref(item: NewsItem): string {
-  const params = new URLSearchParams({ url: item.link, title: item.title, language: item.language })
-  return `/articles?${params.toString()}`
-}
 
 export interface StockNewsProps {
   /** 종목 심볼 — 그대로 F2 훅에 넘긴다 / The symbol, handed straight to the F2 hook */
@@ -64,15 +55,34 @@ export function StockNews({ symbol }: StockNewsProps) {
         <ul className="news-list news-list-inline">
           {items.map((item) => {
             const published = formatPublished(item.published)
+            const analyzable = isAnalyzable(item)
+            /*
+             * 항목 내용은 두 분기가 그대로 공유한다 — 어디로 가든 시각·접근성이 같아야 한다.
+             * Both branches share this body verbatim: wherever the click lands, it must look and read the same.
+             */
+            const body = (
+              <>
+                <span className="news-title">{item.title}</span>
+                <span className="news-meta">
+                  {item.source}
+                  {published !== null && ` · ${published}`}
+                  {/* 분석 화면이 아니라 외부로 나간다는 표식 / The marker for leaving the app instead of analysing */}
+                  {!analyzable && ' · 원문 보기'}
+                </span>
+              </>
+            )
             return (
               <li key={item.id}>
-                <Link className="news-item" to={articleHref(item)}>
-                  <span className="news-title">{item.title}</span>
-                  <span className="news-meta">
-                    {item.source}
-                    {published !== null && ` · ${published}`}
-                  </span>
-                </Link>
+                {analyzable ? (
+                  <Link className="news-item" to={articleHref(item)}>
+                    {body}
+                  </Link>
+                ) : (
+                  /* 원문은 외부 사이트다 — 새 탭으로 열고 rel로 레퍼러/opener를 끊는다 / Off-site: a new tab, with the referrer and opener cut by rel */
+                  <a className="news-item" href={item.link} target="_blank" rel="noreferrer">
+                    {body}
+                  </a>
+                )}
               </li>
             )
           })}

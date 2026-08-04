@@ -8,26 +8,21 @@
  * URL work (spec 6.2 ③). `<Link>` renders a real `<a href>` (new tab, copy) while react-router intercepts
  * the navigation.
  *
- * `/articles` 라우트는 F7에서 생긴다 — 그 전에 누르면 react-router의 no-match 화면이 뜨는 것이 알려진
- * 중간 상태다. The `/articles` route lands in F7; until then a click shows react-router's no-match screen,
- * a known interim state.
+ * 단, 본문 추출이 불가능한 링크(Google News 래퍼)는 분석 화면 대신 원문을 새 탭으로 연다 — 판정과 링크는
+ * `lib/articleLink.ts`가 소유하고 종목 뉴스(`StockNews`)와 공유한다.
+ * Links we cannot extract (Google News wrappers) open the source in a new tab instead; the verdict and the
+ * link both live in `lib/articleLink.ts`, shared with the per-stock feed (`StockNews`).
  */
 import { useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 
 import { useNews } from '../../api/queries.ts'
-import type { NewsItem } from '../../api/types.ts'
+import { articleHref, isAnalyzable } from '../../lib/articleLink.ts'
 import { formatPublished } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { Card } from '../common/Card.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-
-/** 기사 분석 화면 링크 / The link to the article analysis screen */
-function articleHref(item: NewsItem): string {
-  const params = new URLSearchParams({ url: item.link, title: item.title, language: item.language })
-  return `/articles?${params.toString()}`
-}
 
 export function NewsFeed() {
   const { data, asOf, isLoading, error } = useNews()
@@ -53,15 +48,34 @@ export function NewsFeed() {
         <ul className="news-list">
           {items.map((item) => {
             const published = formatPublished(item.published)
+            const analyzable = isAnalyzable(item)
+            /*
+             * 항목 내용은 두 분기가 그대로 공유한다 — 어디로 가든 시각·접근성이 같아야 한다.
+             * Both branches share this body verbatim: wherever the click lands, it must look and read the same.
+             */
+            const body = (
+              <>
+                <span className="news-title">{item.title}</span>
+                <span className="news-meta">
+                  {item.source}
+                  {published !== null && ` · ${published}`}
+                  {/* 분석 화면이 아니라 외부로 나간다는 표식 / The marker for leaving the app instead of analysing */}
+                  {!analyzable && ' · 원문 보기'}
+                </span>
+              </>
+            )
             return (
               <li key={item.id}>
-                <Link className="news-item" to={articleHref(item)}>
-                  <span className="news-title">{item.title}</span>
-                  <span className="news-meta">
-                    {item.source}
-                    {published !== null && ` · ${published}`}
-                  </span>
-                </Link>
+                {analyzable ? (
+                  <Link className="news-item" to={articleHref(item)}>
+                    {body}
+                  </Link>
+                ) : (
+                  /* 원문은 외부 사이트다 — 새 탭으로 열고 rel로 레퍼러/opener를 끊는다 / Off-site: a new tab, with the referrer and opener cut by rel */
+                  <a className="news-item" href={item.link} target="_blank" rel="noreferrer">
+                    {body}
+                  </a>
+                )}
               </li>
             )
           })}
