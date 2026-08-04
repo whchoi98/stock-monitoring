@@ -15,7 +15,7 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Backend (`backend/`)
 - Python 3.12, FastAPI + uvicorn (**단일 워커 고정** — L1 캐시·AI 세마포어가 프로세스 단위 / single worker is load-bearing), pydantic v2
 - yfinance (시세/재무), httpx (RSS/기사 조회), boto3 (DynamoDB·Bedrock), defusedxml (RSS 파싱 — 엔티티 확장 DoS 차단)
-- 테스트 / Tests: pytest 317개 (`backend/tests/`)
+- 테스트 / Tests: pytest 320개 (`backend/tests/`)
 
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
@@ -56,7 +56,7 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 
 ```bash
 # 테스트 / Tests
-cd backend && .venv/bin/pytest -q          # 백엔드 (317)
+cd backend && .venv/bin/pytest -q          # 백엔드 (320)
 cd frontend && npx vitest run              # 프론트 (168)
 make test                                  # 전체
 

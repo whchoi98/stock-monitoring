@@ -500,10 +500,17 @@ async def _analysis_stream(
                 inflight[key] = own_future
                 try:
                     parts: list[str] = []
-                    async for event, payload in produce():
-                        if event == EVENT_DELTA:
-                            parts.append(payload["text"])
-                        yield _sse(event, payload)
+                    # aclosing: 소비자가 사라지면(`GeneratorExit`) `produce()`를 GC 시점이 아니라
+                    # 지금 닫는다 - Bedrock permit 반납과 fetch permit 반납이 그 안의 `finally`에
+                    # 있으므로, 닫히는 시점이 정산되는 시점이다.
+                    # aclosing: when the consumer leaves (`GeneratorExit`) `produce()` is closed here, not
+                    # at some GC tick - the Bedrock and fetch permit returns live in its `finally`s, so
+                    # when it closes is when they settle.
+                    async with contextlib.aclosing(produce()) as events:
+                        async for event, payload in events:
+                            if event == EVENT_DELTA:
+                                parts.append(payload["text"])
+                            yield _sse(event, payload)
 
                     data = build_data("".join(parts))
                     await state.cache.put(key, data, config.AI_TTL)
@@ -642,8 +649,11 @@ async def post_stock_analysis(
             # The first event was already `analyzing`; it is re-announced only after a permit wait
             analyzing_announced=True,
         )
-        async for event in deltas:
-            yield event
+        # aclosing: 이탈 시 permit 반납(`_bedrock_deltas`의 finally)을 GC가 아니라 여기서 확정한다
+        # aclosing: on departure the permit return (`_bedrock_deltas`'s finally) is settled here, not by GC
+        async with contextlib.aclosing(deltas) as events:
+            async for event in events:
+                yield event
 
     # 주식은 조회할 본문이 없으므로 `fetching` 없이 `analyzing`부터 시작한다 (fetch 세마포어도 기사 전용)
     # A stock has no body to fetch, so it starts at `analyzing` (the fetch semaphore is article-only)
@@ -740,8 +750,11 @@ async def post_article_analysis(
             lambda: bedrock_ai.analyze_article_stream(payload.title, content, payload.language == "ko"),
             analyzing_announced=False,
         )
-        async for event in deltas:
-            yield event
+        # aclosing: 이탈 시 permit 반납(`_bedrock_deltas`의 finally)을 GC가 아니라 여기서 확정한다
+        # aclosing: on departure the permit return (`_bedrock_deltas`'s finally) is settled here, not by GC
+        async with contextlib.aclosing(deltas) as events:
+            async for event in events:
+                yield event
 
     return StreamingResponse(
         _analysis_stream(

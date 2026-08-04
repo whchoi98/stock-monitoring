@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import threading
 import time
 from typing import Any, AsyncIterator, Optional
@@ -943,6 +944,219 @@ async def test_follower_receives_the_leaders_error_as_its_own_final(state, servi
     assert len(bedrock.stock_calls) == 1
     for response in responses:
         assert _final(response) == {"error": "ai_unavailable", "status": 503}
+
+
+# ---------------------------------------------------------------------------
+# 소비자 이탈 / Consumer disconnect — ASGI를 직접 구동하는 하네스
+# The disconnect harness drives the ASGI app directly
+# ---------------------------------------------------------------------------
+
+# `_warn`이 쓰는 로거 (단일 라인 JSON) / The logger `_warn` writes its single-line JSON to
+AI_LOGGER = "app.api.ai"
+
+
+def _asgi_scope(path: str, ip: str) -> dict:
+    """
+    uvicorn이 만드는 것과 같은 HTTP scope / An HTTP scope shaped like the one uvicorn builds.
+
+    `spec_version`이 핵심이다: Starlette의 `StreamingResponse`는 2.4 미만에서만 `http.disconnect`
+    수신기를 띄우고(2.4+는 `send`의 OSError에 의존한다), 운영의 uvicorn은 **2.3**을 광고한다. 여기서
+    2.4를 쓰면 disconnect가 무시되어 테스트가 엉뚱한 이유로 통과한다.
+    `spec_version` is the load-bearing field: Starlette's `StreamingResponse` only starts an
+    `http.disconnect` listener below 2.4 (2.4+ relies on `send` raising OSError), and the uvicorn we run in
+    production advertises **2.3**. Claiming 2.4 here would make the disconnect a no-op and the test would
+    pass for the wrong reason.
+    """
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"testserver"),
+            (b"x-forwarded-for", ip.encode()),      # IP별 예산 / its own rate-limit budget
+            (b"content-length", b"0"),
+        ],
+        "client": (ip, 12345),
+        "server": ("testserver", 80),
+    }
+
+
+class AsgiChannel:
+    """
+    ASGI receive/send 채널 페어 - 프레임을 그대로 모으고, 원할 때 `http.disconnect`를 보낸다.
+    An ASGI receive/send pair: it records frames as they are sent and drops the connection on demand.
+
+    `httpx.ASGITransport`는 응답을 다 모은 뒤에 돌려주므로 **스트림 도중의 상태를 관측할 수 없다**.
+    이 하네스는 앱을 직접 호출해 프레임이 나가는 즉시 보고, 원하는 순간에 연결을 끊는다 - 소비자
+    이탈 경로(permit 반납·레지스트리 정리·leader-gone)는 그 순간에만 관측 가능하다.
+    `httpx.ASGITransport` buffers the whole response before returning it, so **mid-stream state is
+    invisible** through it. This harness calls the app itself, sees each frame as it goes out and drops the
+    connection at a chosen moment - the only way to observe the departure path (permit return, registry
+    cleanup, leader-gone).
+    """
+
+    def __init__(self, disconnect_on: Optional[bytes] = None) -> None:
+        self.disconnect_on = disconnect_on
+        self.messages: list[dict] = []
+        self.seen = asyncio.Event()     # 트리거 프레임이 나갔다 / the trigger frame went out
+        self._gate = asyncio.Event()    # 끊는 시점은 테스트가 정한다 / the test decides when to drop
+        self._request_sent = False
+
+    async def receive(self) -> dict:
+        # 본문 없는 POST 하나를 전달한 뒤로는 `drop()`이 열릴 때까지 조용히 기다린다 (실제 소켓처럼)
+        # One bodyless POST, then silence until `drop()` opens the gate, exactly like a real socket
+        if not self._request_sent:
+            self._request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await self._gate.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(self, message: dict) -> None:
+        self.messages.append(message)
+        if self.disconnect_on and self.disconnect_on in message.get("body", b""):
+            self.seen.set()
+
+    def drop(self) -> None:
+        """연결을 끊는다 (다음 `receive()`가 `http.disconnect`를 낸다) / Drop the connection."""
+        self._gate.set()
+
+    @property
+    def body(self) -> str:
+        """지금까지 나간 SSE 본문 / The SSE body sent so far."""
+        return b"".join(message.get("body", b"") for message in self.messages).decode()
+
+
+async def _until(predicate, label: str, timeout: float = 2.0) -> None:
+    """
+    조건이 성립할 때까지 이벤트 루프를 돌린다 / Run the event loop until a condition holds.
+
+    이탈 정산(제너레이터 종료 → permit 반납)은 취소가 풀린 다음 루프 틱에 완료될 수 있으므로
+    한 번의 단정이 아니라 유한한 폴링으로 확인한다 (`pytest.ini`의 timeout이 최후 안전망이다).
+    Departure cleanup (generator close, then the permit return) can complete a tick after the cancellation
+    unwinds, so it is polled with a bounded deadline instead of asserted once (the `pytest.ini` timeout is
+    the backstop).
+    """
+    deadline = time.perf_counter() + timeout
+    while time.perf_counter() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError(f"timed out waiting for {label}")
+
+
+def _warn_events(caplog) -> list[dict]:
+    """`_warn`이 남긴 단일 라인 JSON 로그들 / The single-line JSON records `_warn` emitted."""
+    return [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.name == AI_LOGGER and record.getMessage().startswith("{")
+    ]
+
+
+async def test_disconnect_mid_stream_closes_the_generator_and_returns_the_permit(
+    state, services, bedrock, caplog,
+):
+    """
+    델타 도중 소비자가 사라지면 스트림이 닫히고 permit·레지스트리가 정리된다.
+    A consumer that vanishes mid-delta closes the stream and gives back the permit and the registry slot.
+
+    이 경로가 새면 상한이 영구히 줄어든다 (2 -> 1 -> 0: AI 기능 정지). 레지스트리 항목이 남으면 그
+    키의 이후 요청은 전부 죽은 선점자를 기다리는 팔로워가 된다. 브라우저 탭 닫기·새로고침·모바일
+    백그라운드 전환이 모두 이 경로다.
+    A leak here shrinks the cap for good (2 -> 1 -> 0 stalls the whole AI feature), and a stale registry
+    entry turns every later request for that key into a follower of a dead leader. Closing a tab, hitting
+    reload and backgrounding a mobile browser all take this path.
+    """
+    bedrock.delay = 0.05        # 델타 사이 간격 - 첫 델타 뒤 끊을 여유 / room to drop after the first delta
+    app = create_app(state)
+    channel = AsgiChannel(disconnect_on=b"event: delta")
+
+    with caplog.at_level(logging.WARNING, logger=AI_LOGGER):
+        request = asyncio.create_task(
+            app(_asgi_scope(f"/api/ai/stocks/{US_SYMBOL}", "10.9.9.1"), channel.receive, channel.send)
+        )
+        await asyncio.wait_for(channel.seen.wait(), 2)      # 첫 델타가 나갔다 / the first delta went out
+        assert app.state.ai_inflight, "leader did not register while streaming"
+        channel.drop()
+        await asyncio.wait_for(request, 2)
+
+    # 스트림은 첫 델타에서 멈췄다 (이후 델타도, final도 없다) / the stream stopped at the first delta
+    assert _names(_sse_events(channel.body)) == ["phase", "delta"]
+    # 정산: permit 반납, 레지스트리 비움, Bedrock 스트림 종료(페이크의 finally 실행)
+    # Settled: the permit is back, the registry is empty and the Bedrock stream's finally ran
+    await _until(
+        lambda: app.state.ai_semaphore._value == config.AI_GLOBAL_CONCURRENCY,
+        "the Bedrock permit to come back",
+    )
+    assert app.state.ai_inflight == {}
+    assert bedrock.in_flight == 0, "the Bedrock stream was left open"
+    # 절반짜리 분석은 캐시되지 않는다 / a half-finished analysis is never cached
+    assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is None
+    # 버려진 시도는 조용히 사라지지 않는다 / an abandoned attempt is never silent
+    assert [event["event"] for event in _warn_events(caplog)] == ["ai_stream_leader_gone"]
+
+
+async def test_leader_disconnect_gives_a_waiting_follower_the_leader_gone_error(
+    state, services, bedrock, monkeypatch, caplog,
+):
+    """
+    선점자가 스트림 도중 사라지면 대기 중인 팔로워는 오류 final을 받는다 (영원히 기다리지 않는다).
+    When the leader vanishes mid-stream a waiting follower gets an error final instead of waiting forever.
+
+    이것이 `_analysis_stream`의 `ai_stream_leader_gone` 경로다: 선점자의 Future에 결과가 없으면
+    팔로워는 그 Future를 영원히 기다리며 하트비트만 내보낸다 - 요청이 죽지도, 끝나지도 않는다.
+    선점자의 `finally`가 결과를 대신 채워 `ai_failed`/500으로 정산하고 레지스트리에서 키를 뺀다.
+    This is `_analysis_stream`'s `ai_stream_leader_gone` path. Without a result on the leader's future the
+    follower heartbeats on it forever - a request that neither dies nor finishes. The leader's `finally`
+    fills the result in for it (`ai_failed`, 500) and pops the key from the registry.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    bedrock.delay = 0.05
+    app = create_app(state)
+    leader_channel = AsgiChannel(disconnect_on=b"event: delta")
+    follower_channel = AsgiChannel()
+
+    with caplog.at_level(logging.WARNING, logger=AI_LOGGER):
+        leader = asyncio.create_task(
+            app(_asgi_scope(f"/api/ai/stocks/{US_SYMBOL}", "10.9.9.2"), leader_channel.receive, leader_channel.send)
+        )
+        await asyncio.wait_for(leader_channel.seen.wait(), 2)
+        # 같은 키의 두 번째 요청 = 팔로워. 하트비트가 보일 때까지 기다려 실제로 대기 중임을 확인한다
+        # A second request for the same key is a follower; wait for a heartbeat to prove it is really waiting
+        follower = asyncio.create_task(
+            app(_asgi_scope(f"/api/ai/stocks/{US_SYMBOL}", "10.9.9.3"),
+                follower_channel.receive, follower_channel.send)
+        )
+        await _until(lambda: "waiting" in follower_channel.body, "the follower to start heartbeating")
+
+        leader_channel.drop()       # 선점자의 소비자가 사라진다 / the leader's consumer vanishes
+        await asyncio.wait_for(leader, 2)
+        await asyncio.wait_for(follower, 3)     # 팔로워는 결코 매달려 있지 않는다 / it must not hang
+
+    follower_events = _sse_events(follower_channel.body)
+    assert follower_events[-1] == ("final", {"error": "ai_failed", "status": 500})
+    assert _phases(follower_events).count("waiting") >= 1
+    # 팔로워는 Bedrock을 다시 부르지 않는다 (비용 방어) / the follower never re-calls Bedrock
+    assert len(bedrock.stock_calls) == 1
+    assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is None
+    assert [event["event"] for event in _warn_events(caplog)] == ["ai_stream_leader_gone"]
+
+    # 정리 후 같은 키의 다음 요청은 새 선점자다 (죽은 선점자를 물려받지 않는다)
+    # After the cleanup the next request for that key is a fresh leader, not an heir to the dead one
+    await _until(lambda: app.state.ai_inflight == {}, "the registry entry to be removed")
+    assert app.state.ai_semaphore._value == config.AI_GLOBAL_CONCURRENCY
+    retry = AsgiChannel()
+    await asyncio.wait_for(
+        app(_asgi_scope(f"/api/ai/stocks/{US_SYMBOL}", "10.9.9.4"), retry.receive, retry.send), 3
+    )
+    assert set(_sse_events(retry.body)[-1][1]) == ENVELOPE_KEYS
+    assert len(bedrock.stock_calls) == 2
 
 
 # ---------------------------------------------------------------------------
