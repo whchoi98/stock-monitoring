@@ -26,6 +26,7 @@ decided before the stream starts, so both keep their existing JSON responses.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -312,6 +313,77 @@ def _return_permit(semaphore: asyncio.Semaphore, acquire: "asyncio.Future[bool]"
         semaphore.release()
 
 
+async def _waiting_heartbeats(pending: "asyncio.Future[Any]") -> AsyncIterator[Tuple[str, dict]]:
+    """
+    `pending`이 끝날 때까지 `HEARTBEAT_SECONDS`마다 `phase: waiting`을 낸다 / Emit `phase: waiting` every `HEARTBEAT_SECONDS` until `pending` settles.
+
+    이 스트림의 **모든** 대기 구간이 쓰는 단 하나의 하트비트 루프다 (선점자의 Bedrock permit 대기,
+    기사 fetch permit 대기, 팔로워의 선점자 대기). 대기가 조용하면 첫 phase 뒤로 바이트가 없어
+    CloudFront/ALB idle 카운터가 리셋되지 않고 연결이 끊긴다 - SSE로 옮겨 온 이유 자체가 그것이다.
+    구현이 한 군데라 간격(과 그 monkeypatch)도 모든 대기에 똑같이 적용된다.
+    The one heartbeat loop **every** wait in this stream uses: a leader queued for a Bedrock permit, an
+    article request queued for a fetch permit, and a follower waiting on its leader. A silent wait sends no
+    bytes after the first phase event, so the CloudFront/ALB idle counters never reset and the connection
+    dies - the very reason this feature moved to SSE. With one implementation, the period (and a test's
+    monkeypatch of it) applies identically to every wait.
+
+    결과도 예외도 여기서 꺼내지 않는다 - 호출부가 `pending.result()`로 직접 회수한다 (획득 실패는
+    호출부의 오류 경로로 올라가야 하고, 팔로워의 Future는 튜플 결과를 그대로 해석해야 한다).
+    Neither the result nor an exception is consumed here: the caller harvests it with `pending.result()`,
+    because an acquisition failure belongs on the caller's error path and a follower's future carries a
+    tuple the caller has to interpret itself.
+    """
+    while True:
+        done, _pending = await asyncio.wait([pending], timeout=HEARTBEAT_SECONDS)
+        if done:
+            return
+        yield (EVENT_PHASE, {"phase": PHASE_WAITING})
+
+
+async def _permit_wait(
+    acquire: "asyncio.Future[bool]",
+    phase: str,
+    announced: bool,
+) -> AsyncIterator[Tuple[str, dict]]:
+    """
+    permit을 기다리는 동안 하트비트를 내고, 확보 후 진행 단계를 (다시) 알린다.
+    Heartbeat while a permit is pending, then (re-)announce the phase that follows it.
+
+    `async with semaphore`를 쓸 수 없는 이유: 대기 중에도 이벤트를 내보내야 하므로 획득이 태스크여야
+    한다. 그래서 세마포어의 생성/반납은 호출부가 갖는다 - permit 보유 구간의 길이가 호출부마다 다르다
+    (Bedrock permit은 스트림 완료까지, fetch permit은 본문 조회까지). 반납은 호출부의 `finally`에서
+    `_return_permit`이 책임진다.
+    `async with semaphore` is impossible here: events must flow *during* the wait, so acquisition has to be
+    a task. Creating and returning the permit therefore stays with the caller, whose hold differs per site
+    (a Bedrock permit is held until the stream ends, a fetch permit only until the body is in). The caller's
+    `finally` hands it back through `_return_permit`.
+
+    Args:
+        acquire: `asyncio.ensure_future(semaphore.acquire())` - 호출부가 만들고 반납까지 책임진다
+            / created by the caller, which also owns returning it.
+        phase: permit을 든 뒤 진행할 단계 (`analyzing`/`fetching`) / the phase the work runs in once the permit is held.
+        announced: 호출부가 이미 그 phase를 냈는지. True면 **대기가 있었을 때만** 다시 알린다 -
+            대기 없는 흐름에 같은 phase를 두 번 내지 않고, 대기가 있었으면 `waiting`이 마지막 phase로
+            남지 않게 한다(프론트는 latest-wins로 표시한다).
+            / Whether the caller already emitted that phase. When True it is re-announced **only after a
+            wait**, so an uncontended flow never repeats a phase while a contended one never leaves
+            `waiting` as the latest phase (the frontend renders latest-wins).
+
+    Raises:
+        획득 태스크의 예외 그대로 / whatever the acquisition task raised.
+    """
+    waited = False
+    # aclosing: 소비자가 대기 중에 사라지면 하트비트 제너레이터를 GC 시점이 아니라 지금 닫는다
+    # aclosing: if the consumer leaves mid-wait, close the heartbeat generator now, not at some GC tick
+    async with contextlib.aclosing(_waiting_heartbeats(acquire)) as beats:
+        async for event in beats:
+            waited = True
+            yield event
+    acquire.result()    # permit 확보 (획득 실패는 그대로 올린다) / permit in hand; a failure propagates
+    if waited or not announced:
+        yield (EVENT_PHASE, {"phase": phase})
+
+
 async def _bedrock_deltas(
     state: AppState,
     semaphore: asyncio.Semaphore,
@@ -329,17 +401,15 @@ async def _bedrock_deltas(
     wrapped one call. If the consumer leaves, `GeneratorExit` closes this generator, the `finally` returns
     the permit, and the service layer stops its pump thread.
 
-    **permit 대기 중에도 `phase: waiting` 하트비트를 낸다.** 상한이 `AI_GLOBAL_CONCURRENCY`(2)라 뒤늦은
-    요청은 앞선 두 스트림이 끝날 때까지 수십 초를 기다릴 수 있는데, 그동안 조용하면 첫 phase 뒤로
-    바이트가 없어 CloudFront origin-response 타임아웃에 걸린다 - 이 기능이 없애려는 그 wall-clock
-    제약이다. 그래서 `async with semaphore`를 쓰지 않고 획득을 태스크로 띄운 뒤 하트비트 간격마다
-    깨어난다 (팔로워 루프와 같은 패턴). `analyzing`은 permit을 든 **뒤에** 알린다 - 대기 중에
+    **permit 대기 중에도 `phase: waiting` 하트비트를 낸다** (`_permit_wait`). 상한이
+    `AI_GLOBAL_CONCURRENCY`(2)라 뒤늦은 요청은 앞선 두 스트림이 끝날 때까지 수십 초를 기다릴 수
+    있는데, 그동안 조용하면 첫 phase 뒤로 바이트가 없어 CloudFront origin-response 타임아웃에 걸린다 -
+    이 기능이 없애려는 그 wall-clock 제약이다. `analyzing`은 permit을 든 **뒤에** 알린다 - 대기 중에
     "분석 중"이라고 말하지 않기 위해서다.
-    **The permit wait heartbeats `phase: waiting` too.** With the cap at `AI_GLOBAL_CONCURRENCY` (2) a late
-    request can wait tens of seconds for two in-flight streams, and a silent wait sends nothing after the
-    first phase event - straight into the CloudFront origin-response timeout this feature exists to remove.
-    Hence no `async with semaphore`: acquisition runs as a task and this generator wakes every heartbeat
-    period (the follower loop's pattern). `analyzing` is announced only *after* the permit is held, so the
+    **The permit wait heartbeats `phase: waiting` too** (see `_permit_wait`). With the cap at
+    `AI_GLOBAL_CONCURRENCY` (2) a late request can wait tens of seconds for two in-flight streams, and a
+    silent wait sends nothing after the first phase event - straight into the CloudFront origin-response
+    timeout this feature exists to remove. `analyzing` is announced only *after* the permit is held, so the
     stream never claims to be analyzing while it is queued.
 
     성공/실패는 모두 `bedrock` 소스 상태에 반영한다 (조용한 실패 금지).
@@ -357,17 +427,11 @@ async def _bedrock_deltas(
     """
     acquire: "asyncio.Future[bool]" = asyncio.ensure_future(semaphore.acquire())
     try:
-        waited = False
-        while True:
-            done, _pending = await asyncio.wait([acquire], timeout=HEARTBEAT_SECONDS)
-            if done:
-                acquire.result()    # permit 확보 (획득 실패는 그대로 올린다) / permit in hand; a failure propagates
-                break
-            waited = True
-            yield (EVENT_PHASE, {"phase": PHASE_WAITING})
-
-        if waited or not analyzing_announced:
-            yield (EVENT_PHASE, {"phase": PHASE_ANALYZING})
+        async with contextlib.aclosing(
+            _permit_wait(acquire, PHASE_ANALYZING, analyzing_announced)
+        ) as permit_events:
+            async for event in permit_events:
+                yield event
 
         try:
             # `make_stream()` 호출 자체(프롬프트 조립)도 try 안에 둔다 - 잘못된 입력의 즉시 예외까지 잡는다
@@ -481,11 +545,9 @@ async def _analysis_stream(
                 # 팔로워: 선점자를 기다리며 하트비트 / Follower: heartbeat while the leader works.
                 # Future에는 예외를 넣지 않는다 (튜플 결과만) - 회수되지 않은 예외 경고를 만들지 않기 위해서다.
                 # The future never carries an exception, only tuples, so no "never retrieved" warning fires.
-                while True:
-                    done, _pending = await asyncio.wait([leader_future], timeout=HEARTBEAT_SECONDS)
-                    if done:
-                        break
-                    yield _sse(EVENT_PHASE, {"phase": PHASE_WAITING})
+                async with contextlib.aclosing(_waiting_heartbeats(leader_future)) as beats:
+                    async for event, payload in beats:
+                        yield _sse(event, payload)
                 outcome = leader_future.result()
                 if outcome[0] == OUTCOME_ERROR:
                     _tag, detail, status = outcome
@@ -637,8 +699,31 @@ async def post_article_analysis(
         # sharing one lets slow fetches (holding up to 20s) starve the Bedrock budget — two IPs could
         # queue-lock every AI feature. This semaphore bounds concurrent fetch buffers only; Bedrock
         # volume is bounded by `_bedrock_deltas`'s semaphore.
-        async with fetch_semaphore:
+        #
+        # 획득 대기도 Bedrock permit과 **같은** 하트비트 패턴을 쓴다 (최종 리뷰 fast-follow #1):
+        # `async with fetch_semaphore`는 침묵 구간이었다 - 느린 fetch `AI_FETCH_CONCURRENCY`(2)건 뒤에
+        # 줄 선 요청은 첫 `fetching` 이벤트 뒤로 한 바이트도 못 내보내고, 자기 fetch가 시작된 뒤에도
+        # `FETCH_TOTAL_DEADLINE`(20s)까지 더 조용할 수 있다. permit은 본문 조회까지만 들고
+        # (Bedrock 스트림은 자기 세마포어를 따로 기다린다) `finally`에서 반드시 반납한다.
+        # The acquisition wait uses the **same** heartbeat pattern as the Bedrock permit (final-review
+        # fast-follow #1): `async with fetch_semaphore` was a silent window - a request queued behind
+        # `AI_FETCH_CONCURRENCY` (2) slow fetches emitted nothing after its first `fetching` event, and its
+        # own fetch can stay quiet for up to `FETCH_TOTAL_DEADLINE` (20s) more. The permit is held only
+        # until the body is in (the Bedrock stream waits on its own semaphore) and always handed back in
+        # the `finally`.
+        fetch_acquire: "asyncio.Future[bool]" = asyncio.ensure_future(fetch_semaphore.acquire())
+        try:
+            # 첫 이벤트가 이미 `fetching`이었다 - permit을 기다렸을 때만 다시 알린다
+            # The first event was already `fetching`; it is re-announced only after a permit wait
+            async with contextlib.aclosing(
+                _permit_wait(fetch_acquire, PHASE_FETCHING, announced=True)
+            ) as permit_events:
+                async for event in permit_events:
+                    yield event
             content = await news.fetch_article_content(payload.url)
+        finally:
+            _return_permit(fetch_semaphore, fetch_acquire)
+
         if not content:
             # 본문이 없으면 분석은 무의미하다: Bedrock을 부르지도, 실패를 캐시하지도 않는다
             # Without a body there is nothing to analyze: no Bedrock call, and no cached failure

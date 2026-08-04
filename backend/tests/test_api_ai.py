@@ -808,6 +808,78 @@ async def test_slow_article_fetches_do_not_starve_stock_analysis(state, services
     assert [set(_final(response)) for response in article_responses] == [ENVELOPE_KEYS] * config.AI_FETCH_CONCURRENCY
 
 
+async def test_leader_waiting_for_a_fetch_permit_heartbeats_before_fetching(
+    state, services, bedrock, monkeypatch,
+):
+    """
+    fetch permit을 기다리는 요청도 waiting 하트비트를 낸다 / A request queued for a fetch permit heartbeats too.
+
+    최종 리뷰 fast-follow #1: `fetching` phase는 즉시 나가지만, 그 다음 줄의 fetch 세마포어 획득
+    (`AI_FETCH_CONCURRENCY`=2)은 침묵 구간이었다. 앞선 느린 fetch 2건 뒤에 줄 선 요청은 그 대기
+    동안 한 바이트도 내보내지 않고, 자기 fetch가 시작된 뒤에도 최대 `FETCH_TOTAL_DEADLINE`(20s)이
+    더 조용하다 - 첫 phase 뒤 침묵이 CloudFront origin-response 타임아웃을 만나는, 이 기능이
+    없애려던 바로 그 구조다. Bedrock permit 대기와 **같은** 하트비트 패턴을 건다.
+    Final-review fast-follow #1: the `fetching` phase leaves at once, but the very next step - acquiring
+    the fetch semaphore (`AI_FETCH_CONCURRENCY` = 2) - was a silent window. A request queued behind two
+    slow fetches emitted nothing while it waited, and its own fetch can then add up to
+    `FETCH_TOTAL_DEADLINE` (20s) of further silence: exactly the "silence after the first phase runs into
+    the CloudFront origin-response timeout" shape this feature exists to remove. So the fetch wait gets
+    the **same** heartbeat pattern as the Bedrock permit wait.
+
+    대기가 끝나면 `fetching`을 다시 알린다 - `waiting`이 마지막 phase로 남으면 프론트(latest-wins)가
+    본문 조회 중을 "대기 중"으로 표시한 채 델타를 받는다.
+    Once the wait ends `fetching` is re-announced: leaving `waiting` as the latest phase would have the
+    frontend (latest-wins) show "queued" while the body fetch is actually running.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    bedrock.fetch_delay = 0.1    # 하트비트 여러 번보다 오래 permit을 잡는다 / one fetch outlasts several beats
+    app = create_app(state)
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        # 느린 fetch로 fetch 세마포어를 가득 채운다 / Fill the fetch semaphore with slow fetches
+        slow = [
+            asyncio.create_task(async_client.post(
+                "/api/ai/articles",
+                json={"url": f"https://example.com/slow/{index}", "title": "t", "language": "en"},
+                headers={"X-Forwarded-For": f"10.8.8.{index}"},
+            ))
+            for index in range(config.AI_FETCH_CONCURRENCY)
+        ]
+        await asyncio.sleep(0.03)   # permit을 잡을 시간 / let them take the permits
+        assert bedrock.fetch_in_flight == config.AI_FETCH_CONCURRENCY
+
+        # 세 번째 요청: 다른 URL·다른 IP라 캐시 히트도 팔로워도 레이트리밋도 아니다 - 순수 permit 대기다
+        # The third request: another URL and IP, so it is neither a cache hit, a follower nor rate limited
+        queued = await async_client.post(
+            "/api/ai/articles",
+            json={"url": "https://example.com/queued", "title": "t", "language": "en"},
+            headers={"X-Forwarded-For": "10.8.8.100"},
+        )
+        slow_responses = await asyncio.gather(*slow)
+        # permit 누수 확인: 뒤이은 요청이 그대로 완료된다 / no leaked permit: a later request still completes
+        later = await async_client.post(
+            "/api/ai/articles",
+            json={"url": "https://example.com/later", "title": "t", "language": "en"},
+            headers={"X-Forwarded-For": "10.8.8.101"},
+        )
+
+    phases = _phases(_events(queued))
+    fetching = [index for index, phase in enumerate(phases) if phase == "fetching"]
+    # 대기가 있었으므로 fetching은 두 번 나온다 (즉시 + 대기 후 재알림) / two `fetching`s: immediate, then re-announced
+    assert len(fetching) == 2, f"fetching not re-announced after the wait: {phases}"
+    # **fetch 작업 전에** 하트비트가 있어야 한다 (침묵 구간이 사라졌다는 증거)
+    # A heartbeat must precede the fetch work itself: the proof the silent window is gone
+    assert "waiting" in phases[fetching[0] + 1:fetching[1]], f"the fetch permit wait was silent: {phases}"
+    assert set(_final(queued)) == ENVELOPE_KEYS
+    assert _deltas(_events(queued)) == ARTICLE_DELTAS
+
+    # 대기 경로가 permit을 새지도, 이중 반납하지도 않는다 / the wait neither leaks nor double-returns a permit
+    assert set(_final(later)) == ENVELOPE_KEYS
+    assert app.state.ai_fetch_semaphore._value == config.AI_FETCH_CONCURRENCY
+    assert [set(_final(response)) for response in slow_responses] == [ENVELOPE_KEYS] * len(slow)
+
+
 async def _post_all(app, path: str, count: int, ip_prefix: str) -> list:
     """같은 경로로 동시 요청 (IP를 나눠 레이트리밋을 피한다) / Fire concurrent requests, one IP each to dodge the limit."""
     transport = httpx.ASGITransport(app=app)
