@@ -29,7 +29,8 @@ import json
 import logging
 import re
 import socket
-from typing import Any, Optional
+import zlib
+from typing import Any, Iterator, Optional
 from urllib.parse import quote_plus, urljoin, urlparse
 
 import httpx
@@ -187,10 +188,37 @@ SAFE_CHARSETS = {
 # finite DoS bound, and the extraction regexes stay linear at it (constant work per candidate, above).
 MAX_ARTICLE_SIZE = 2_097_152
 # 기사 조회는 압축을 요청하지 않는다: 압축 해제 폭탄(작은 본문이 GB로 부푸는 응답)이 크기 상한을
-# 우회하지 못하게 한다. 오리진이 이를 무시해도 스트리밍 카운터가 상한에서 읽기를 끊는다.
+# 우회하지 못하게 한다. 오리진이 이를 무시해도 스트리밍 카운터가 상한에서 읽기를 끊고, 압축 해제
+# 자체가 아래 `DECOMPRESS_STEP` 단위로 묶인다.
 # Article fetches ask for no compression, so a decompression bomb (a tiny body inflating to gigabytes)
-# cannot slip past the size cap. Should an origin ignore it, the streaming counter still stops at the cap.
+# cannot slip past the size cap. Should an origin ignore it, the streaming counter still stops at the cap
+# and the inflation itself is bounded per `DECOMPRESS_STEP` (below).
 IDENTITY_ENCODING = {"Accept-Encoding": "identity"}
+
+# 압축 해제 1스텝의 출력 상한 (바이트). `zlib.decompressobj().decompress(data, max_length=...)`는 이보다
+# 큰 출력을 한 번에 만들지 않으므로, **압축률과 무관하게** 스텝 하나의 추가 메모리가 이 값으로 묶인다.
+# 왜 필요한가 (2026-08-04 적대적 리뷰 F4): 옛 구현은 httpx가 압축을 풀어 준 `aiter_bytes()`를 읽었다.
+# 크기 카운터는 정상 동작했지만 버퍼 최대치가 "캡 + 청크 1개"이고, 그 1개가 작지 않다 — httpcore는
+# 원시 본문을 64KB씩 읽고 deflate는 최대 ~1029:1로 부푼다. 실측 결과 청크 하나가 67,395,880바이트,
+# 요청 1건의 tracemalloc peak 148.6MB였다(프로세스 maxrss 437MB). 캡을 낮춰도 이 항은 그대로 남는다
+# (캡과 무관하게 청크 1개가 지배). 그래서 원시 스트림을 읽고 압축 해제를 스텝 단위로 자른다.
+# 이는 가드의 **강화**다 (캡·경고·charset 화이트리스트·데드라인은 그대로, 완화 없음).
+# Output bound (bytes) for a single decompression step. `zlib.decompressobj().decompress(data,
+# max_length=...)` never produces more than this at once, so one step's extra memory is bounded
+# *independently of the compression ratio*.
+# Why it is needed (adversarial review F4, 2026-08-04): the old implementation read `aiter_bytes()`, which
+# hands over chunks httpx has already decompressed. The size counter worked, but peak buffering was
+# "cap + one chunk" and one chunk is not small - httpcore reads the raw body 64KB at a time and deflate
+# inflates by up to ~1029:1. A single measured chunk was 67,395,880 bytes with a 148.6MB tracemalloc peak
+# for one request (process maxrss 437MB). Lowering the cap does not help: that term dominates at any cap.
+# Hence the raw stream is read and the inflation is sliced into steps. This *strengthens* the guard - the
+# cap, the warning, the charset whitelist and the deadline all stay exactly as they were.
+DECOMPRESS_STEP = 65_536
+
+# 스텝 상한을 걸 수 있는 content-encoding 값 / content-encoding values whose inflation can be bounded
+IDENTITY_ENCODINGS = {"", "identity"}
+GZIP_ENCODINGS = {"gzip", "x-gzip"}
+DEFLATE_ENCODINGS = {"deflate"}
 
 
 # ---------------------------------------------------------------------------
@@ -539,9 +567,60 @@ async def _is_safe_url(url: str) -> bool:
     return True
 
 
+class _BoundedInflater:
+    """
+    응답 본문을 `DECOMPRESS_STEP` 단위로 압축 해제하는 상태 기계 / A state machine inflating a body in `DECOMPRESS_STEP` steps.
+
+    `zlib.decompressobj.decompress(data, max_length)`는 출력이 상한에 닿으면 멈추고 **남은 입력**을
+    `unconsumed_tail`에 남긴다. 그 꼬리를 다음 스텝의 입력으로 되먹이면, 원시 청크가 얼마나 부풀든
+    한 번의 해제가 만드는 바이트는 상한 이하로 유지된다 (F4의 핵심).
+    `zlib.decompressobj.decompress(data, max_length)` stops once the output reaches the bound and leaves the
+    *remaining input* in `unconsumed_tail`. Feeding that tail back as the next step's input keeps any single
+    inflation at or below the bound, no matter how much the raw chunk expands - the heart of the F4 fix.
+    """
+
+    def __init__(self, encoding: str) -> None:
+        self._gzip = encoding in GZIP_ENCODINGS
+        self._zobj: Optional[Any] = None   # 첫 청크를 봐야 wbits를 정할 수 있다 / wbits needs the first chunk
+
+    def feed(self, data: bytes) -> Iterator[bytes]:
+        """원시 청크 1개를 상한 이하 조각들로 풀어 낸다 / Inflate one raw chunk into pieces of at most `DECOMPRESS_STEP`."""
+        if self._zobj is None:
+            self._zobj = zlib.decompressobj(self._wbits(data))
+        while data:
+            piece = self._zobj.decompress(data, DECOMPRESS_STEP)
+            if not piece:
+                # 출력이 없다 = 입력이 모두 내부 상태로 들어갔다 (헤더/부분 블록) -> 다음 청크를 기다린다
+                # No output means the input went entirely into internal state (header or partial block)
+                return
+            yield piece
+            # 상한에 걸려 남은 **입력**이 다음 스텝의 입력이 된다 / the input left over by the bound feeds the next step
+            data = self._zobj.unconsumed_tail
+
+    def _wbits(self, first_chunk: bytes) -> int:
+        """
+        첫 청크로 zlib 창 크기를 정한다 / Pick the zlib window size from the first chunk.
+
+        deflate는 실사용에서 zlib 래퍼(RFC 1950)와 헤더 없는 raw(RFC 1951)가 모두 돌아다니므로 첫 2바이트의
+        zlib 헤더 검사식으로 고른다. httpx처럼 "zlib으로 시도하고 실패하면 raw로 재시도"는 스텝 단위
+        해제에서 성립하지 않는다 - 이미 내보낸 조각을 되돌릴 수 없다.
+        Real-world `deflate` arrives both zlib-wrapped (RFC 1950) and header-less (RFC 1951), so the zlib
+        header check on the first two bytes decides. httpx's "try zlib, retry raw on error" cannot work with
+        stepped inflation, because pieces already emitted cannot be taken back.
+        """
+        if self._gzip:
+            return 16 + zlib.MAX_WBITS       # gzip 헤더 / gzip header
+        header_ok = (
+            len(first_chunk) >= 2
+            and first_chunk[0] & 0x0F == 8                          # CM = 8 (deflate)
+            and ((first_chunk[0] << 8) + first_chunk[1]) % 31 == 0   # FCHECK
+        )
+        return zlib.MAX_WBITS if header_ok else -zlib.MAX_WBITS
+
+
 async def _limited_text(response: httpx.Response, url: str) -> str:
     """
-    크기 상한을 적용하며 본문을 스트리밍으로 읽어 문자열로 / Stream the body under the size cap and decode it.
+    크기·메모리 상한을 적용하며 본문을 스트리밍으로 읽어 문자열로 / Stream the body under the size and memory bounds, then decode it.
 
     본문을 한 번에 메모리에 올리지 않는다(`response.text`/`.read()` 금지): 압축 해제 폭탄이면
     선언된 content-length는 압축 크기라서 상한 검사를 통과하고, 본문 전체를 버퍼링하는 순간
@@ -558,27 +637,62 @@ async def _limited_text(response: httpx.Response, url: str) -> str:
     while the same page sent chunked was truncated and processed. The streaming counter below is the
     whole defense.
 
-    버퍼링 상한은 "상한 + 마지막 청크 1개"다. 압축을 요청하지 않으므로(`IDENTITY_ENCODING`) 보통
-    청크는 네트워크 청크 크기지만, 오리진이 identity를 무시하면 그 1개 청크가 압축 해제분만큼
-    커질 수 있다 - 그래도 무한이 아니라 한 청크로 묶인다.
-    Peak buffering is "the cap plus one final chunk". Compression is not requested
-    (`IDENTITY_ENCODING`), so a chunk is normally a network-sized read; if an origin ignores that, the one
-    trailing chunk can be as large as its decompressed expansion - bounded to a single chunk, not unbounded.
+    버퍼링 상한은 "상한 + 압축 해제 스텝 1개"다 (2026-08-04 리뷰 F4로 강화). 그래서 httpx가 풀어 준
+    `aiter_bytes()`가 아니라 **원시** 스트림 `aiter_raw()`를 읽고, 압축 해제를 `DECOMPRESS_STEP`
+    단위로 잘라 우리가 수행한다 - 옛 경로의 버퍼 상한은 "상한 + 청크 1개"였고 그 1개가 원시 64KB
+    읽기의 압축 해제분(최대 ~1029:1, 실측 67MB)이었다. 상한을 낮춰도 남는 항이라 캡만으로는 못 막는다.
+    Peak buffering is "the cap plus one decompression step" (strengthened by review F4, 2026-08-04). That is
+    why the *raw* stream (`aiter_raw()`) is read instead of httpx's already-decompressed `aiter_bytes()`, and
+    the inflation is done here in `DECOMPRESS_STEP` slices: the old path's bound was "cap plus one chunk",
+    where one chunk was a raw 64KB read's decompressed expansion (up to ~1029:1, 67MB measured) - a term the
+    cap cannot bound at any value.
+
+    스텝 상한을 걸 수 없는 코덱(brotli/zstd 등)은 무한 폴백 대신 거부한다: 스트리밍 디코더에 출력
+    상한 인자가 없으므로 한 번의 해제가 압축률만큼 부풀 수 있다 (= F4가 고친 형태 그대로).
+    기사 1건을 잃는 것이 워커 메모리를 잃는 것보다 낫다.
+    A codec whose steps cannot be bounded (brotli, zstd, ...) is refused rather than decoded unbounded: their
+    streaming decoders take no output bound, so one inflate can expand by the full ratio - exactly the shape
+    F4 fixed. Losing one article beats losing the worker's memory.
 
     Returns:
-        상한까지의 본문 문자열 (초과분은 잘리고 `article_truncated`로 남는다).
-        The body text up to the cap; any excess is cut and logged as `article_truncated`.
+        상한까지의 본문 문자열 (초과분은 잘리고 `article_truncated`로 남는다). 처리할 수 없는
+        content-encoding이면 `article_encoding_unsupported` 경고 후 "".
+        The body text up to the cap; any excess is cut and logged as `article_truncated`. An unusable
+        content-encoding warns as `article_encoding_unsupported` and yields "".
     """
+    encoding = (response.headers.get("content-encoding") or "").strip().lower()
+    if encoding in IDENTITY_ENCODINGS:
+        inflater = None      # 원시 바이트가 그대로 본문이다 / the raw bytes are the body
+    elif encoding in GZIP_ENCODINGS or encoding in DEFLATE_ENCODINGS:
+        inflater = _BoundedInflater(encoding)
+    else:
+        _warn("article_encoding_unsupported", url=url, encoding=encoding)
+        return ""
+
     chunks: list = []
     total = 0
-    async for chunk in response.aiter_bytes():
-        chunks.append(chunk)
-        total += len(chunk)
-        if total > MAX_ARTICLE_SIZE:
-            _warn("article_truncated", url=url, read_bytes=total)
+    truncated = False
+    # `aiter_raw()`는 압축을 풀지 않는다 - 해제는 위 스텝 상한 아래에서 이루어진다 (`aiter_bytes()` 금지)
+    # `aiter_raw()` performs no decoding; inflation happens under the step bound above (never `aiter_bytes()`)
+    async for raw in response.aiter_raw():
+        for piece in (inflater.feed(raw) if inflater is not None else (raw,)):
+            chunks.append(piece)
+            total += len(piece)
+            if total > MAX_ARTICLE_SIZE:
+                truncated = True
+                break
+        if truncated:
             break
 
-    body = b"".join(chunks)[:MAX_ARTICLE_SIZE]
+    if truncated:
+        _warn("article_truncated", url=url, read_bytes=total)
+
+    body = b"".join(chunks)
+    # 조각 리스트를 즉시 놓아준다: join 결과와 이중으로 살아 있으면 peak가 캡의 2배가 된다
+    # Release the piece list at once: holding it alongside the joined copy doubles the peak
+    chunks.clear()
+    if len(body) > MAX_ARTICLE_SIZE:
+        body = body[:MAX_ARTICLE_SIZE]
     # charset은 화이트리스트를 거친다 (위 `SAFE_CHARSETS` 참조 — 적대적 charset의 O(n²) 코덱 차단)
     # The charset goes through the whitelist (`SAFE_CHARSETS` above — blocks hostile O(n²) codecs)
     charset = (response.charset_encoding or "utf-8").lower()

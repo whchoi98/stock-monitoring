@@ -17,9 +17,12 @@ import gzip
 import hashlib
 import json
 import logging
+import random
 import socket
 import threading
 import time
+import tracemalloc
+import zlib
 
 import httpx
 import pytest
@@ -82,14 +85,30 @@ def _numbered_rss(count: int, prefix: str = "Item") -> str:
     ])
 
 
+# 프로덕션의 원시 읽기 크기 - httpcore는 소켓에서 한 번에 64KB를 읽는다. 테스트 응답도 같은 크기로
+# 흘려 "청크 1개가 얼마나 커질 수 있는지"를 실제와 같게 관측한다 (2026-08-04 리뷰 F4).
+# The production raw read size: httpcore pulls 64KB from the socket at a time. Test responses stream at the
+# same size so "how large one chunk can get" is observed exactly as in production (review F4, 2026-08-04).
+PRODUCTION_READ_SIZE = 65_536
+
+
 def _resp(text: str = "", status_code: int = 200, headers=None) -> httpx.Response:
     """
     고정 본문 응답 (진짜 `httpx.Response`) / A fixed-body response (a real `httpx.Response`).
 
     명시한 헤더는 그대로 유지된다 (예: 거짓 `content-length`로 크기 가드를 시험한다).
     Explicit headers are preserved as given (e.g. a lying `content-length` to exercise the size guard).
+
+    본문은 반드시 **스트림**으로 준다 (`content=`/`text=` 금지): httpx는 `content=`를 받은 응답을
+    생성 시점에 전부 읽어 `_content`에 담아버리므로, 그런 응답은 프로덕션이 실제로 타는 경로
+    (`aiter_raw()` = 원시 스트림)를 쓸 수 없고 압축 해제도 이미 끝나 있다. 스트림으로 주면 구현이
+    프로덕션과 같은 64KB 읽기를 실제로 수행한다.
+    The body is always given as a **stream** (never `content=`/`text=`): httpx reads a `content=` response
+    in full at construction time into `_content`, so such a response cannot exercise the path production
+    actually takes (`aiter_raw()`, the raw stream) and arrives already decompressed. A stream makes the
+    implementation perform the same 64KB reads it does in production.
     """
-    return httpx.Response(status_code, text=text, headers=headers)
+    return _raw_resp(text.encode(), status_code=status_code, headers=headers)
 
 
 class _ChunkStream(httpx.AsyncByteStream):
@@ -120,6 +139,12 @@ class _ChunkStream(httpx.AsyncByteStream):
 def _streamed(stream: _ChunkStream, headers=None, status_code: int = 200) -> httpx.Response:
     """청크 스트림을 본문으로 갖는 응답 / A response whose body is a chunked stream."""
     return httpx.Response(status_code, headers=headers, stream=stream)
+
+
+def _raw_resp(payload: bytes, headers=None, status_code: int = 200) -> httpx.Response:
+    """원시 바이트를 프로덕션 읽기 크기로 흘리는 응답 / A response streaming raw bytes at production's read size."""
+    return _streamed(_ChunkStream(payload, chunk_size=PRODUCTION_READ_SIZE),
+                     headers=headers, status_code=status_code)
 
 
 def _patch_transport(monkeypatch, routes):
@@ -1063,10 +1088,8 @@ async def test_fetch_article_content_ignores_a_hostile_charset(monkeypatch, capl
     filler = "x" * 262_144   # 구 캡 크기에서도 punycode는 ~2.3s — 1초 상한이 회귀를 명확히 잡는다
     html = f"<article><p>{paragraph}</p></article><!--{filler}-->"
     _patch_transport(monkeypatch, {
-        ARTICLE_URL: httpx.Response(
-            200, content=html.encode(),
-            headers={"content-type": "text/html; charset=punycode"},
-        ),
+        ARTICLE_URL: _raw_resp(html.encode(),
+                               headers={"content-type": "text/html; charset=punycode"}),
     })
 
     started = time.perf_counter()
@@ -1093,10 +1116,8 @@ async def test_fetch_article_content_decodes_common_legacy_charsets(monkeypatch)
     paragraph = "It’s a body with a curly quote that must survive decoding intact."
     html = f"<article><p>{paragraph}</p></article>"
     _patch_transport(monkeypatch, {
-        ARTICLE_URL: httpx.Response(
-            200, content=html.encode("windows-1252"),
-            headers={"content-type": "text/html; charset=windows-1252"},
-        ),
+        ARTICLE_URL: _raw_resp(html.encode("windows-1252"),
+                               headers={"content-type": "text/html; charset=windows-1252"}),
     })
 
     assert await news.fetch_article_content(ARTICLE_URL) == paragraph
@@ -1226,41 +1247,191 @@ async def test_fetch_article_content_requests_identity_encoding(monkeypatch):
     assert [c["accept_encoding"] for c in calls] == ["identity"]
 
 
+# 폭탄은 프로덕션과 같은 `PRODUCTION_READ_SIZE`(64KB) 청크로 흘린다. 옛 1024B 청크는 청크 하나가
+# 부풀 수 있는 최대치를 64분의 1로 축소해, "청크 1개의 압축 해제분"이라는 실제 최악을 관측하지
+# 못했다 (2026-08-04 리뷰 F4).
+# The bomb streams at production's `PRODUCTION_READ_SIZE` (64KB) chunks. The old 1024B chunk shrank the
+# worst case a single chunk can inflate to by 64x and so never observed the real peak, "one chunk's
+# decompressed expansion" (review F4, 2026-08-04).
+#
+# 폭탄 규모 - 압축 본문이 원시 읽기 여러 개에 걸쳐야 "조기에 끊었다"가 관측된다. 'x' 연속만으로는
+# 20MB가 ~20KB(1000:1)로 압축돼 읽기 1개에 다 들어가므로, 비압축성 꼬리를 붙여 압축 본문을 ~220KB로
+# 만든다 (첫 읽기 1개가 20MB로 부풀고, 뒤의 3개는 읽히지 않아야 한다).
+# Bomb shape: the compressed body must span several raw reads for "stopped early" to be observable.
+# An 'x' run alone compresses 20MB into ~20KB (1000:1), which fits in one read, so an incompressible tail
+# pads the compressed body to ~220KB: the first read inflates to 20MB and the other three must go unread.
+BOMB_INFLATED_BYTES = 20_000_000
+BOMB_INCOMPRESSIBLE_TAIL = 200_000
+
+# peak 메모리 상한 - 캡의 4배. 근거: 가드가 동작하면 동시에 살아 있는 큰 객체는 압축률과 무관하게
+# (a) 조각 리스트 ~캡, (b) `b"".join` 결과 ~캡, (c) 디코드된 str ~캡 셋뿐이고, 여기에 스텝 1개
+# (`DECOMPRESS_STEP`, 64KB)와 여유를 더해도 4배 안이다. 실측(2026-08-04): 스텝 상한 구현 4.59MB
+# = 캡의 2.19배이고, 폭탄을 20MB에서 67MB로 키워도 **같은 값**이다(= 압축률에 비례하는 항이 없다).
+# 반대로 청크 하나를 통째로 압축 해제하는 구현은 첫 64KB 읽기가 20MB로 부풀어 51MB = 24.3배였다.
+# 상한 4배는 실측(2.19배)에 1.8배 여유를 두면서 회귀(24.3배)를 확실히 잡는 지점이다.
+# Peak-memory bound: 4x the cap. Rationale - when the guard holds, the only large live objects are
+# (a) the piece list ~cap, (b) the `b"".join` result ~cap and (c) the decoded str ~cap, all independent of
+# the compression ratio; one decompression step (`DECOMPRESS_STEP`, 64KB) plus slack still fits under 4x.
+# Measured 2026-08-04: the stepped implementation peaks at 4.59MB = 2.19x the cap, and growing the bomb
+# from 20MB to 67MB leaves that *unchanged* (no term scales with the ratio), whereas inflating a whole
+# chunk at once peaked at 51MB = 24.3x, since the first 64KB read expanded to 20MB. 4x sits at 1.8x
+# headroom over the measurement while still catching the regression at 24.3x.
+PEAK_MEMORY_LIMIT = 4 * news.MAX_ARTICLE_SIZE
+
+
+def _gzip_bomb() -> bytes:
+    """상한 이내로 선언되지만 20MB로 부푸는 gzip 본문 / A gzip body declared within the cap that inflates to 20MB."""
+    tail = random.Random(0).randbytes(BOMB_INCOMPRESSIBLE_TAIL)   # 고정 시드 = 재현 가능 / fixed seed, reproducible
+    return gzip.compress(f"<p>{KEPT_PARAGRAPH}</p>".encode() + b"x" * BOMB_INFLATED_BYTES + tail)
+
+
 async def test_fetch_article_content_survives_a_gzip_decompression_bomb(monkeypatch, caplog):
     """
-    압축 해제 폭탄이 크기 상한을 우회하지 못한다 / A decompression bomb cannot bypass the size cap.
+    압축 해제 폭탄이 크기 상한도, 메모리 상한도 우회하지 못한다 / A decompression bomb bypasses neither the size cap nor the memory bound.
 
-    20KB 남짓의 gzip 본문이 20MB로 부풀지만, 상한 검사는 **압축 해제된** 바이트를 세므로 첫 청크에서
-    끊긴다. 정직한 content-length(압축 크기 = 상한 이내)는 사전 필터를 통과하기 때문에, 이 방어선은
-    스트리밍 카운터뿐이다.
-    A ~20KB gzip body inflates to 20MB, but the cap counts *decompressed* bytes and so breaks on the first
-    chunk. The honest content-length (the compressed size, within the cap) sails through the pre-filter,
-    which leaves the streaming counter as the only defense.
+    220KB 남짓의 gzip 본문이 20MB로 부풀지만, 상한 검사는 **압축 해제된** 바이트를 세므로 첫 읽기
+    안에서 끊긴다. 정직한 content-length(압축 크기 = 상한 이내)는 사전 필터를 통과하기 때문에,
+    이 방어선은 스트리밍 카운터뿐이다.
+    A ~220KB gzip body inflates to 20MB, but the cap counts *decompressed* bytes and so breaks inside the
+    first read. The honest content-length (the compressed size, within the cap) sails through the
+    pre-filter, which leaves the streaming counter as the only defense.
+
+    2026-08-04 리뷰 F4: 카운터만으로는 부족했다. 압축 해제가 **청크 단위**면 버퍼 최대치가
+    "캡 + 청크 1개"이고, 프로덕션 청크는 원시 64KB 읽기가 최대 ~1029:1로 부푼 값이다 —
+    읽기 1개가 67MB(실측 tracemalloc peak 148.6MB)가 될 수 있었다. 그래서 이 테스트는
+    (1) 프로덕션과 같은 64KB 청크를 쓰고 (2) peak 메모리를 함께 단정한다.
+    Review F4 (2026-08-04): the counter alone was not enough. When decompression happens *per chunk*, peak
+    buffering is "cap + one chunk", and a production chunk is a raw 64KB read inflated by up to ~1029:1 -
+    a single read measured 67MB (148.6MB tracemalloc peak). Hence this test (1) uses production's 64KB
+    chunks and (2) asserts the peak memory alongside the cap.
     """
     _patch_dns(monkeypatch)
-    bomb = gzip.compress(f"<p>{KEPT_PARAGRAPH}</p>".encode() + b"x" * 20_000_000)
-    stream = _ChunkStream(bomb, chunk_size=1024)
+    bomb = _gzip_bomb()
+    stream = _ChunkStream(bomb, chunk_size=PRODUCTION_READ_SIZE)
     _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream, headers={
         "content-encoding": "gzip",
         "content-length": str(len(bomb)),
         "content-type": "text/html; charset=utf-8",
     })})
 
-    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
-        content = await news.fetch_article_content(ARTICLE_URL)
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+            content = await news.fetch_article_content(ARTICLE_URL)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
 
     assert len(bomb) < news.MAX_ARTICLE_SIZE          # 선언 크기는 상한 이내다 / the declared size is within the cap
     assert content == KEPT_PARAGRAPH
     assert "xxx" not in content
-    # 압축 본문을 조기에 끊는다: 'x' 연속은 ~1000:1로 풀리므로 1KB 압축 청크 하나가 ~1MB가 되고,
-    # 압축 해제 카운터가 상한(2MB)을 넘긴 직후 읽기가 멈춘다 (전체 ~20청크 중 2-3개).
-    # 이 수는 상한에 비례한다 — 상한 값에 결합된 매직 넘버를 두지 않는다 (2026-08-03, 상한 2MB 상향 때 정정).
-    # The compressed body is cut early: an 'x' run inflates ~1000:1, so one 1KB compressed chunk becomes
-    # ~1MB and the read stops right after the decompressed counter crosses the cap (2-3 of ~20 chunks).
-    # The count scales with the cap — no magic number tied to the cap's value (corrected 2026-08-03).
-    assert stream.chunks_pulled <= 4
+    assert peak < PEAK_MEMORY_LIMIT, (
+        f"peak {peak:,}B = {peak / news.MAX_ARTICLE_SIZE:.1f}x the cap - one decompression step is "
+        f"not bounded (the inflation ratio is reaching memory)"
+    )
+    # 압축 본문을 조기에 끊는다: 첫 원시 읽기 하나가 이미 캡을 넘기므로 나머지는 읽지 않는다.
+    # 이 수는 상한에 비례한다 — 상한 값에 결합된 매직 넘버를 두지 않는다.
+    # The compressed body is cut early: the first raw read alone crosses the cap, so the rest goes unread.
+    # The count scales with the cap - no magic number tied to the cap's value.
+    assert stream.chunks_pulled == 1
     assert stream.chunks_pulled < stream.chunk_total
     assert any(p.get("event") == "article_truncated" for p in _warning_payloads(caplog))
+
+
+def _encode_body(html: str, label: str) -> bytes:
+    """라벨에 맞춰 본문을 인코딩 / Encode the body according to the label."""
+    if label == "gzip":
+        return gzip.compress(html.encode())
+    if label in ("deflate-zlib", "deflate-raw"):
+        # deflate는 실사용에서 zlib 래퍼(RFC 1950)와 헤더 없는 raw(RFC 1951)가 모두 돌아다닌다
+        # Real-world `deflate` appears both zlib-wrapped (RFC 1950) and header-less/raw (RFC 1951)
+        wbits = zlib.MAX_WBITS if label == "deflate-zlib" else -zlib.MAX_WBITS
+        compressor = zlib.compressobj(9, zlib.DEFLATED, wbits)
+        return compressor.compress(html.encode()) + compressor.flush()
+    return html.encode()
+
+
+@pytest.mark.parametrize("label,header", [
+    ("identity", "identity"),
+    ("gzip", "gzip"),
+    ("gzip", "x-gzip"),
+    ("deflate-zlib", "deflate"),
+    ("deflate-raw", "deflate"),
+])
+async def test_fetch_article_content_decodes_bounded_content_encodings(monkeypatch, label, header):
+    """
+    오리진이 identity 요청을 무시해도 본문은 정상 추출된다 / The body still extracts when an origin ignores the identity request.
+
+    `Accept-Encoding: identity`를 보내도 이를 무시하는 오리진이 있으므로 gzip/deflate는 여전히
+    처리해야 한다. 압축 해제는 우리가 직접(스텝 상한과 함께) 수행하므로, 이 테스트는 그 경로가
+    실제로 올바르게 디코드하는지를 고정한다 — 상한을 걸면서 본문을 깨뜨리면 여기서 잡힌다.
+    Some origins ignore `Accept-Encoding: identity`, so gzip and deflate must still be handled. The
+    inflation is done here (under a per-step bound), so this test pins that the path decodes correctly:
+    bounding the steps while corrupting the body would fail right here.
+    """
+    _patch_dns(monkeypatch)
+    paragraph = "Body that must survive bounded decompression of the response stream."
+    html = f"<article><p>{paragraph}</p></article>"
+    body = _encode_body(html, label)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _raw_resp(body, headers={
+        "content-encoding": header,
+        "content-type": "text/html; charset=utf-8",
+    })})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == paragraph
+
+
+@pytest.mark.parametrize("encoding", ["br", "zstd", "gzip, br"])
+async def test_fetch_article_content_refuses_unboundable_content_encoding(monkeypatch, caplog, encoding):
+    """
+    출력 상한을 걸 수 없는 코덱은 디코드하지 않고 거부한다 / A codec whose output cannot be bounded is refused, not decoded.
+
+    zlib(gzip/deflate)만 `decompress(data, max_length=...)`로 한 스텝의 출력 크기를 못박을 수 있다.
+    brotli/zstd는 스트리밍 디코더에 출력 상한 인자가 없어(설치돼 있더라도) 한 번의 해제가 압축률
+    그대로 부풀 수 있다 — 그것이 바로 F4에서 고친 형태다. 그러므로 무한 폴백 대신 경고 + ""로 닫는다
+    (기사 1건을 잃는 것이 워커 메모리를 잃는 것보다 낫다). 본문은 아예 읽지 않는다.
+    Only zlib (gzip/deflate) can pin one step's output via `decompress(data, max_length=...)`. brotli and
+    zstd expose no output bound on their streaming decoders (even when installed), so a single inflate can
+    expand by the full ratio - exactly the shape F4 fixed. They are therefore closed off with a warning and
+    "" instead of an unbounded fallback (losing one article beats losing the worker's memory), and the body
+    is never read at all.
+    """
+    _patch_dns(monkeypatch)
+    stream = _ChunkStream(b"whatever the origin claims to have compressed", chunk_size=16)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _streamed(stream, headers={
+        "content-encoding": encoding,
+        "content-type": "text/html; charset=utf-8",
+    })})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert await news.fetch_article_content(ARTICLE_URL) == ""
+
+    assert stream.chunks_pulled == 0     # 거부는 읽기 전에 일어난다 / the refusal happens before any read
+    assert any(p.get("event") == "article_encoding_unsupported" and p.get("encoding") == encoding
+               for p in _warning_payloads(caplog))
+
+
+async def test_fetch_article_content_warns_when_a_declared_encoding_does_not_decode(monkeypatch, caplog):
+    """
+    선언한 인코딩과 본문이 어긋나면 경고 + "" (깨진 바이트를 본문으로 넘기지 않는다).
+    A body that contradicts its declared encoding warns and yields "" - broken bytes never pass as content.
+
+    압축 해제를 httpx에서 우리 코드로 옮겼으므로 해제 실패 처리도 우리 몫이다: `zlib.error`는
+    `_fetch_hop`의 실패 경로로 올라가 `article_fetch_failed`로 기록되고 ""가 된다 (조용한 실패 금지).
+    Inflation moved from httpx into this module, so its failure handling moved too: a `zlib.error` reaches
+    `_fetch_hop`'s failure path, is logged as `article_fetch_failed` and yields "" (no silent failures).
+    """
+    _patch_dns(monkeypatch)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _raw_resp(
+        b"<article><p>Plain text that was never actually gzip compressed at all.</p></article>",
+        headers={"content-encoding": "gzip", "content-type": "text/html; charset=utf-8"},
+    )})
+
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        assert await news.fetch_article_content(ARTICLE_URL) == ""
+
+    assert any(p.get("event") == "article_fetch_failed" for p in _warning_payloads(caplog))
 
 
 async def test_fetch_article_content_declared_length_within_cap_is_kept(monkeypatch):
