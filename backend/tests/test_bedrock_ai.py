@@ -649,7 +649,14 @@ async def test_stream_invoke_logs_item_dropped_when_queue_put_fails(monkeypatch,
 # ---------------------------------------------------------------------------
 
 async def test_analyze_stock_stream_sends_the_stock_prompt_and_token_cap(stream_client):
-    """종목 스트리밍: `_stock_prompt` 그대로 + maxTokens 1024 / Stock stream: the assembled prompt, 1024 maxTokens."""
+    """
+    종목 스트리밍: `_stock_prompt` 그대로 + maxTokens 1024 / Stock stream: the assembled prompt, 1024 maxTokens.
+
+    기사 상한이 4096으로 올라간 뒤에도 1024로 **남아 있다** - 상한을 시나리오별로 분리해 두는 것이
+    `ai_stream_truncated` 신호와 비용 측정을 의미 있게 유지한다 (일률 상향 금지).
+    It **stays** 1024 even after the article cap rose to 4096: keeping the caps per-scenario is what keeps
+    the `ai_stream_truncated` signal and the cost accounting meaningful (no blanket raise).
+    """
     fake = stream_client([_delta("s"), _stop("end_turn")])
 
     assert await _drain(analyze_stock_stream(**STOCK_ARGS)) == ["s"]
@@ -661,13 +668,23 @@ async def test_analyze_stock_stream_sends_the_stock_prompt_and_token_cap(stream_
 
 @pytest.mark.parametrize("is_korean", [True, False])
 async def test_analyze_article_stream_sends_the_article_prompt_and_token_cap(stream_client, is_korean):
-    """기사 스트리밍: `_article_prompt` 그대로 + maxTokens 2048 / Article stream: the assembled prompt, 2048 maxTokens."""
+    """
+    기사 스트리밍: `_article_prompt` 그대로 + maxTokens 4096 / Article stream: the assembled prompt, 4096 maxTokens.
+
+    4096은 2026-08-04 라이브 E2E에서 실측된 절단(`ai_stream_truncated`, stop_reason=max_tokens) 2건
+    이후의 사용자 승인값이다 - 상한을 다시 낮추면 긴 영문 기사의 번역+요약이 잘린 채 AI_TTL(6h)
+    동안 캐시된다. 종목 분석은 1024 그대로다 (짧은 한국어 코멘트라 여유가 충분하다).
+    4096 is the user-approved value adopted after two live truncations on 2026-08-04
+    (`ai_stream_truncated`, stop_reason=max_tokens): lowering the cap again would cache a clipped
+    translation+summary of a longer English article for AI_TTL (6h). The stock cap stays 1024, which is
+    ample for its short Korean commentary.
+    """
     fake = stream_client([_delta("a"), _stop("end_turn")])
 
     assert await _drain(analyze_article_stream("제목", "본문", is_korean)) == ["a"]
     assert _prompt_of(fake) == bedrock_ai._article_prompt("제목", "본문", is_korean)
     assert fake.calls[0]["inferenceConfig"] == {"maxTokens": bedrock_ai.ARTICLE_MAX_TOKENS}
-    assert bedrock_ai.ARTICLE_MAX_TOKENS == 2048
+    assert bedrock_ai.ARTICLE_MAX_TOKENS == 4096
 
 
 async def test_stock_stream_bad_input_raises_call_error_without_calling_model(stream_client, caplog):

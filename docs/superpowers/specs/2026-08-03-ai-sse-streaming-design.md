@@ -23,6 +23,10 @@
 - `max_tokens` 시나리오 분리 유지: `ARTICLE_MAX_TOKENS = 2048`, `STOCK_MAX_TOKENS = 1024`.
   일률 상한을 두지 않는 이유: (a) 응답 길이 예측 가능 (b) Bedrock 비용 측정이 깨끗
   (c) `stop_reason == "max_tokens"`가 진짜 절단 시그널이 된다.
+  (정정 2026-08-04, 사용자 승인: `ARTICLE_MAX_TOKENS`는 **4096**. 배포 후 라이브 E2E에서 실제 기사
+  분석 2건이 `ai_stream_truncated`(stop_reason=max_tokens)로 잘렸다 — 긴 영문 기사의 번역+요약이
+  2048에 들어가지 않고, 잘린 결과가 AI_TTL(6h) 동안 캐시된다. 시나리오 분리 원칙과
+  `STOCK_MAX_TOKENS = 1024`는 그대로다. 아래 §범위 제외의 "토큰 상한 변경"은 이 정정으로 해제된다.)
 - **`stop_reason` 로깅**: `messageStop`의 stopReason이 `max_tokens`면 `_warn`(단일 라인 JSON)으로
   기록 — 절단 감지 운영 시그널.
 - 기존 타입 예외(`BedrockUnavailableError`/`BedrockCallError`) 매핑 유지. 스트림 도중 예외는

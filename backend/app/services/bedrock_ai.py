@@ -33,8 +33,22 @@ from app.core import config
 
 logger = logging.getLogger(__name__)
 
-# 기사 분석 / 종목 분석 응답 토큰 상한 (TUI 값 유지) / Response token caps (kept from the TUI)
-ARTICLE_MAX_TOKENS = 2048
+# 기사 분석 / 종목 분석 응답 토큰 상한 / Response token caps for the article and stock analyses.
+#
+# 기사 상한은 2026-08-04 사용자 승인으로 2048 -> 4096으로 올렸다. 라이브 E2E에서 실제 기사 분석 2건이
+# `ai_stream_truncated`(stop_reason=max_tokens)로 잘렸다 - 긴 영문 기사의 번역+요약 전문은 2048에
+# 들어가지 않으며, 잘린 결과가 그대로 AI_TTL(6h) 동안 캐시된다(사용자는 재시도로도 복구할 수 없다).
+# 4096은 여유를 두 배로 벌어 준다. SSE 전환으로 wall-clock 우려는 사라졌고(델타가 연결을 살려 둔다),
+# 비용은 실제로 더 필요한 기사에서만 늘어난다. 종목 상한은 1024 그대로다 - 짧은 한국어 코멘트라
+# 절단이 관측되지 않았고, 시나리오별 상한 분리가 `ai_stream_truncated` 신호의 의미를 지켜 준다.
+# The article cap was raised 2048 -> 4096 with user approval on 2026-08-04: a live end-to-end run had two
+# real article analyses cut short by `ai_stream_truncated` (stop_reason=max_tokens). A full
+# translation+summary of a longer English article does not fit in 2048, and the truncated output is then
+# cached for AI_TTL (6h), so a retry cannot repair it. 4096 doubles the headroom. SSE removed the
+# wall-clock concern (the deltas keep the connection alive), and cost only grows for the articles that
+# genuinely need the room. The stock cap stays 1024: no truncation was ever observed for its short Korean
+# commentary, and keeping the two caps separate is what gives `ai_stream_truncated` its meaning.
+ARTICLE_MAX_TOKENS = 4096
 STOCK_MAX_TOKENS = 1024
 # 프롬프트에 담는 기사 본문 최대 길이 / Maximum article body length carried in the prompt
 ARTICLE_CONTENT_LIMIT = 6000
