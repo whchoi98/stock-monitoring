@@ -1017,10 +1017,21 @@ a {
   font-size: 13px;
 }
 
+/*
+ * `overflow-wrap: anywhere`가 없으면 끊을 수 없는 셀 내용(URL, `1,234,567,890원` 같은 긴 숫자열)이 표의
+ * 최소 너비를 밀어올려 390px 화면에서 **페이지 전체가 가로로 밀린다** (실측: docScrollWidth 508 / 420 > 390).
+ * 이 속성은 최소 내용 너비 계산에까지 적용되므로 표가 카드 안에 갇힌다 — 모델 출력이라 셀 내용을 통제할 수 없는
+ * 자리에서 필요한 방어선이다.
+ * Without `overflow-wrap: anywhere` an unbreakable cell (a URL, a long digit run like `1,234,567,890원`) raises
+ * the table's minimum width and **pushes the whole page sideways** at 390px (measured: docScrollWidth 508 / 420
+ * against a 390 viewport). The property applies to min-content sizing too, so the table stays inside the card -
+ * the guard rail this spot needs, since the cells are model output and cannot be constrained upstream.
+ */
 .markdown th,
 .markdown td {
   padding: 6px 10px;
   border: 1px solid var(--bg);
+  overflow-wrap: anywhere;
   text-align: left;
 }
 
