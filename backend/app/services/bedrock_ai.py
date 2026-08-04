@@ -2,10 +2,8 @@
 Bedrock AI 서비스 - Claude 모델로 뉴스 기사 분석과 종목 분석을 수행
 Bedrock AI service - news article analysis and stock analysis via a Claude model.
 
-TUI(`$TUI/services/bedrock.py`) 포팅. 프롬프트와 invoke_model 요청 본문은 그대로 유지하고,
-서버 환경에 맞춰 세 가지만 바꿨다.
-Ported from the TUI module: the prompts and the invoke_model request bodies are kept as they
-were, with exactly three server-side changes.
+TUI(`$TUI/services/bedrock.py`) 포팅. 프롬프트는 그대로 유지하고, 서버 환경에 맞춰 세 가지만 바꿨다.
+Ported from the TUI module: the prompts are kept as they were, with exactly three server-side changes.
 
 1. 리전은 `config.BEDROCK_REGION`(기본 `ap-northeast-2`) / The region comes from config (default ap-northeast-2).
 2. BEDROCK_API_KEY 분기 제거 — 자격 증명은 ECS Task Role이 제공한다 / No API-key branch: the ECS Task Role supplies credentials.
@@ -13,12 +11,12 @@ were, with exactly three server-side changes.
    (API 계층이 각각 503/500으로 매핑) / Failures raise typed errors instead of returning a message
    (the API layer maps them to 503/500).
 
-또한 SSE 스트리밍용으로 `converse_stream` 기반 프리미티브(`stream_invoke`)와 스트리밍 variant
-(`analyze_stock_stream`/`analyze_article_stream`)를 추가했다. 프롬프트 조립은 `_stock_prompt`/
-`_article_prompt`로 분리해 블로킹 경로와 문자열을 공유한다.
-For SSE streaming this module also exposes a `converse_stream` primitive (`stream_invoke`) plus the
-streaming variants; prompt assembly lives in `_stock_prompt`/`_article_prompt` so both paths share
-exactly the same strings.
+호출 프리미티브는 **`converse_stream`** 하나뿐이다(`stream_invoke`): 라우트가 SSE로 전환되면서
+블로킹 `invoke_model` 경로는 참조가 사라져 삭제했다. 프롬프트 조립은 `_stock_prompt`/`_article_prompt`에
+있고 두 스트리밍 variant(`analyze_stock_stream`/`analyze_article_stream`)가 그 문자열을 쓴다.
+There is exactly one call primitive, `stream_invoke` over **`converse_stream`**: once the routes moved to
+SSE the blocking `invoke_model` path had no callers left and was removed. Prompt assembly lives in
+`_stock_prompt`/`_article_prompt`, which the two streaming variants use.
 """
 from __future__ import annotations
 
@@ -38,8 +36,6 @@ logger = logging.getLogger(__name__)
 # 기사 분석 / 종목 분석 응답 토큰 상한 (TUI 값 유지) / Response token caps (kept from the TUI)
 ARTICLE_MAX_TOKENS = 2048
 STOCK_MAX_TOKENS = 1024
-# Bedrock의 Anthropic Messages API 버전 / Anthropic Messages API version on Bedrock
-ANTHROPIC_VERSION = "bedrock-2023-05-31"
 # 프롬프트에 담는 기사 본문 최대 길이 / Maximum article body length carried in the prompt
 ARTICLE_CONTENT_LIMIT = 6000
 # 프롬프트에 담는 최근 뉴스 제목 개수 / Number of recent news titles carried in the prompt
@@ -128,29 +124,6 @@ def _is_unavailable(exc: Exception) -> bool:
         code = exc.response.get("Error", {}).get("Code")
         return code in _UNAVAILABLE_ERROR_CODES
     return False
-
-
-def _invoke(prompt: str, max_tokens: int) -> str:
-    """모델을 호출하고 응답 텍스트를 반환 / Invoke the model and return the response text."""
-    client = _get_client()
-
-    body = json.dumps({
-        "anthropic_version": ANTHROPIC_VERSION,
-        "max_tokens": max_tokens,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-    })
-
-    response = client.invoke_model(
-        modelId=config.BEDROCK_MODEL_ID,
-        contentType="application/json",
-        accept="application/json",
-        body=body,
-    )
-
-    result = json.loads(response["body"].read())
-    return result["content"][0]["text"]
 
 
 def _raise_mapped(exc: Exception, event: str) -> NoReturn:
@@ -318,9 +291,10 @@ def _article_prompt(title: str, content: str, is_korean: bool) -> str:
     """
     기사 분석 프롬프트 조립 / Assemble the article-analysis prompt.
 
-    블로킹(`analyze_article`)과 스트리밍(`analyze_article_stream`)이 같은 문자열을 쓰도록 분리했다 —
-    두 경로의 분석 품질이 갈리면 안 된다.
-    Extracted so the blocking and streaming paths share one string: the two must not drift apart.
+    조립을 호출 프리미티브와 분리해 둔다 — 프롬프트는 이 함수 하나에만 있으므로 문구 변경이
+    스트리밍 경로 전체에 그대로 반영된다.
+    Assembly is kept apart from the call primitive: the prompt lives here alone, so a wording change
+    reaches the whole streaming path at once.
     """
     if is_korean:
         # 한국어 기사용 프롬프트: 요약, 분석, 투자 인사이트, 관련 종목 / Korean article prompt: summary, analysis, investment insights, related stocks
@@ -386,7 +360,7 @@ def _stock_prompt(
     """
     종목 분석 프롬프트 조립 / Assemble the stock-analysis prompt.
 
-    블로킹(`analyze_stock`)과 스트리밍(`analyze_stock_stream`)이 공유한다 / Shared by both paths.
+    `analyze_stock_stream`이 쓴다 / Used by `analyze_stock_stream`.
     잘못된 입력(예: `price=None`)은 여기서 TypeError로 터지고, 호출부가 `_raise_mapped`로 매핑한다.
     Bad input (e.g. `price=None`) raises TypeError here; callers map it via `_raise_mapped`.
     """
@@ -427,17 +401,17 @@ PER: {per_str}
 
 def analyze_stock_stream(**kwargs: Any) -> AsyncIterator[str]:
     """
-    종목 분석 스트리밍 variant / The streaming variant of analyze_stock.
+    종목 분석 스트림 / Stream a stock analysis.
 
-    인자는 `analyze_stock`과 동일(키워드 전용) / Same arguments as `analyze_stock` (keyword-only).
+    인자는 `_stock_prompt`와 동일(키워드 전용) / Same arguments as `_stock_prompt` (keyword-only).
 
     Raises:
         BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
         BedrockCallError: 그 외 호출 실패, 그리고 잘못된 입력으로 인한 조립 실패
             / any other failure, plus assembly failures from bad input.
     """
-    # 조립은 즉시(반복 시작 전에) 수행해 잘못된 입력이 기존 블로킹 경로와 같은 타입 예외로 나가게 한다
-    # Assembly runs eagerly (before iteration) so bad input leaves as the same typed error as before.
+    # 조립은 즉시(반복 시작 전에) 수행한다 — 잘못된 입력이 첫 델타를 기다리지 않고 곧바로 타입 예외로 나간다
+    # Assembly runs eagerly (before iteration) so bad input leaves as a typed error at once.
     try:
         prompt = _stock_prompt(**kwargs)
     except Exception as exc:
@@ -447,7 +421,7 @@ def analyze_stock_stream(**kwargs: Any) -> AsyncIterator[str]:
 
 def analyze_article_stream(title: str, content: str, is_korean: bool) -> AsyncIterator[str]:
     """
-    기사 분석 스트리밍 variant / The streaming variant of analyze_article.
+    기사 분석 스트림 / Stream an article analysis.
 
     Raises:
         BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
@@ -459,87 +433,3 @@ def analyze_article_stream(title: str, content: str, is_korean: bool) -> AsyncIt
     except Exception as exc:
         _raise_mapped(exc, "bedrock_article_analysis_error")
     return stream_invoke(prompt, ARTICLE_MAX_TOKENS)
-
-
-def analyze_article(title: str, content: str, is_korean: bool) -> str:
-    """
-    뉴스 기사를 AI로 분석 / Analyze a news article with the model.
-
-    한국어 기사는 요약·분석·인사이트를, 영문 기사는 한국어 번역까지 함께 요청한다.
-    Korean articles get summary/analysis/insights; English articles also get a Korean translation.
-
-    Args:
-        title: 기사 제목 / article title.
-        content: 기사 본문 (앞 6000자만 사용) / article body (only the first 6000 characters are used).
-        is_korean: 한국어 기사 여부 / whether the article is Korean.
-
-    Returns:
-        마크다운 분석 텍스트 / the markdown analysis text.
-
-    Raises:
-        BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
-        BedrockCallError: 그 외 호출·응답 실패, 그리고 잘못된 입력(예: `content=None`)으로 인한 조립 실패
-            / any other invoke or response failure, plus assembly failures from bad input (e.g. `content=None`).
-    """
-    # 프롬프트 조립도 try 안에 둔다 (TUI와 동일): 잘못된 입력이 포맷 단계에서 터져도 타입 있는 예외로 나간다
-    # Assembly stays inside the try (as in the TUI): bad input failing in a formatter still leaves typed.
-    try:
-        return _invoke(_article_prompt(title, content, is_korean), ARTICLE_MAX_TOKENS)
-    except Exception as exc:
-        _raise_mapped(exc, "bedrock_article_analysis_error")
-
-
-def analyze_stock(
-    symbol: str,
-    name: str,
-    price: float,
-    change_pct: float,
-    pe_ratio: Optional[float] = None,
-    week52_high: float = 0,
-    week52_low: float = 0,
-    sector: str = "",
-    market: str = "US",
-    news_titles: Optional[list] = None,
-) -> str:
-    """
-    종목을 AI로 분석 / Analyze a stock with the model.
-
-    Args:
-        symbol: yfinance 티커 / yfinance ticker.
-        name: 종목명 / stock name.
-        price: 현재가 / current price.
-        change_pct: 등락률(%) / change percentage.
-        pe_ratio: PER (없으면 N/A로 표기) / P/E ratio (rendered as N/A when missing).
-        week52_high: 52주 최고가 / 52-week high.
-        week52_low: 52주 최저가 / 52-week low.
-        sector: 섹터 / sector.
-        market: `US` 또는 `KR` / `US` or `KR`.
-        news_titles: 최근 뉴스 제목 (앞 5개만 사용) / recent news titles (only the first five are used).
-
-    Returns:
-        마크다운 분석 텍스트 / the markdown analysis text.
-
-    Raises:
-        BedrockUnavailableError: 자격 증명 없음 / 모델 접근 거부 / no credentials or access denied.
-        BedrockCallError: 그 외 호출·응답 실패, 그리고 잘못된 입력(예: `price=None`, `week52_high=None`)으로 인한 조립 실패
-            / any other invoke or response failure, plus assembly failures from bad input
-            (e.g. `price=None`, `week52_high=None`).
-    """
-    # 프롬프트 조립도 try 안에 둔다 (TUI와 동일): 잘못된 입력이 포맷 단계에서 터져도 타입 있는 예외로 나간다
-    # Assembly stays inside the try (as in the TUI): bad input failing in a formatter still leaves typed.
-    try:
-        prompt = _stock_prompt(
-            symbol=symbol,
-            name=name,
-            price=price,
-            change_pct=change_pct,
-            pe_ratio=pe_ratio,
-            week52_high=week52_high,
-            week52_low=week52_low,
-            sector=sector,
-            market=market,
-            news_titles=news_titles,
-        )
-        return _invoke(prompt, STOCK_MAX_TOKENS)
-    except Exception as exc:
-        _raise_mapped(exc, "bedrock_stock_analysis_error")

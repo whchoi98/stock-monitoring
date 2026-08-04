@@ -15,8 +15,13 @@ The limit precedes the cache, so even a cache hit spends budget: one IP cannot p
 Error bodies are always fixed strings: exception text can carry an AWS account, ARN or model id, so it
 goes to the server log only, never to the client.
 
-동기 함수(boto3, `analyze_*`)는 `asyncio.to_thread`로 감싼다 (이벤트 루프 블로킹 금지).
-The synchronous functions (boto3-backed `analyze_*`) run through `asyncio.to_thread`.
+두 엔드포인트는 `text/event-stream`으로 응답한다 (스펙 §2): `phase` -> `delta`* -> `final`. 첫 이벤트는
+즉시 나가고 델타마다 CloudFront idle 카운터가 리셋되므로 wall-clock 제약이 사라지며, `final`은 성공이든
+실패든 **항상** emit된다. 레이트리밋 429와 422 검증은 스트림 시작 전이라 기존 JSON 응답 그대로다.
+Both endpoints answer with `text/event-stream` (spec §2): `phase`, then deltas, then `final`. The first
+event leaves immediately and every delta resets the CloudFront idle counter, which removes the wall-clock
+ceiling, and a `final` is **always** emitted, success or failure. The 429 rate limit and 422 validation are
+decided before the stream starts, so both keep their existing JSON responses.
 """
 from __future__ import annotations
 
@@ -24,10 +29,10 @@ import asyncio
 import hashlib
 import json
 import logging
-from typing import Any, Awaitable, Callable, List, Literal, Optional, Tuple
+from typing import Any, AsyncIterator, Callable, List, Literal, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.api import deps, stocks
@@ -235,80 +240,205 @@ def rate_limited(request: Request) -> Optional[JSONResponse]:
 
 
 # ---------------------------------------------------------------------------
-# Bedrock 호출 + 결과 캐시 / Bedrock call and result cache
+# SSE 스트림 / SSE streaming
 # ---------------------------------------------------------------------------
 
-async def invoke_bedrock(
+# 팔로워 하트비트 간격(초) - CloudFront/ALB idle 카운터 리셋용. 테스트가 짧게 monkeypatch한다.
+# Follower heartbeat period (seconds), resetting the CloudFront/ALB idle counters; tests shrink it.
+HEARTBEAT_SECONDS = 5.0
+
+# 이벤트 이름 (스펙 §2 프로토콜 - 이 셋 외의 이벤트는 없다) / Event names; the protocol has no others
+EVENT_PHASE = "phase"
+EVENT_DELTA = "delta"
+EVENT_FINAL = "final"
+
+# phase 값 / phase values
+PHASE_FETCHING = "fetching"      # 기사 본문 조회 중 / fetching the article body
+PHASE_ANALYZING = "analyzing"    # Bedrock 스트림 진행 중 / the Bedrock stream is running
+PHASE_WAITING = "waiting"        # 같은 키의 선점자를 기다리는 중 / waiting on this key's leader
+
+# inflight Future 결과 태그 / Result tags on an in-flight registry future
+OUTCOME_OK = "ok"
+OUTCOME_ERROR = "error"
+
+# SSE 응답 헤더 - 캐시 금지 + 프록시 버퍼링 금지 (버퍼링되면 델타가 뭉쳐 스트리밍이 무의미해진다)
+# SSE response headers: never cached, never proxy-buffered (buffering would coalesce the deltas)
+SSE_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+
+
+def _sse(event: str, data: dict) -> bytes:
+    """SSE 프레임 하나 / One SSE frame."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+
+def get_inflight(request: Request) -> dict:
+    """
+    진행 중 스트림 레지스트리 (앱 단위, 첫 요청에서 생성) / The per-app in-flight stream registry.
+
+    키 -> Future(`(OUTCOME_OK, data, asOf)` 또는 `(OUTCOME_ERROR, detail, status)`). 같은 키의 두 번째
+    요청은 Bedrock을 다시 부르지 않고 이 Future를 기다린다 (블로킹 시절 `TieredCache`의 키별 락이 하던
+    비용 방어를, 스트림을 중계할 수 있는 형태로 옮긴 것이다). 선점자가 항상 finally에서 항목을
+    제거하므로 클라이언트 URL에서 파생되는 기사 키로도 무한히 자라지 않는다.
+    Maps key -> Future(...). A second request for one key waits on that future instead of calling Bedrock
+    again: the cost defense the tiered cache's per-key lock used to provide, reshaped so the outcome can
+    be relayed to a stream. The leader always pops its entry in a finally, so even article keys derived
+    from client URLs cannot grow this map without bound.
+    """
+    registry = getattr(request.app.state, "ai_inflight", None)
+    if registry is None:
+        registry = {}
+        request.app.state.ai_inflight = registry
+    return registry
+
+
+async def _bedrock_deltas(
     state: AppState,
     semaphore: asyncio.Semaphore,
-    call: Callable[[], str],
-) -> str:
+    make_stream: Callable[[], AsyncIterator[str]],
+) -> AsyncIterator[Tuple[str, dict]]:
     """
-    전역 동시 실행 제한 안에서 동기 Bedrock 함수를 실행 / Run a synchronous Bedrock function inside the global concurrency cap.
+    전역 동시 실행 제한 안에서 Bedrock 스트림을 돌리며 delta 이벤트를 흘린다.
+    Run a Bedrock stream inside the global concurrency cap, yielding delta events as they arrive.
 
-    성공/실패를 모두 `bedrock` 소스 상태에 반영한다 (조용한 실패 금지).
+    permit은 **스트림 완료까지** 보유한다 - 블로킹 경로가 호출 하나를 감쌌던 것과 같은 동시성 의미다
+    (요청 하나가 끝날 때까지 permit 하나). 소비자가 사라지면 `GeneratorExit`이 이 제너레이터를 닫으며
+    permit을 반납하고, 서비스 계층이 펌프 스레드를 멈춘다.
+    The permit is held until the stream ends - the same concurrency meaning the blocking path had when it
+    wrapped one call. If the consumer leaves, `GeneratorExit` closes this generator, returning the permit, and the
+    service layer stops its pump thread.
+
+    성공/실패는 모두 `bedrock` 소스 상태에 반영한다 (조용한 실패 금지).
     Both outcomes are reflected in the `bedrock` source status (no silent failures).
-
-    Args:
-        state: 앱 컨텍스트 / App context.
-        semaphore: 전역 동시 실행 세마포어 / The global concurrency semaphore.
-        call: 인자가 없는 동기 호출 (`analyze_stock`/`analyze_article` 부분 적용) / Zero-argument sync call.
-
-    Returns:
-        마크다운 분석 텍스트 / The markdown analysis text.
 
     Raises:
         BedrockUnavailableError, BedrockCallError: 서비스 계층의 타입 있는 예외 그대로 / the service's typed errors, unchanged.
     """
     async with semaphore:
         try:
-            text = await asyncio.to_thread(call)
+            # `make_stream()` 호출 자체(프롬프트 조립)도 try 안에 둔다 - 잘못된 입력의 즉시 예외까지 잡는다
+            # The call itself (prompt assembly) sits inside the try so an eager bad-input error is caught too
+            async for delta in make_stream():
+                yield (EVENT_DELTA, {"text": delta})
         except Exception as exc:
             state.mark_source(SOURCE_BEDROCK, STATUS_DEGRADED)
             _warn("ai_bedrock_failed", error=str(exc), error_type=type(exc).__name__)
             raise
     state.mark_source(SOURCE_BEDROCK, STATUS_OK)
-    return text
 
 
-async def cached_analysis(
+async def _analysis_stream(
     state: AppState,
+    inflight: dict,
     key: str,
-    build: Callable[[], Awaitable[dict]],
-) -> Tuple[dict, str]:
+    first_phase: str,
+    produce: Callable[[], AsyncIterator[Tuple[str, dict]]],
+    build_data: Callable[[str], dict],
+) -> AsyncIterator[bytes]:
     """
-    캐시(L1 -> L2)를 먼저 보고, 미스일 때만 `build`로 분석을 생성 / Read the cache (L1 -> L2) and only build on a miss.
+    두 AI 라우트가 공유하는 SSE 골격 / The SSE skeleton both AI routes share.
 
-    `deps.cached`를 쓰지 않는다: 그 래퍼는 모든 실패를 503 하나로 뭉개서 503/500/502 구분과
-    고정 오류 문구를 만들 수 없다. 대신 계층 캐시를 직접 호출한다 - 같은 키의 동시 요청은
-    `TieredCache`의 키별 락으로 한 번만 Bedrock을 호출한다 (비용 방어).
-    `deps.cached` is not used: it collapses every failure into one 503, which would lose the 503/500/502
-    split and the fixed error details. Calling the tiered cache directly also keeps its per-key lock, so
-    concurrent requests for one key trigger a single Bedrock call.
+    ① 첫 `phase`를 즉시 emit (TTFB ~0초 - CloudFront idle 카운터 리셋이 곧바로 시작된다)
+    ② 캐시 프로브(`peek`): 히트면 `final` 하나로 끝낸다
+    ③ 미스면 이 키의 선점자/팔로워를 가른다 - 선점자는 `produce()`의 이벤트를 중계하며 델타를 누적하고
+       완료 시 캐시에 저장, 팔로워는 `HEARTBEAT_SECONDS`마다 `phase: waiting`을 내며 선점자 결과를 승계
+    ④ **어떤 경로에서도 `final`을 emit한다** - 오류는 `{"error": DETAIL_*, "status": code}`로 실어 보낸다.
+       SSE의 최다 운영 이슈(연결만 끊겨 클라이언트가 완료/사망을 구분 못 함)를 여기서 차단한다.
+    (1) emit the first `phase` at once, so TTFB is ~0s and the CloudFront idle counter starts resetting;
+    (2) probe the cache with `peek` - a hit ends the stream with a single `final`;
+    (3) on a miss, split leader from follower: the leader relays `produce()`'s events while accumulating
+        deltas and caches the result, a follower heartbeats `phase: waiting` and inherits the outcome;
+    (4) **every path emits a `final`**, errors carried as `{"error": DETAIL_*, "status": code}` - which is
+        what stops the classic SSE failure mode of a bare close the client cannot interpret.
 
-    Returns:
-        (분석 데이터 dict, asOf ISO8601) / (analysis data dict, asOf ISO8601).
-
-    Raises:
-        HTTPException: 503 `ai_unavailable`(자격 증명/접근), 500 `ai_failed`(그 외), 그리고 `build`가
-            올린 HTTPException은 상태 코드를 유지한 채 통과 / 503 `ai_unavailable` (credentials or access),
-            500 `ai_failed` (anything else); an HTTPException raised by `build` passes through unchanged.
+    `produce`는 `(EVENT_PHASE|EVENT_DELTA, payload)`를 yield하는 async 제너레이터 팩토리이며, 라우트별
+    차이(기사 본문 조회, 종목 입력 수집)는 전부 그 안에 있다. `build_data`는 누적된 델타 텍스트로 캐시에
+    담길 데이터 dict를 만든다.
+    `produce` is an async-generator factory yielding `(EVENT_PHASE|EVENT_DELTA, payload)` pairs and holds
+    every route-specific step (the article fetch, the stock input gathering); `build_data` turns the
+    accumulated delta text into the dict that gets cached.
     """
+    data: Optional[dict] = None
+    as_of: Optional[str] = None
     try:
-        data, as_of, _origin = await state.cache.get_or_fetch(key, config.AI_TTL, build)
-    except HTTPException:
-        # `build`가 정한 상태 코드를 다시 매핑하지 않는다 (502가 500으로 뒤바뀌면 안 된다)
-        # Never remap a status code `build` already chose (a 502 must not turn into a 500)
-        raise
-    except bedrock_ai.BedrockUnavailableError as exc:
-        _warn("ai_unavailable", key=key, error=str(exc))
-        raise HTTPException(status_code=503, detail=DETAIL_AI_UNAVAILABLE) from exc
-    except Exception as exc:
-        # BedrockCallError(잘못된 입력·응답 해석 실패)와 예기치 못한 오류를 함께 500으로 매핑한다
-        # BedrockCallError (bad input, unreadable response) and unexpected errors both map to 500
-        _warn("ai_failed", key=key, error=str(exc), error_type=type(exc).__name__)
-        raise HTTPException(status_code=500, detail=DETAIL_AI_FAILED) from exc
-    return data, as_of
+        yield _sse(EVENT_PHASE, {"phase": first_phase})
+
+        cached = await state.cache.peek(key, config.AI_TTL)
+        if cached is not None:
+            data, as_of = cached
+        else:
+            # 아래 세 줄 사이에 await가 없어야 원자적이다 (단일 이벤트 루프): `peek`의 await에서 깨어난
+            # 직후 레지스트리를 읽고, 등록까지 양보 없이 끝낸다 - 두 코루틴이 같은 키의 선점자가 될 수 없다.
+            # These lines must contain no await to be atomic on the single event loop: the registry is read
+            # right after `peek` resumes and the registration completes without yielding, so two coroutines
+            # can never both become the leader for one key.
+            leader_future = inflight.get(key)
+            if leader_future is None:
+                own_future = asyncio.get_running_loop().create_future()
+                inflight[key] = own_future
+                try:
+                    parts: list[str] = []
+                    async for event, payload in produce():
+                        if event == EVENT_DELTA:
+                            parts.append(payload["text"])
+                        yield _sse(event, payload)
+
+                    data = build_data("".join(parts))
+                    await state.cache.put(key, data, config.AI_TTL)
+                    # put이 찍은 asOf를 그대로 쓴다 - 스트림 응답과 이후 캐시 응답의 asOf가 어긋나면 안 된다
+                    # Reuse the asOf `put` stamped: the streamed response and later cache hits must agree
+                    peeked = await state.cache.peek(key, config.AI_TTL)
+                    as_of = peeked[1] if peeked is not None else None
+                    own_future.set_result((OUTCOME_OK, data, as_of))
+                except HTTPException as exc:
+                    # `produce`가 정한 상태 코드를 다시 매핑하지 않는다 (502가 500으로 뒤바뀌면 안 된다)
+                    # Never remap a status code `produce` already chose (a 502 must not turn into a 500)
+                    own_future.set_result((OUTCOME_ERROR, exc.detail, exc.status_code))
+                    raise
+                except bedrock_ai.BedrockUnavailableError as exc:
+                    _warn("ai_unavailable", key=key, error=str(exc))
+                    own_future.set_result((OUTCOME_ERROR, DETAIL_AI_UNAVAILABLE, 503))
+                    yield _sse(EVENT_FINAL, {"error": DETAIL_AI_UNAVAILABLE, "status": 503})
+                    return
+                except Exception as exc:
+                    # BedrockCallError(잘못된 입력·스트림 실패)와 예기치 못한 오류를 함께 500으로 매핑한다
+                    # BedrockCallError (bad input, stream failure) and unexpected errors both map to 500
+                    # 스택 트레이스는 운영 원인 추적용 - 단일 라인 JSON 규칙의 의도적 예외
+                    # The stack trace is for operational root-causing: a deliberate exception to the
+                    # one-line-JSON rule (the JSON line below stays machine-readable).
+                    logger.exception("ai stream failed key=%s", key)
+                    _warn("ai_failed", key=key, error=str(exc), error_type=type(exc).__name__)
+                    own_future.set_result((OUTCOME_ERROR, DETAIL_AI_FAILED, 500))
+                    yield _sse(EVENT_FINAL, {"error": DETAIL_AI_FAILED, "status": 500})
+                    return
+                finally:
+                    if not own_future.done():
+                        # 소비자 이탈(GeneratorExit) 등으로 결과가 없으면 팔로워가 영원히 기다린다
+                        # Without a result (e.g. the consumer left, raising GeneratorExit) a follower
+                        # would wait forever, so the abandoned attempt is reported as a failure.
+                        _warn("ai_stream_leader_gone", key=key)
+                        own_future.set_result((OUTCOME_ERROR, DETAIL_AI_FAILED, 500))
+                    inflight.pop(key, None)
+            else:
+                # 팔로워: 선점자를 기다리며 하트비트 / Follower: heartbeat while the leader works.
+                # Future에는 예외를 넣지 않는다 (튜플 결과만) - 회수되지 않은 예외 경고를 만들지 않기 위해서다.
+                # The future never carries an exception, only tuples, so no "never retrieved" warning fires.
+                while True:
+                    done, _pending = await asyncio.wait([leader_future], timeout=HEARTBEAT_SECONDS)
+                    if done:
+                        break
+                    yield _sse(EVENT_PHASE, {"phase": PHASE_WAITING})
+                outcome = leader_future.result()
+                if outcome[0] == OUTCOME_ERROR:
+                    _tag, detail, status = outcome
+                    yield _sse(EVENT_FINAL, {"error": detail, "status": status})
+                    return
+                _tag, data, as_of = outcome
+
+        yield _sse(EVENT_FINAL, envelope(data, deps.market_open_now(), as_of))
+    except HTTPException as exc:
+        # 선점자 경로에서 올라온 오류(예: 기사 502) + 그 외 HTTP 오류를 final로 내보낸다
+        # Errors raised on the leader path (e.g. the article 502) leave as a final, not as a bare close
+        yield _sse(EVENT_FINAL, {"error": exc.detail, "status": exc.status_code})
 
 
 async def recent_news_titles(state: AppState, symbol: str) -> List[str]:
@@ -345,31 +475,36 @@ async def post_stock_analysis(
     state: AppState = Depends(deps.get_state),
 ) -> Any:
     """
-    종목 AI 분석 (한국어 마크다운) / AI stock analysis as Korean markdown.
+    종목 AI 분석 SSE 스트림 (한국어 마크다운) / AI stock analysis as an SSE stream of Korean markdown.
 
     본문은 없다. 프롬프트 입력(가격/PER/52주/섹터/뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져오므로
-    AI 요청이 yfinance/RSS를 새로 때리는 일은 보통 없다.
+    AI 요청이 yfinance/RSS를 새로 때리는 일은 보통 없다. 그 수집은 첫 `phase` 이벤트 **뒤**에 수행한다
+    (TTFB를 캐시·업스트림에 묶지 않는다).
     There is no request body. The prompt inputs (price, P/E, 52-week range, sector, news titles) come from
-    the already-cached detail and per-symbol news, so an AI request rarely hits yfinance or RSS.
+    the already-cached detail and per-symbol news, so an AI request rarely hits yfinance or RSS; that
+    gathering happens *after* the first `phase` event so TTFB never waits on the cache or upstream.
 
     Returns:
-        `{"asOf", "marketOpen", "data": {"symbol", "analysis"}}` - 한도 초과 시에는 429 JSONResponse.
-        The envelope above, or a 429 JSONResponse when the caller is over its limit.
+        `text/event-stream`: `phase: analyzing` -> `delta`* -> `final`(envelope 또는 오류) -
+        한도 초과 시에는 스트림 전에 429 JSONResponse.
+        A `text/event-stream` (`phase: analyzing`, then deltas, then a `final` carrying the envelope or an
+        error), or a 429 JSONResponse decided before the stream starts.
     """
     limited = rate_limited(request)
     if limited is not None:
         return limited
     semaphore = get_semaphore(request)
+    inflight = get_inflight(request)
 
-    async def build() -> dict:
+    async def produce() -> AsyncIterator[Tuple[str, dict]]:
         # 가격 오버레이가 적용된 상세를 그대로 쓴다 (테이블·헤더·호가와 같은 가격으로 분석한다)
         # The price-overlaid detail is reused, so the analysis sees the same price as the table and header
         detail, _as_of = await stocks.detail_view(state, symbol)
         titles = await recent_news_titles(state, symbol)
-        text = await invoke_bedrock(
+        deltas = _bedrock_deltas(
             state,
             semaphore,
-            lambda: bedrock_ai.analyze_stock(
+            lambda: bedrock_ai.analyze_stock_stream(
                 symbol=symbol,
                 name=detail.get("name") or symbol,
                 price=float(detail.get("price") or 0.0),
@@ -383,10 +518,23 @@ async def post_stock_analysis(
                 news_titles=titles,
             ),
         )
-        return {"symbol": symbol, "analysis": text}
+        async for event in deltas:
+            yield event
 
-    data, as_of = await cached_analysis(state, key_stock_ai(symbol), build)
-    return envelope(data, deps.market_open_now(), as_of)
+    # 주식은 조회할 본문이 없으므로 `fetching` 없이 `analyzing`부터 시작한다 (fetch 세마포어도 기사 전용)
+    # A stock has no body to fetch, so it starts at `analyzing` (the fetch semaphore is article-only)
+    return StreamingResponse(
+        _analysis_stream(
+            state,
+            inflight,
+            key_stock_ai(symbol),
+            PHASE_ANALYZING,
+            produce,
+            lambda analysis: {"symbol": symbol, "analysis": analysis},
+        ),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
 
 
 @router.post("/articles")
@@ -403,27 +551,30 @@ async def post_article_analysis(
     returns the analysis generated first.
 
     Returns:
-        `{"asOf", "marketOpen", "data": {"url", "title", "language", "analysis"}}` - 한도 초과 시 429 JSONResponse.
-        The envelope above, or a 429 JSONResponse when the caller is over its limit.
+        `text/event-stream`: `phase: fetching` -> `phase: analyzing` -> `delta`* -> `final`(envelope 또는
+        오류) - 한도 초과 시에는 스트림 전에 429 JSONResponse.
+        A `text/event-stream` (`phase: fetching`, `phase: analyzing`, deltas, then a `final` carrying the
+        envelope or an error), or a 429 JSONResponse decided before the stream starts.
     """
     limited = rate_limited(request)
     if limited is not None:
         return limited
     semaphore = get_semaphore(request)
     fetch_semaphore = get_fetch_semaphore(request)
+    inflight = get_inflight(request)
 
-    async def build() -> dict:
+    async def produce() -> AsyncIterator[Tuple[str, dict]]:
         # fetch는 **전용** 세마포어 안에서 돈다 (2026-08-03 보안 리뷰 F2 + 재검증 breakage 1):
         # 캡 상향(2MB) 후 fetch 한 건이 수 MB 버퍼를 잡으므로 동시 fetch 버퍼 누적을
         # AI_FETCH_CONCURRENCY개로 묶는다. Bedrock 세마포어와 분리한 이유: 하나를 같이 쓰면 느린
         # fetch(최대 20s 점유)가 Bedrock 예산을 잠식해 IP 2개로 AI 기능 전체가 대기열에 갇힌다.
-        # 이 세마포어는 동시 fetch 버퍼만 묶는다 — Bedrock 호출량은 `invoke_bedrock`의 세마포어가 묶는다.
+        # 이 세마포어는 동시 fetch 버퍼만 묶는다 — Bedrock 호출량은 `_bedrock_deltas`의 세마포어가 묶는다.
         # The fetch runs inside its **own** semaphore (security review F2 + re-review breakage 1,
         # 2026-08-03): after the 2MB cap raise one fetch holds multi-MB buffers, so concurrent fetch
         # buffers are capped at AI_FETCH_CONCURRENCY. It is separate from the Bedrock semaphore because
         # sharing one lets slow fetches (holding up to 20s) starve the Bedrock budget — two IPs could
         # queue-lock every AI feature. This semaphore bounds concurrent fetch buffers only; Bedrock
-        # volume is bounded by `invoke_bedrock`'s semaphore.
+        # volume is bounded by `_bedrock_deltas`'s semaphore.
         async with fetch_semaphore:
             content = await news.fetch_article_content(payload.url)
         if not content:
@@ -431,17 +582,32 @@ async def post_article_analysis(
             # Without a body there is nothing to analyze: no Bedrock call, and no cached failure
             _warn("ai_article_content_empty", url=payload.url)
             raise HTTPException(status_code=502, detail=DETAIL_ARTICLE_UNAVAILABLE)
-        text = await invoke_bedrock(
+
+        # 본문을 확보한 뒤에야 분석 단계로 넘어간다 (사용자는 두 단계를 그대로 본다)
+        # Only with a body in hand does it move to the analysis phase, which the user sees as its own step
+        yield (EVENT_PHASE, {"phase": PHASE_ANALYZING})
+        deltas = _bedrock_deltas(
             state,
             semaphore,
-            lambda: bedrock_ai.analyze_article(payload.title, content, payload.language == "ko"),
+            lambda: bedrock_ai.analyze_article_stream(payload.title, content, payload.language == "ko"),
         )
-        return {
-            "url": payload.url,
-            "title": payload.title,
-            "language": payload.language,
-            "analysis": text,
-        }
+        async for event in deltas:
+            yield event
 
-    data, as_of = await cached_analysis(state, key_article_ai(payload.url), build)
-    return envelope(data, deps.market_open_now(), as_of)
+    return StreamingResponse(
+        _analysis_stream(
+            state,
+            inflight,
+            key_article_ai(payload.url),
+            PHASE_FETCHING,
+            produce,
+            lambda analysis: {
+                "url": payload.url,
+                "title": payload.title,
+                "language": payload.language,
+                "analysis": analysis,
+            },
+        ),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )

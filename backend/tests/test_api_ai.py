@@ -1,18 +1,27 @@
 """
-AI 라우트 테스트 - 레이트리밋(429), 결과 캐시(Bedrock 호출 카운터), 오류 매핑(503/500/502).
-AI route tests - rate limiting (429), result cache (Bedrock call counter), error mapping (503/500/502).
+AI 라우트 테스트 - SSE 프로토콜(phase/delta/final), 레이트리밋(429 JSON), 결과 캐시, 오류 매핑(503/500/502).
+AI route tests - the SSE protocol (phase/delta/final), rate limiting (429 JSON), the result cache and
+error mapping (503/500/502).
 
-Bedrock은 서비스 함수(`bedrock_ai.analyze_stock`/`analyze_article`)를 monkeypatch해서 대체한다
-(boto3는 건드리지 않는다). 기사 본문 조회(`news.fetch_article_content`)도 페이크다 - 네트워크 없음.
-Bedrock is replaced by monkeypatching the service functions (never boto3), and the article fetch
-(`news.fetch_article_content`) is faked too, so no test touches the network.
+Bedrock은 스트리밍 서비스 함수(`bedrock_ai.analyze_stock_stream`/`analyze_article_stream`)를
+monkeypatch해서 대체한다(boto3는 건드리지 않는다). 기사 본문 조회(`news.fetch_article_content`)도
+페이크다 - 네트워크 없음.
+Bedrock is replaced by monkeypatching the streaming service functions (never boto3), and the article
+fetch (`news.fetch_article_content`) is faked too, so no test touches the network.
+
+두 엔드포인트는 `text/event-stream`을 돌려주므로 본문 단정은 final 이벤트의 data(`_final`)에 건다 -
+스트림이 이미 시작된 뒤의 실패는 HTTP 상태가 아니라 final의 `{"error", "status"}`로 나온다.
+Both endpoints answer with `text/event-stream`, so body assertions go through the final event's data
+(`_final`): a failure after the stream started surfaces in `{"error", "status"}`, not in the HTTP status.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 import time
+from typing import Any, AsyncIterator, Optional
 
 import httpx
 import pytest
@@ -22,12 +31,20 @@ from app.api.ratelimit import SlidingWindowLimiter
 from app.core import config
 from app.main import create_app
 from app.services import bedrock_ai, news
-from tests.conftest import FAKE_DETAIL_PRICE, UNKNOWN_SYMBOL, US_SYMBOL
+from tests.conftest import FAKE_DETAIL_PRICE, FAKE_QUOTES, UNKNOWN_SYMBOL, US_SYMBOL
 
 ENVELOPE_KEYS = {"asOf", "marketOpen", "data"}
 
-STOCK_ANALYSIS = "## 기술적 분석\n상승 추세입니다."
-ARTICLE_ANALYSIS = "## 요약\n실적이 좋았습니다."
+# quotes 캐시(45초)가 들고 있는 실시간 시세 - 상세 캐시(12h) 가격과 다른 값이다
+# The live quote in the 45s quotes cache, deliberately a different value from the 12h detail price
+LIVE_QUOTE = FAKE_QUOTES["us"][0]
+
+# 시나리오별 기본 델타 시퀀스 - 합치면 기존(블로킹) 분석 텍스트와 동일하다
+# Per-scenario default delta sequences; joined they equal the analysis text the blocking path returned
+STOCK_DELTAS = ["## 기술적 분석\n", "상승 ", "추세입니다."]
+ARTICLE_DELTAS = ["## 요약\n", "실적이 ", "좋았습니다."]
+STOCK_ANALYSIS = "".join(STOCK_DELTAS)
+ARTICLE_ANALYSIS = "".join(ARTICLE_DELTAS)
 ARTICLE_CONTENT = "기사 본문 단락 하나.\n\n두 번째 단락."
 
 ARTICLE_URL = "https://example.com/news/1"
@@ -49,14 +66,76 @@ VIEWER_IP = "198.51.100.20"
 SYMBOLS = ["AAPL", "MSFT", "NVDA", "AMZN", "META"]
 
 
+# ---------------------------------------------------------------------------
+# SSE 파싱 / SSE parsing
+# ---------------------------------------------------------------------------
+
+def _sse_events(body: str) -> list[tuple[str, dict]]:
+    """SSE 본문을 (event, data dict) 리스트로 / Parse an SSE body into (event, data) pairs."""
+    events = []
+    for frame in body.strip().split("\n\n"):
+        name, payload = None, []
+        for line in frame.split("\n"):
+            if line.startswith("event: "):
+                name = line[len("event: "):]
+            elif line.startswith("data: "):
+                payload.append(line[len("data: "):])
+        assert name is not None, f"frame without event name: {frame!r}"
+        events.append((name, json.loads("\n".join(payload))))
+    return events
+
+
+def _events(response) -> list[tuple[str, dict]]:
+    """SSE 응답을 이벤트 목록으로 (content-type까지 확인) / The response's events, content-type checked."""
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    return _sse_events(response.text)
+
+
+def _names(events: list[tuple[str, dict]]) -> list[str]:
+    """이벤트 이름 순서 / The event names in order."""
+    return [name for name, _data in events]
+
+
+def _phases(events: list[tuple[str, dict]]) -> list[str]:
+    """phase 이벤트의 phase 값들 / The phase values of the phase events."""
+    return [data["phase"] for name, data in events if name == "phase"]
+
+
+def _deltas(events: list[tuple[str, dict]]) -> list[str]:
+    """delta 이벤트의 텍스트들 / The texts of the delta events."""
+    return [data["text"] for name, data in events if name == "delta"]
+
+
+def _final(response) -> dict:
+    """마지막 이벤트가 final임을 확인하고 그 data를 반환 / Assert the last event is final and return its data."""
+    events = _events(response)
+    name, data = events[-1]
+    assert name == "final", f"last event is {name!r}, not final: {_names(events)}"
+    return data
+
+
 class FakeBedrock:
-    """호출을 기록하고 예외를 주입할 수 있는 Bedrock/기사조회 페이크 / Bedrock and article-fetch fake with call records and injectable errors."""
+    """
+    스트리밍 Bedrock/기사조회 페이크 - 호출 기록·델타 시퀀스·예외 주입.
+    Streaming Bedrock and article-fetch fake with call records, delta sequences and injectable errors.
+
+    `stream_deltas`가 None이면 시나리오 기본값(STOCK_DELTAS/ARTICLE_DELTAS)을 흘린다 - 합치면 기존
+    분석 텍스트와 같으므로 "최종 텍스트" 단정이 그대로 유지된다.
+    With `stream_deltas` unset each scenario streams its own default, whose join equals the analysis text
+    the blocking fake used to return, so the "final text" assertions carry over unchanged.
+
+    `error`는 첫 델타 **전에**, `stream_error`는 델타 일부를 낸 **뒤에** raise된다(mid-stream 실패 재현).
+    `error` raises before the first delta; `stream_error` raises after partial deltas (a mid-stream failure).
+    """
 
     def __init__(self) -> None:
         self.stock_calls: list = []
         self.article_calls: list = []
         self.fetched_urls: list = []
         self.error: Exception = None  # type: ignore[assignment]
+        self.stream_error: Exception = None  # type: ignore[assignment]
+        self.stream_deltas: Optional[list[str]] = None
         self.content: str = ARTICLE_CONTENT
         self.delay: float = 0.0
         self.fetch_delay: float = 0.0
@@ -76,23 +155,37 @@ class FakeBedrock:
         with self._lock:
             self.in_flight -= 1
 
-    def analyze_stock(self, **kwargs) -> str:
-        self.stock_calls.append(kwargs)
+    async def _pause(self) -> None:
+        """델타 사이 지연 (동시성 관측용) / The between-delta delay used to observe concurrency."""
+        if self.delay:
+            await asyncio.sleep(self.delay)
+
+    async def _stream(self, deltas: list[str]) -> AsyncIterator[str]:
         self._enter()
         try:
-            if self.delay:
-                time.sleep(self.delay)
+            await self._pause()
             if self.error is not None:
                 raise self.error
-            return STOCK_ANALYSIS
+            for delta in deltas:
+                yield delta
+                await self._pause()
+                if self.stream_error is not None:
+                    raise self.stream_error
         finally:
             self._exit()
 
-    def analyze_article(self, title: str, content: str, is_korean: bool) -> str:
+    def _sequence(self, default: list[str]) -> list[str]:
+        return default if self.stream_deltas is None else self.stream_deltas
+
+    # 실제 함수처럼 호출 시점에 즉시 기록한다 (프롬프트 조립이 eager이므로)
+    # Recorded eagerly at call time, mirroring the real functions' eager prompt assembly
+    def analyze_stock_stream(self, **kwargs: Any) -> AsyncIterator[str]:
+        self.stock_calls.append(kwargs)
+        return self._stream(self._sequence(STOCK_DELTAS))
+
+    def analyze_article_stream(self, title: str, content: str, is_korean: bool) -> AsyncIterator[str]:
         self.article_calls.append((title, content, is_korean))
-        if self.error is not None:
-            raise self.error
-        return ARTICLE_ANALYSIS
+        return self._stream(self._sequence(ARTICLE_DELTAS))
 
     async def fetch_article_content(self, url: str) -> str:
         self.fetched_urls.append(url)
@@ -112,10 +205,10 @@ class FakeBedrock:
 
 @pytest.fixture
 def bedrock(monkeypatch) -> FakeBedrock:
-    """Bedrock 분석 2종 + 기사 본문 조회를 페이크로 교체 / Replace both analyses and the article fetch with fakes."""
+    """스트리밍 분석 2종 + 기사 본문 조회를 페이크로 교체 / Replace both streaming analyses and the article fetch."""
     fake = FakeBedrock()
-    monkeypatch.setattr(bedrock_ai, "analyze_stock", fake.analyze_stock)
-    monkeypatch.setattr(bedrock_ai, "analyze_article", fake.analyze_article)
+    monkeypatch.setattr(bedrock_ai, "analyze_stock_stream", fake.analyze_stock_stream)
+    monkeypatch.setattr(bedrock_ai, "analyze_article_stream", fake.analyze_article_stream)
     monkeypatch.setattr(news, "fetch_article_content", fake.fetch_article_content)
     return fake
 
@@ -124,15 +217,44 @@ def bedrock(monkeypatch) -> FakeBedrock:
 # 종목 분석 / Stock analysis
 # ---------------------------------------------------------------------------
 
-def test_stock_analysis_returns_markdown_envelope_and_passes_cached_facts(client, bedrock, state):
-    """첫 호출은 200 + 분석 텍스트이며 프롬프트 입력은 캐시된 상세/뉴스에서 온다 / First call returns the analysis; prompt inputs come from the cached detail and news."""
+def test_stock_stream_emits_phase_deltas_then_final(client, bedrock):
+    """
+    주식 스트림: phase → delta* → final, 델타 합 == 최종 분석 / phase, deltas, then a final whose analysis equals the joined deltas.
+
+    첫 이벤트는 입력 수집·Bedrock 호출보다 **먼저** 나간다 (TTFB ~0초 → CloudFront idle 카운터 리셋).
+    The first event precedes input gathering and the Bedrock call, so TTFB is ~0s and the CloudFront idle
+    counter starts resetting immediately.
+    """
+    bedrock.stream_deltas = ["## 분석", "\n첫 ", "문단"]
+
     response = client.post(f"/api/ai/stocks/{US_SYMBOL}")
 
-    assert response.status_code == 200
-    body = response.json()
-    assert ENVELOPE_KEYS <= set(body)
-    assert body["data"] == {"symbol": US_SYMBOL, "analysis": STOCK_ANALYSIS}
-    assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is not None
+    events = _events(response)
+    assert events[0] == ("phase", {"phase": "analyzing"})
+    assert _deltas(events) == bedrock.stream_deltas
+    # 프로토콜에 없는 이벤트는 없다 / no event outside the protocol
+    assert set(_names(events)) == {"phase", "delta", "final"}
+    final = _final(response)
+    assert set(final) == ENVELOPE_KEYS      # 기존 envelope 형태 / the existing envelope shape
+    assert final["data"] == {"symbol": US_SYMBOL, "analysis": "".join(bedrock.stream_deltas)}
+
+
+def test_stock_final_carries_cached_facts_and_caches_the_analysis(client, bedrock, state):
+    """final은 분석 텍스트를 담고 프롬프트 입력은 캐시된 상세/뉴스에서 온다 / The final carries the analysis; prompt inputs come from the cached detail and news."""
+    response = client.post(f"/api/ai/stocks/{US_SYMBOL}")
+
+    final = _final(response)
+    assert ENVELOPE_KEYS <= set(final)
+    assert final["data"] == {"symbol": US_SYMBOL, "analysis": STOCK_ANALYSIS}
+    cached = state.cache.l1.get(f"ai:stock:{US_SYMBOL}")
+    assert cached is not None
+    # 클라이언트가 본 asOf는 캐시가 찍은 값 그대로다 (재요청 시 asOf가 뒤로 튀지 않는다)
+    # The asOf the client saw is exactly the one the cache stamped, so a repeat never moves it backwards
+    assert final["asOf"] == cached[1]
+    # 분석 캐시의 TTL은 AI_TTL(6h)이다 - L2 엔트리에 기록된 ttl로 확인한다 (비용 방어의 크기)
+    # The analysis is cached for AI_TTL (6h), read off the ttl the L2 entry recorded: the size of the
+    # cost defense (a shorter TTL would silently multiply Bedrock spend)
+    assert state.cache.l2.store[f"ai:stock:{US_SYMBOL}"][2] == config.AI_TTL
     assert bedrock.stock_calls == [
         {
             "symbol": US_SYMBOL,
@@ -149,13 +271,40 @@ def test_stock_analysis_returns_markdown_envelope_and_passes_cached_facts(client
     ]
 
 
-def test_repeated_stock_analysis_is_served_from_cache_without_calling_bedrock(client, bedrock, services):
-    """같은 심볼 재호출은 Bedrock을 다시 부르지 않는다 / A repeat call for the same symbol never calls Bedrock again."""
+def test_stock_analysis_is_fed_the_overlaid_live_price(client, bedrock):
+    """
+    분석 입력의 가격 계열은 오버레이된 실시간 시세다 / The price-like inputs are the overlaid live quote.
+
+    상세 캐시(12h)의 자체 가격으로 분석하면 장중 몇 시간 전 값을 두고 논평해 화면의 표·헤더와
+    어긋난다 - 그래서 AI 라우트도 `stocks.detail_view`(오버레이 적용)를 쓴다.
+    Analyzing the 12h detail cache's own price would comment on an hours-old number that contradicts the
+    table and header on screen, so the AI route reads `stocks.detail_view` (overlay applied) as well.
+    """
+    assert client.get("/api/market/quotes", params={"market": "us"}).status_code == 200
+
+    assert set(_final(client.post(f"/api/ai/stocks/{US_SYMBOL}"))) == ENVELOPE_KEYS
+
+    assert LIVE_QUOTE.price != FAKE_DETAIL_PRICE   # 픽스처가 실제로 다른 값인지 / the fixture really differs
+    call = bedrock.stock_calls[0]
+    assert (call["price"], call["change_pct"]) == (LIVE_QUOTE.price, LIVE_QUOTE.change_pct)
+    # 느린 펀더멘털은 상세 캐시에서 그대로 온다 (오버레이는 가격 계열만 덮는다)
+    # Slow fundamentals still come from the detail cache: the overlay covers price-like fields only
+    assert (call["pe_ratio"], call["week52_high"]) == (28.5, 200.0)
+
+
+def test_cache_hit_emits_the_first_phase_then_final_only(client, bedrock, services):
+    """
+    캐시 히트는 delta 없이 첫 phase 뒤 곧바로 final / A cache hit goes straight to final after the first phase.
+
+    첫 phase는 캐시 조회보다 앞이라 히트에서도 나간다 (프론트 코드 경로가 하나로 유지된다).
+    The first phase precedes the cache probe, so a hit emits it too and the frontend keeps one code path.
+    """
     first = client.post(f"/api/ai/stocks/{US_SYMBOL}")
     second = client.post(f"/api/ai/stocks/{US_SYMBOL}")
 
-    assert (first.status_code, second.status_code) == (200, 200)
-    assert first.json()["data"] == second.json()["data"]
+    assert _names(_events(second)) == ["phase", "final"]
+    assert _final(first)["data"] == _final(second)["data"]
+    assert _final(first)["asOf"] == _final(second)["asOf"]
     assert len(bedrock.stock_calls) == 1
     # 상세/뉴스도 캐시에서 나온다 (AI 재호출이 업스트림을 다시 때리지 않는다)
     # The detail and news come from the cache too (a repeat AI call never re-hits upstream)
@@ -165,7 +314,7 @@ def test_repeated_stock_analysis_is_served_from_cache_without_calling_bedrock(cl
 
 def test_successful_analysis_marks_bedrock_source_ok(client, bedrock):
     """성공은 헬스의 bedrock 소스 상태에 반영된다 / Success is reflected in the health bedrock source status."""
-    assert client.post(f"/api/ai/stocks/{US_SYMBOL}").status_code == 200
+    assert ENVELOPE_KEYS <= set(_final(client.post(f"/api/ai/stocks/{US_SYMBOL}")))
 
     assert client.get("/api/health").json()["sources"]["bedrock"] == "ok"
 
@@ -182,14 +331,21 @@ def test_unknown_symbol_is_404_and_creates_no_cache_key(client, bedrock, state):
 # 레이트리밋 / Rate limiting
 # ---------------------------------------------------------------------------
 
-def test_fourth_request_from_the_same_ip_is_rate_limited(client, bedrock):
-    """같은 IP의 4번째 요청은 429 + 고정 본문 / The fourth request from one IP is 429 with the fixed body."""
+def test_rate_limit_stays_json_429_before_the_stream(client, bedrock):
+    """
+    같은 IP의 4번째 요청은 429 + 고정 본문 (SSE 아님) / The fourth request from one IP is a 429 JSON body, not SSE.
+
+    한도 판정은 스트림 시작 전이므로 응답이 SSE로 승격되지 않는다 (기존 클라이언트 계약 유지).
+    The limit is decided before the stream starts, so the response never becomes SSE.
+    """
     for symbol in SYMBOLS[:config.AI_RATE_PER_MIN]:
         assert client.post(f"/api/ai/stocks/{symbol}").status_code == 200
 
     blocked = client.post(f"/api/ai/stocks/{SYMBOLS[config.AI_RATE_PER_MIN]}")
 
     assert blocked.status_code == 429
+    assert blocked.headers["content-type"].startswith("application/json")
+    assert blocked.headers["retry-after"] == "60"
     assert blocked.json() == {"detail": "rate_limited", "retryAfter": 60}
     # 차단된 요청은 Bedrock에 도달하지 않는다 / A blocked request never reaches Bedrock
     assert len(bedrock.stock_calls) == config.AI_RATE_PER_MIN
@@ -326,43 +482,76 @@ def test_rate_limit_budget_is_shared_by_both_ai_endpoints(client, bedrock):
 # 오류 매핑 / Error mapping
 # ---------------------------------------------------------------------------
 
-def test_bedrock_unavailable_maps_to_503_without_leaking_the_error(client, bedrock, state):
-    """가용성 실패는 503 + 고정 문구, 예외 문자열(계정/ARN)은 노출하지 않는다 / Unavailable maps to 503 with a fixed detail; the exception text never leaks."""
+def test_bedrock_unavailable_maps_to_final_503_without_leaking_the_error(client, bedrock, state):
+    """가용성 실패는 final의 503 + 고정 문구, 예외 문자열(계정/ARN)은 노출하지 않는다 / Unavailable maps to a final 503 with a fixed detail; the exception text never leaks."""
     bedrock.error = bedrock_ai.BedrockUnavailableError(
         "arn:aws:bedrock:ap-northeast-2:123456789012:model/secret 접근 거부"
     )
 
     response = client.post(f"/api/ai/stocks/{US_SYMBOL}")
 
-    assert response.status_code == 503
-    assert response.json() == {"detail": "ai_unavailable"}
+    assert _final(response) == {"error": "ai_unavailable", "status": 503}
     assert "arn:aws" not in response.text and "123456789012" not in response.text
     # 실패는 캐시되지 않고 소스 상태에 반영된다 / The failure is not cached and is reflected in source status
     assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is None
     assert client.get("/api/health").json()["sources"]["bedrock"] == "degraded"
 
 
-def test_bedrock_call_error_maps_to_500_without_leaking_the_error(client, bedrock):
-    """호출/입력 실패는 500 + 고정 문구 / A call or input failure maps to 500 with a fixed detail."""
+def test_bedrock_call_error_maps_to_final_500_without_leaking_the_error(client, bedrock):
+    """호출/입력 실패는 final의 500 + 고정 문구 / A call or input failure maps to a final 500 with a fixed detail."""
     bedrock.error = bedrock_ai.BedrockCallError("ValidationException: modelId=secret-model")
 
     response = client.post(f"/api/ai/stocks/{US_SYMBOL}")
 
-    assert response.status_code == 500
-    assert response.json() == {"detail": "ai_failed"}
+    assert _final(response) == {"error": "ai_failed", "status": 500}
     assert "secret-model" not in response.text
+
+
+def test_midstream_error_still_emits_final_with_error(client, bedrock, state):
+    """
+    델타 일부를 낸 뒤 실패해도 final은 나간다 / A failure after partial deltas still ends with a final.
+
+    SSE의 최다 운영 이슈(연결만 끊겨 클라이언트가 완료/사망을 구분할 수 없음)를 막는 계약이다.
+    This is the contract that prevents the classic SSE failure mode: a bare connection close leaves the
+    client unable to tell completion from death.
+    """
+    bedrock.stream_error = RuntimeError("stream died mid-flight")
+
+    response = client.post(f"/api/ai/stocks/{US_SYMBOL}")
+
+    events = _events(response)
+    assert _deltas(events) == STOCK_DELTAS[:1]      # 일부 델타는 이미 전달됐다 / partial deltas arrived
+    assert _final(response) == {"error": "ai_failed", "status": 500}
+    # 절반짜리 분석은 캐시되지 않는다 / a half-finished analysis is never cached
+    assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is None
+    assert client.get("/api/health").json()["sources"]["bedrock"] == "degraded"
 
 
 # ---------------------------------------------------------------------------
 # 기사 분석 / Article analysis
 # ---------------------------------------------------------------------------
 
+def test_article_stream_starts_with_fetching_phase(client, bedrock):
+    """
+    기사 스트림의 첫 이벤트는 fetching, 본문 확보 후 analyzing / The article stream opens with fetching, then analyzing once the body is in.
+
+    본문 조회가 분석 앞에 있다는 사실을 사용자에게 그대로 보여 준다 (주식 라우트는 analyzing부터).
+    The fetch that precedes the analysis is visible as its own phase (the stock route starts at analyzing).
+    """
+    response = client.post("/api/ai/articles", json=ARTICLE_BODY)
+
+    events = _events(response)
+    assert events[0] == ("phase", {"phase": "fetching"})
+    assert _phases(events) == ["fetching", "analyzing"]
+    assert _deltas(events) == ARTICLE_DELTAS
+    assert _final(response)["data"]["analysis"] == ARTICLE_ANALYSIS
+
+
 def test_article_analysis_uses_fetched_content_and_url_hashed_cache_key(client, bedrock, state):
     """기사 분석은 추출한 본문으로 호출되고 sha1(url) 키로 캐시된다 / The article analysis uses the extracted body and caches under the sha1(url) key."""
     response = client.post("/api/ai/articles", json=ARTICLE_BODY)
 
-    assert response.status_code == 200
-    body = response.json()
+    body = _final(response)
     assert ENVELOPE_KEYS <= set(body)
     assert body["data"]["analysis"] == ARTICLE_ANALYSIS
     assert body["data"]["url"] == ARTICLE_URL
@@ -372,7 +561,7 @@ def test_article_analysis_uses_fetched_content_and_url_hashed_cache_key(client, 
 
     # 같은 URL 재요청은 캐시 히트 (Bedrock/기사조회 모두 재호출 없음)
     # A repeat request for the same URL is a cache hit (neither Bedrock nor the article fetch runs again)
-    assert client.post("/api/ai/articles", json=ARTICLE_BODY).status_code == 200
+    assert _names(_events(client.post("/api/ai/articles", json=ARTICLE_BODY))) == ["phase", "final"]
     assert len(bedrock.article_calls) == 1
     assert len(bedrock.fetched_urls) == 1
 
@@ -381,18 +570,20 @@ def test_english_article_is_analyzed_with_translation_flag(client, bedrock):
     """language=en은 is_korean=False로 전달된다 (번역 프롬프트) / language=en passes is_korean=False (translation prompt)."""
     response = client.post("/api/ai/articles", json={**ARTICLE_BODY, "language": "en"})
 
-    assert response.status_code == 200
+    assert _final(response)["data"]["language"] == "en"
     assert bedrock.article_calls[0][2] is False
 
 
-def test_article_without_extractable_body_is_502_and_skips_bedrock(client, bedrock, state):
-    """본문 추출 실패는 502이며 Bedrock을 호출하지 않는다 / A failed extraction is 502 and never calls Bedrock."""
+def test_article_unavailable_maps_to_final_502_and_skips_bedrock(client, bedrock, state):
+    """본문 추출 실패는 final의 502이며 Bedrock을 호출하지 않는다 / A failed extraction is a final 502 and never calls Bedrock."""
     bedrock.content = ""
 
     response = client.post("/api/ai/articles", json=ARTICLE_BODY)
 
-    assert response.status_code == 502
-    assert response.json() == {"detail": "article_unavailable"}
+    events = _events(response)
+    assert _phases(events) == ["fetching"]      # analyzing까지 가지 않았다 / it never reached analyzing
+    assert _deltas(events) == []
+    assert _final(response) == {"error": "article_unavailable", "status": 502}
     assert not bedrock.article_calls
     assert state.cache.l1.get(ARTICLE_KEY) is None
 
@@ -405,13 +596,16 @@ def test_article_requests_retain_nothing_per_url(client, bedrock, state):
     성공은 분석 하나(TTL 만료 후 회수)만 남기고, 실패(502)는 아무것도 남기지 않는다.
     A success leaves only its analysis (reclaimed once the TTL elapses); a 502 leaves nothing.
     """
-    assert client.post("/api/ai/articles", json=ARTICLE_BODY).status_code == 200
+    assert ENVELOPE_KEYS <= set(_final(client.post("/api/ai/articles", json=ARTICLE_BODY)))
     bedrock.content = ""
     rejected = client.post("/api/ai/articles", json={**ARTICLE_BODY, "url": "https://example.com/news/2"})
 
-    assert rejected.status_code == 502
+    assert _final(rejected) == {"error": "article_unavailable", "status": 502}
     # 키별 락은 조회 중에만 존재한다 (URL마다 락이 쌓이면 무한 증가) / A key lock lives only during a fetch
     assert state.cache._locks == {}
+    # 진행 중 스트림 레지스트리도 URL당 잔존물을 남기지 않는다 (성공·실패 모두 finally에서 제거)
+    # The in-flight stream registry retains nothing per URL either: both paths pop it in a finally
+    assert client.app.state.ai_inflight == {}
     assert list(state.cache.l1.store) == [ARTICLE_KEY]
 
 
@@ -441,8 +635,10 @@ async def test_global_concurrency_caps_parallel_bedrock_calls(state, services, b
             for index, symbol in enumerate(symbols)
         ])
 
-    assert [response.status_code for response in responses] == [200] * len(symbols)
+    assert [set(_final(response)) for response in responses] == [ENVELOPE_KEYS] * len(symbols)
     assert len(bedrock.stock_calls) == len(symbols)
+    # 세마포어는 스트림 완료까지 보유된다 - 델타 사이에도 상한이 유지된다
+    # The semaphore is held until the stream completes, so the cap holds between deltas too
     assert 1 <= bedrock.max_in_flight <= config.AI_GLOBAL_CONCURRENCY
 
 
@@ -473,7 +669,7 @@ async def test_article_fetch_is_capped_by_the_global_semaphore(state, bedrock):
             for index in range(total)
         ])
 
-    assert [response.status_code for response in responses] == [200] * total
+    assert [set(_final(response)) for response in responses] == [ENVELOPE_KEYS] * total
     assert 1 <= bedrock.max_fetch_in_flight <= config.AI_FETCH_CONCURRENCY
 
 
@@ -513,27 +709,76 @@ async def test_slow_article_fetches_do_not_starve_stock_analysis(state, services
 
         article_responses = await asyncio.gather(*article_tasks)
 
-    assert stock_response.status_code == 200
+    assert set(_final(stock_response)) == ENVELOPE_KEYS
     # fetch가 0.5s씩 점유 중이어도 종목 분석은 그 뒤에 줄 서지 않는다 (여유를 둔 0.4s 상한)
     # Even with fetches holding 0.5s each, the stock analysis never queues behind them (generous 0.4s bound)
     assert stock_elapsed < 0.4, f"stock analysis waited {stock_elapsed:.2f}s behind article fetches"
-    assert [response.status_code for response in article_responses] == [200] * config.AI_FETCH_CONCURRENCY
+    assert [set(_final(response)) for response in article_responses] == [ENVELOPE_KEYS] * config.AI_FETCH_CONCURRENCY
+
+
+async def _post_all(app, path: str, count: int, ip_prefix: str) -> list:
+    """같은 경로로 동시 요청 (IP를 나눠 레이트리밋을 피한다) / Fire concurrent requests, one IP each to dodge the limit."""
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
+        return await asyncio.gather(*[
+            async_client.post(path, headers={"X-Forwarded-For": f"{ip_prefix}{index}"})
+            for index in range(count)
+        ])
 
 
 async def test_concurrent_requests_for_one_symbol_share_a_single_bedrock_call(state, services, bedrock):
-    """같은 심볼 동시 요청은 Bedrock을 한 번만 호출한다 (키별 단일 실행) / Concurrent requests for one symbol trigger a single Bedrock call (per-key single flight)."""
+    """같은 심볼 동시 요청은 Bedrock을 한 번만 호출한다 (선점자 하나 + 팔로워) / Concurrent requests for one symbol trigger a single Bedrock call (one leader, the rest follow)."""
     bedrock.delay = 0.05
-    app = create_app(state)
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as async_client:
-        responses = await asyncio.gather(*[
-            async_client.post(f"/api/ai/stocks/{US_SYMBOL}", headers={"X-Forwarded-For": f"10.2.2.{index}"})
-            for index in range(3)
-        ])
+    responses = await _post_all(create_app(state), f"/api/ai/stocks/{US_SYMBOL}", 3, "10.2.2.")
 
-    assert [response.status_code for response in responses] == [200, 200, 200]
+    finals = [_final(response) for response in responses]
     assert len(bedrock.stock_calls) == 1
+    # 팔로워도 선점자와 **같은** envelope을 받는다 (asOf 포함) / followers get the leader's envelope, asOf included
+    assert finals == [finals[0]] * 3
+    assert set(finals[0]) == ENVELOPE_KEYS
+
+
+async def test_follower_gets_waiting_heartbeat_then_final(state, services, bedrock, monkeypatch):
+    """
+    팔로워는 대기 중 waiting 하트비트를 받고 선점자 완료 후 final을 받는다 / A follower heartbeats `waiting`, then gets the final.
+
+    하트비트는 CloudFront/ALB idle 카운터를 리셋하기 위한 것이다 - 없으면 느린 선점자 뒤의 팔로워가
+    아무 바이트도 못 받아 연결이 끊긴다.
+    The heartbeat resets the CloudFront/ALB idle counters: without it a follower behind a slow leader
+    receives no bytes at all and its connection is dropped.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    bedrock.delay = 0.05        # 델타 3개 → 선점자는 하트비트 여러 번보다 오래 걸린다 / slower than several beats
+
+    responses = await _post_all(create_app(state), f"/api/ai/stocks/{US_SYMBOL}", 2, "10.5.5.")
+
+    assert len(bedrock.stock_calls) == 1
+    waiting_counts = [_phases(_events(response)).count("waiting") for response in responses]
+    assert max(waiting_counts) >= 1, f"no follower heartbeat: {waiting_counts}"
+    for response in responses:
+        final = _final(response)
+        assert set(final) == ENVELOPE_KEYS
+        assert final["data"]["analysis"] == STOCK_ANALYSIS
+    # 팔로워는 델타를 받지 않는다 (선점자의 스트림은 선점자만 본다) / a follower sees no deltas
+    assert sorted(len(_deltas(_events(r))) for r in responses) == [0, len(STOCK_DELTAS)]
+
+
+async def test_follower_receives_the_leaders_error_as_its_own_final(state, services, bedrock, monkeypatch):
+    """
+    선점자가 실패하면 팔로워도 같은 오류 final을 받는다 (무한 대기 금지) / When the leader fails the follower gets the same error final, never a hang.
+    """
+    monkeypatch.setattr(ai, "HEARTBEAT_SECONDS", 0.01)
+    bedrock.delay = 0.05
+    bedrock.error = bedrock_ai.BedrockUnavailableError("no model access")
+
+    responses = await _post_all(create_app(state), f"/api/ai/stocks/{US_SYMBOL}", 2, "10.6.6.")
+
+    # 실패는 캐시되지 않으므로 팔로워가 선점자 결과를 그대로 물려받아야 한다 (재호출 없음)
+    # The failure is not cached, so the follower must inherit the leader's outcome without a second call
+    assert len(bedrock.stock_calls) == 1
+    for response in responses:
+        assert _final(response) == {"error": "ai_unavailable", "status": 503}
 
 
 # ---------------------------------------------------------------------------
