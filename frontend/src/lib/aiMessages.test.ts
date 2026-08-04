@@ -71,9 +71,16 @@ describe('aiPhaseLabel', () => {
     // null covers the gap before the first `phase`, so a bare spinner never stands alone
     expect(aiPhaseLabel(null)).toBe('분석 준비 중…')
     expect(aiPhaseLabel('fetching')).toBe('본문을 가져오는 중…')
-    // `waiting`은 이 요청이 모델을 부르지 않는 상태다 — "분석 중"이라고 말하면 안 된다
-    // `waiting` means this request calls no model, so it must not read as "analysing"
-    expect(aiPhaseLabel('waiting')).toBe('다른 요청의 결과를 기다리는 중…')
+    /*
+     * `waiting`의 원인은 셋이고(팔로워 대기·Bedrock permit 대기·기사 fetch permit 대기) 프론트는 어느
+     * 쪽인지 구분할 수 없다 — 그래서 문구는 원인에 중립이어야 한다. "다른 요청의 결과를 기다린다"고
+     * 말하면 permit 대기(자기 분석을 곧 시작하는 요청)에서는 거짓이 된다.
+     * A `waiting` has three causes (a follower wait, a Bedrock permit queue, an article fetch permit queue)
+     * and the frontend cannot tell them apart, so the wording must stay neutral about the cause: claiming
+     * it waits for "another request's result" would be false during a permit queue, where this very request
+     * is about to run its own analysis.
+     */
+    expect(aiPhaseLabel('waiting')).toBe('순서를 기다리는 중…')
     expect(aiPhaseLabel('analyzing')).toBe('분석 중…')
   })
 

@@ -60,13 +60,26 @@ export function aiErrorMessage(error: Error): string {
  * The phase wording, one table for both screens, for the same reason the error wording is shared.
  *
  * 문구는 백엔드 `phase` 이벤트를 그대로 옮긴 것이다: `fetching`은 기사 본문 수집(종목 분석에서는 시세·지표
- * 수집), `analyzing`은 Bedrock 스트림, `waiting`은 **같은 대상을 이미 분석 중인 다른 요청**의 결과를
- * 기다리는 상태(백엔드의 선점자-팔로워 구조)다. 마지막이 중요하다 — 그때 이 사용자의 요청은 모델을 부르지
- * 않으므로, "분석 중"이라고 말하면 비용이 두 번 드는 것처럼 읽힌다.
+ * 수집), `analyzing`은 Bedrock 스트림, `waiting`은 **아직 자기 작업을 시작하지 못하고 줄 서 있는 상태**다.
+ * 마지막은 원인이 셋인데(백엔드 `app/api/ai.py`의 `_waiting_heartbeats` — 모든 대기가 이 한 루프를 쓴다)
+ * 프론트에 오는 이벤트는 똑같아서 구분할 수 없다:
+ * - **팔로워 대기** — 같은 대상을 이미 분석 중인 다른 요청의 결과를 승계한다 (이 요청은 모델을 부르지 않는다).
+ * - **Bedrock permit 대기** — 전역 동시 실행 상한(`AI_GLOBAL_CONCURRENCY`) 뒤에 줄 섰다. 순서가 오면
+ *   **이 요청이 직접** 분석한다.
+ * - **기사 fetch permit 대기** — 기사 조회 세마포어(`AI_FETCH_CONCURRENCY`) 뒤에 줄 섰다. 역시 자기 작업이다.
+ * 그래서 문구는 원인에 중립이어야 한다 — "다른 요청의 결과를 기다린다"고 단정하면 뒤의 두 경우에 거짓이 되고,
+ * 반대로 "분석 중"이라고 말하면 아직 시작도 안 한 대기를 진행으로 읽게 한다.
  * The wording mirrors the backend's `phase` event: `fetching` is the article (or quote) collection, `analyzing`
- * is the Bedrock stream, and `waiting` means another request is already analysing the same subject and this one
- * is waiting for its result (the backend's leader-follower arrangement). That last one matters: this request
- * calls no model at all, so calling it "analysing" would read as paying twice.
+ * is the Bedrock stream, and `waiting` means **queued, with its own work not yet started**. That last one has
+ * three causes (all waits share one loop — `_waiting_heartbeats` in `app/api/ai.py`) and they reach the
+ * frontend as the very same event, so it cannot tell them apart:
+ * - **a follower wait**, inheriting the result of another request already analysing the same subject (this
+ *   request calls no model);
+ * - **a Bedrock permit queue** behind the global concurrency cap (`AI_GLOBAL_CONCURRENCY`) — when its turn
+ *   comes **this request** does the analysis itself;
+ * - **an article fetch permit queue** behind the fetch semaphore (`AI_FETCH_CONCURRENCY`), likewise its own work.
+ * The wording therefore has to stay neutral about the cause: asserting it waits for "another request's result"
+ * would be false in the latter two, while "analysing" would read a not-yet-started wait as progress.
  *
  * `null`은 요청은 보냈지만 첫 `phase`가 아직 오지 않은 사이다 (그리고 기사 화면의 첫 렌더). 그 짧은 구간에도
  * 문구가 있어야 스피너만 도는 화면이 생기지 않는다.
@@ -75,7 +88,7 @@ export function aiErrorMessage(error: Error): string {
  */
 export function aiPhaseLabel(phase: AiPhase | null): string {
   if (phase === 'fetching') return '본문을 가져오는 중…'
-  if (phase === 'waiting') return '다른 요청의 결과를 기다리는 중…'
+  if (phase === 'waiting') return '순서를 기다리는 중…'
   if (phase === 'analyzing') return '분석 중…'
   return '분석 준비 중…'
 }

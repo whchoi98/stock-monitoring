@@ -73,7 +73,7 @@ describe('AIPanel', () => {
   const phaseLabels: [AiPhase | null, string][] = [
     [null, '분석 준비 중…'],
     ['fetching', '본문을 가져오는 중…'],
-    ['waiting', '다른 요청의 결과를 기다리는 중…'],
+    ['waiting', '순서를 기다리는 중…'],
     ['analyzing', '분석 중…'],
   ]
 
