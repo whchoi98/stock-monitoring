@@ -19,7 +19,7 @@ import math
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence
+from typing import Any, Dict, Iterable, Iterator, List, Literal, Optional, Sequence, Sized, Tuple
 
 import yfinance as yf
 
@@ -54,24 +54,83 @@ QUOTE_PERIOD = "7d"
 # a single request, not a whole batch. Explicit rather than relying on yfinance's 10s default.
 DOWNLOAD_TIMEOUT = 8
 
-# `fetch_quotes` 한 호출의 전체 벽시계 예산(초) / Total wall-clock budget for one `fetch_quotes` call.
+# 주의 — 이 8초는 crumb(쿠키/CSRF 토큰)이 이미 따뜻할 때의 상한이다. yfinance는 매 요청 앞에서
+# `_get_cookie_and_crumb()`를 **우리 timeout 없이** 호출하므로(yfinance 1.5.2 `data.py:429` →
+# `data.py:371`) 그 구간은 자체 기본값 30s를 쓴다. 즉 crumb이 없거나 갱신 중이면 요청 1건의 실제
+# 상한은 8s가 아니라 ~38s다. 아래 데드라인들은 "언제 새 요청을 그만 낼지"만 정하므로, 실제 벽시계
+# 상한은 항상 "데드라인 + 진행 중인 요청 1건(crumb 갱신 포함 가능)"으로 읽어야 한다.
+# Caveat: 8s bounds one request only while the crumb (cookie/CSRF token) is warm. yfinance calls
+# `_get_cookie_and_crumb()` **without** our timeout before every request (yfinance 1.5.2 `data.py:429`
+# -> `data.py:371`), so that leg falls back to its own 30s default: with a cold or refreshing crumb a
+# single request's true ceiling is ~38s, not 8s. Every deadline below only decides when to stop
+# issuing new requests, so the real wall-clock bound is always "deadline + one in-flight request
+# (possibly including a crumb refresh)".
+
+# ---------------------------------------------------------------------------
+# 예산 / Budgets
+# ---------------------------------------------------------------------------
+# 실측 기준: 이 호스트에서 정상 상태의 yfinance 요청 1건 ≈ 0.3s/심볼 (2026-08-04 측정). 아래 예산은
+# 모두 이 값의 배수(= 허용 열화 배수)로 읽는다 — 마법의 상수가 아니다.
+# Measured baseline: one healthy yfinance request from this host is ≈ 0.3s/symbol (2026-08-04). Every
+# budget below is expressed as a multiple of it (= the latency degradation it tolerates), not a magic
+# number.
 #
-# 예산 산술 / Budget arithmetic:
-#   - 요청 1건 상한 = DOWNLOAD_TIMEOUT(8s). 심볼 50개면 1차 패스만으로도 50×8 = 400s가 가능하고
-#     재시도까지 더하면 그 두 배다. `fetch_quotes`는 `asyncio.to_thread`(공용 기본 executor)에서
-#     돌기 때문에 총 데드라인이 없으면 워커가 분 단위로 묶인다.
-#   - CloudFront 오리진 read timeout = 60s (infra `read_timeout`). `/api/market/overview`는 한
-#     요청에서 두 시장을 조회할 수 있으므로 25×2 = 50s < 60s 여야 지수·지표 몫도 남는다.
-#   - 스케줄러 장중 사이클 = 45s (config.REFRESH_INTERVAL). 시장 1개 = 25s < 45s.
-#     (스케줄러는 두 시장을 순차로 조회하므로 최악의 경우 사이클이 밀린다 — 대기가 갱신 *뒤*라
-#      사이클이 겹치지는 않는다.)
-#   - Per-request cap is 8s; a 50-symbol primary pass alone could reach 400s, doubled with the retry,
-#     and this runs on the shared default executor, so the total deadline is what frees the worker.
-#     CloudFront's origin read timeout is 60s and the overview route may fetch both markets in one
-#     request (25×2 = 50s < 60s, leaving room for indices/indicators). The scheduler's in-hours cycle
-#     is 45s, so one market at 25s fits; two markets slip the cycle rather than overlap it, because
-#     the loop waits *after* the refresh.
-QUOTE_FETCH_DEADLINE = 25
+# 60초 천장 배분 / Splitting the 60s ceiling:
+#   콜드 `/api/market/overview` 한 요청은 네 조각을 순차로 조회한다 — 지수 → 지표 → quotes:us →
+#   quotes:kr. CloudFront 오리진 read timeout(60s)이 요청 1건의 천장이므로:
+#     quotes 두 조각 = 2 × QUOTE_FETCH_DEADLINE_MAX(25s) = 50s
+#     INDEX_FETCH_DEADLINE(4s) + INDICATOR_FETCH_DEADLINE(6s)      = 10s
+#     합계                                                          = 60s = 천장
+#   조립(summary/sectors)은 ~100행 순수 CPU라 무시할 수 있다. 스케줄러(REFRESH_INTERVAL 45s)는 대기를
+#   갱신 *뒤*에 하므로 사이클이 밀릴 뿐 겹치지 않는다.
+#   위 crumb 주의사항 때문에 이 합계는 "요청을 더 내지 않는 시점"의 합이다 — 진행 중인 요청 1건이
+#   천장을 넘길 수 있고, 그때 손실은 그 overview 요청 1건의 504뿐이다 (캐시·스케줄러 경로는 무관하고
+#   다음 요청은 캐시된 값을 받는다).
+#   A cold `/api/market/overview` fetches four pieces serially - indices, indicators, quotes:us,
+#   quotes:kr - and CloudFront's 60s origin read timeout caps that one request: 2 × 25s of quotes plus
+#   4s + 6s of indices/indicators = exactly 60s (assembly is ~100 rows of pure CPU, negligible). The
+#   scheduler waits *after* each refresh, so a long cycle slips rather than overlaps. Per the crumb
+#   caveat these are sums of "stop issuing" points: one in-flight request can still exceed the
+#   ceiling, and the only casualty is a 504 on that single overview request - the cache and scheduler
+#   paths are untouched and the next request is served from cache.
+
+# 지수 5심볼(US 3 + KR 2)의 전체 예산(초) / Total budget for the 5 index symbols (US 3 + KR 2).
+# 4s / 5심볼 = 0.8s/심볼 = 실측의 2.7배. 만료 시 남은 심볼을 포기하고 파싱된 행만 반환한다 —
+# 지수는 시장 테이블이 아니라 대시보드의 추가 행이므로 예외를 던지지 않는다.
+# 4s over 5 symbols = 0.8s each = 2.7× the measured latency. On expiry the rest are dropped and the
+# parsed rows are returned: indices are additive dashboard rows, not the market table, so nothing raises.
+INDEX_FETCH_DEADLINE = 4
+
+# 경제지표 11심볼의 전체 예산(초) / Total budget for the 11 indicator symbols.
+# 6s / 11심볼 = 0.55s/심볼 = 실측의 1.8배. 지수와 동일한 부분 결과 규약.
+# 6s over 11 symbols = 0.55s each = 1.8× the measured latency; same partial-result contract as indices.
+INDICATOR_FETCH_DEADLINE = 6
+
+# `fetch_quotes` 한 호출의 전체 벽시계 예산 = 심볼 수 × QUOTE_BUDGET_PER_SYMBOL (상한 클램프).
+# Total wall-clock budget for one `fetch_quotes` call = symbol count × QUOTE_BUDGET_PER_SYMBOL, clamped.
+#
+# 왜 심볼당인가 / Why per-symbol:
+#   - 요청 1건 상한 = DOWNLOAD_TIMEOUT(8s). 심볼 50개면 1차 패스만으로 50×8 = 400s가 가능하고
+#     재시도까지 더하면 두 배다. `fetch_quotes`는 `asyncio.to_thread`(공용 기본 executor)에서 돌기
+#     때문에 총 예산이 없으면 워커가 분 단위로 묶인다.
+#   - 고정 상수는 심볼 수가 바뀌면 뜻이 바뀐다: 50심볼에 25s는 0.5s/심볼이고 실측 0.3s의 1.7배뿐
+#     이다. 심볼당으로 쓰면 유니버스가 커질 때 예산이 함께 자라고, 작은 시장은 더 빨리 포기하며,
+#     상한에 걸리는 지점이 코드에 드러난다.
+#   - Per-request cap is 8s: a 50-symbol primary pass alone could reach 400s (doubled with the retry)
+#     and it runs on the shared default executor, so the total budget is what frees the worker. A flat
+#     constant also changes meaning with the symbol count, whereas a per-symbol budget grows with the
+#     universe, gives up sooner on a small market, and makes the clamp point explicit.
+#
+# 현재 유니버스(50심볼)에서는 0.9 × 50 = 45s > 25s이므로 클램프가 유효하다. 즉 실효 헤드룸은 여전히
+# 1.7배이며, 그것은 예산 선택이 아니라 위 60s/45s 천장이 정한 한계다. 3배 열화의 완충은 예산이 아니라
+# 커버리지 게이트 + stale-while-error가 맡는다 — 부분 결과를 캐시에 밀어넣는 대신 마지막 정상 시세를
+# 계속 서빙한다.
+# At the current 50-symbol universe 0.9 × 50 = 45s > 25s, so the clamp binds and the effective headroom
+# is still 1.7×. That is a limit set by the 60s/45s ceilings above, not by this constant; what absorbs a
+# 3× degradation is the coverage gate plus stale-while-error, which keeps serving the last good quotes
+# instead of pushing a thin partial into the cache.
+QUOTE_BUDGET_PER_SYMBOL = 0.9  # 실측 0.3s/심볼 × 3배 열화 허용 / measured 0.3s × 3× degradation
+QUOTE_FETCH_DEADLINE_MAX = 25
 
 # 부분 성공 허용 하한 = 파싱 성공 심볼 / 요청 심볼. 이 값 이상이면 부분 결과를 반환하고(경고),
 # 미달이면 예외를 던져 캐시의 마지막 정상 시세를 지킨다.
@@ -162,6 +221,56 @@ def _download(symbols: Sequence[str], period: str):
     )
 
 
+def _serial_frames(
+    symbols: Sequence[str],
+    period: str,
+    deadline: float,
+    *,
+    deadline_event: str,
+    failure_event: str,
+    parsed_so_far: Optional[Sized] = None,
+    **fields: Any,
+) -> Iterator[Tuple[str, Any]]:
+    """
+    심볼당 요청 1건을 순차로 내고 (심볼, 프레임)을 yield / Issue one request per symbol serially, yielding (symbol, frame).
+
+    `yf.download(..., threads=False)`은 배치를 받아도 심볼당 순차 HTTP 요청을 보내므로
+    (yfinance/multi.py의 `_download_one` 루프) 직접 심볼별로 부르면 업스트림이 보는 트래픽은 같고,
+    그 대신 **요청 사이에서 데드라인을 확인**할 수 있다 — 배치 호출 하나는 중간에 끊을 방법이 없다.
+    `yf.download(..., threads=False)` issues one sequential HTTP request per symbol even for a batch
+    (the `_download_one` loop in yfinance/multi.py), so issuing them ourselves shows upstream the same
+    traffic while letting the deadline be checked *between* requests; a single batch call cannot be
+    interrupted mid-flight.
+
+    데드라인 만료와 개별 요청 실패는 모두 경고만 남기고 계속/중단한다 (조용한 실패 금지).
+    Both an expired deadline and a single failed request only warn (never silently); nothing raises.
+
+    Args:
+        symbols: 요청할 심볼 / Symbols to request.
+        period: yfinance 조회 기간 / yfinance period.
+        deadline: `_now()` 기준 종료 시각 — 지나면 새 요청을 내지 않는다 / `_now()`-based cutoff.
+        deadline_event: 예산 소진 로그 이벤트 이름 / Log event name for budget exhaustion.
+        failure_event: 요청 1건 실패 로그 이벤트 이름 / Log event name for one failed request.
+        parsed_so_far: 호출부가 지금까지 파싱한 결과 (있으면 예산 소진 로그에 개수를 담는다).
+            The caller's parsed-so-far collection; its length is added to the deadline log line.
+        **fields: 두 로그에 함께 담을 문맥 / Extra context for both log lines.
+    """
+    for issued, symbol in enumerate(symbols):
+        if _now() >= deadline:
+            # 예산 소진: 남은 심볼은 포기하고 가진 것으로 판정한다 (워커를 붙잡아두지 않는다)
+            # Budget spent: give up the rest and evaluate what we have (never hold the worker)
+            spent = {} if parsed_so_far is None else {"parsed": len(parsed_so_far)}
+            _warn(deadline_event, requested=len(symbols), issued=issued, **spent, **fields)
+            return
+        try:
+            frame = _download([symbol], period)
+        except Exception as exc:
+            # 한 심볼의 실패가 남은 심볼을 죽이지 않는다 / One symbol's failure must not kill the pass
+            _warn(failure_event, symbol=symbol, error=str(exc), **fields)
+            continue
+        yield symbol, frame
+
+
 def _sub_frame(df, symbol: str, requested: int):
     """
     다운로드 프레임에서 심볼별 서브 프레임 추출 / Extract the per-symbol sub-frame from a download result.
@@ -219,22 +328,28 @@ def fetch_indices() -> list[IndexQuote]:
     KR 지수도 yfinance 심볼(`^KS11`/`^KQ11`)을 사용한다 (pykrx 미사용).
     KR indices also use yfinance symbols (`^KS11`/`^KQ11`); pykrx is not used.
 
+    `INDEX_FETCH_DEADLINE` 안에서 심볼당 요청 1건을 순차로 낸다. 예산이 만료되면 남은 심볼을 포기하고
+    파싱된 행만 반환한다 (예외 없음) — 지수는 시장 테이블이 아니라 대시보드의 추가 행이다.
+    One serial request per symbol inside `INDEX_FETCH_DEADLINE`; on expiry the remaining symbols are
+    dropped and the parsed rows returned (nothing raises), because indices are additive dashboard rows
+    rather than the market table.
+
     Returns:
-        IndexQuote 리스트 (실패 심볼은 제외) / List of IndexQuote (failed symbols omitted).
+        IndexQuote 리스트 (실패·예산 초과 심볼은 제외) / List of IndexQuote (failed and unbudgeted symbols omitted).
     """
     names = {**config.US_INDICES, **config.KR_INDICES}
     symbols = list(names)
-
-    try:
-        df = _download(symbols, INDEX_PERIOD)
-    except Exception as exc:
-        _warn("indices_download_failed", symbols=symbols, error=str(exc))
-        return []
-
     results: list[IndexQuote] = []
-    for symbol in symbols:
+
+    frames = _serial_frames(
+        symbols, INDEX_PERIOD, _now() + INDEX_FETCH_DEADLINE,
+        deadline_event="indices_deadline_reached",
+        failure_event="index_download_failed",
+        parsed_so_far=results,
+    )
+    for symbol, frame in frames:
         try:
-            sub = _sub_frame(df, symbol, len(symbols))
+            sub = _sub_frame(frame, symbol, 1)
             if sub is None:
                 _warn("index_data_missing", symbol=symbol)
                 continue
@@ -275,25 +390,28 @@ def fetch_indicators() -> list[Indicator]:
     """
     환율/금리/원자재 등 경제지표를 한 번의 일괄 다운로드로 조회 / Fetch economic indicators in one batch download.
 
-    심볼별 개별 다운로드 대신 일괄 다운로드 + dropna로 NaN 정렬 문제를 피한다.
-    Uses a batch download plus dropna instead of per-symbol downloads to avoid NaN alignment issues.
+    심볼당 요청 1건을 순차로 내고 dropna로 휴장일 NaN 행을 흡수한다 (`fetch_indices`와 동일한 규약).
+    One serial request per symbol, with dropna absorbing holiday NaN rows (same contract as `fetch_indices`).
+
+    `INDICATOR_FETCH_DEADLINE`이 만료되면 남은 심볼을 포기하고 파싱된 행만 반환한다 (예외 없음).
+    On `INDICATOR_FETCH_DEADLINE` expiry the remaining symbols are dropped and the parsed rows returned.
 
     Returns:
-        Indicator 리스트 (실패 심볼은 제외) / List of Indicator (failed symbols omitted).
+        Indicator 리스트 (실패·예산 초과 심볼은 제외) / List of Indicator (failed and unbudgeted symbols omitted).
     """
     symbols = list(config.INDICATORS)
-
-    try:
-        df = _download(symbols, INDICATOR_PERIOD)
-    except Exception as exc:
-        _warn("indicators_download_failed", symbols=symbols, error=str(exc))
-        return []
-
     results: list[Indicator] = []
-    for symbol in symbols:
+
+    frames = _serial_frames(
+        symbols, INDICATOR_PERIOD, _now() + INDICATOR_FETCH_DEADLINE,
+        deadline_event="indicators_deadline_reached",
+        failure_event="indicator_download_failed",
+        parsed_so_far=results,
+    )
+    for symbol, frame in frames:
         try:
             name, unit = config.INDICATORS[symbol]
-            sub = _sub_frame(df, symbol, len(symbols))
+            sub = _sub_frame(frame, symbol, 1)
             if sub is None:
                 _warn("indicator_data_missing", symbol=symbol)
                 continue
@@ -405,12 +523,9 @@ def _quote_pass(
     """
     심볼별 순차 요청 한 패스 / One serial pass of per-symbol requests.
 
-    심볼당 `yf.download` 1회다. `threads=False` 배치도 내부적으로는 심볼당 순차 요청이라 Yahoo가
-    보는 트래픽은 동일하지만, 이렇게 하면 요청 사이에서 데드라인을 확인할 수 있다 — 배치 호출
-    하나는 중간에 끊을 방법이 없다.
-    One `yf.download` per symbol. A `threads=False` batch is per-symbol serial requests internally, so
-    upstream sees the same traffic, but this way the deadline can be checked between requests: a
-    single batch call cannot be interrupted mid-flight.
+    지수·지표와 같은 `_serial_frames` 규율을 쓴다 (심볼당 요청 1건 + 요청 사이 데드라인 확인).
+    Uses the same `_serial_frames` discipline as indices and indicators: one request per symbol with
+    the deadline checked between requests.
 
     Args:
         symbols: 이 패스에서 요청할 심볼 / Symbols to request in this pass.
@@ -421,25 +536,27 @@ def _quote_pass(
         {심볼: Quote} - 실패하거나 가격이 없는 심볼은 빠진다 / {symbol: Quote}; failures and priceless symbols absent.
     """
     parsed: Dict[str, Quote] = {}
-    for issued, symbol in enumerate(symbols):
-        if _now() >= deadline:
-            # 예산 소진: 남은 심볼은 포기하고 가진 것으로 판정한다 (워커를 붙잡아두지 않는다)
-            # Budget spent: give up the rest and evaluate what we have (never hold the worker)
-            _warn(
-                "quote_deadline_reached",
-                market=market, attempt=attempt,
-                requested=len(symbols), issued=issued, parsed=len(parsed),
-            )
-            break
-        try:
-            frame = _download([symbol], QUOTE_PERIOD)
-        except Exception as exc:
-            # 한 심볼의 실패가 남은 심볼을 죽이지 않는다 / One symbol's failure must not kill the pass
-            _warn("quote_download_failed", market=market, attempt=attempt, symbol=symbol, error=str(exc))
-            continue
+    frames = _serial_frames(
+        symbols, QUOTE_PERIOD, deadline,
+        deadline_event="quote_deadline_reached",
+        failure_event="quote_download_failed",
+        parsed_so_far=parsed,
+        market=market, attempt=attempt,
+    )
+    for symbol, frame in frames:
         for quote in _parse_quotes(frame, [symbol], market, currency, names, sectors):
             parsed[quote.symbol] = quote
     return parsed
+
+
+def _quote_budget(symbol_count: int) -> float:
+    """
+    심볼 수에 비례한 시세 조회 예산(초), 상한 클램프 / Symbol-proportional quote budget in seconds, clamped.
+
+    산술 근거는 `QUOTE_BUDGET_PER_SYMBOL` / `QUOTE_FETCH_DEADLINE_MAX` 주석 참조.
+    See the `QUOTE_BUDGET_PER_SYMBOL` / `QUOTE_FETCH_DEADLINE_MAX` comments for the arithmetic.
+    """
+    return min(QUOTE_BUDGET_PER_SYMBOL * symbol_count, QUOTE_FETCH_DEADLINE_MAX)
 
 
 def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
@@ -459,9 +576,11 @@ def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
          경고, 미달이면 `QuotesUnavailableError`.
          Coverage gate: at or above `QUOTE_MIN_COVERAGE` the partial result is returned with a
          warning; below it, `QuotesUnavailableError`.
-      4. 전체 예산 `QUOTE_FETCH_DEADLINE`: 만료되면 새 요청을 내지 않고 가진 것으로 판정한다.
-         `QUOTE_FETCH_DEADLINE` caps the whole sequence: on expiry no new request is issued and what
-         we have is evaluated.
+      4. 전체 예산 = `_quote_budget(심볼 수)`: 만료되면 새 요청을 내지 않고 가진 것으로 판정한다.
+         진행 중인 요청 1건은 예산 밖이다 (`DOWNLOAD_TIMEOUT` 주석의 crumb 주의사항 참조).
+         `_quote_budget(symbol count)` caps the whole sequence: on expiry no new request is issued and
+         what we have is evaluated. One in-flight request sits outside the budget (see the crumb
+         caveat next to `DOWNLOAD_TIMEOUT`).
 
     Args:
         market: "us" 또는 "kr" / "us" or "kr"
@@ -487,7 +606,7 @@ def fetch_quotes(market: Literal["us", "kr"]) -> list[Quote]:
     if not symbols:
         return []
 
-    deadline = _now() + QUOTE_FETCH_DEADLINE
+    deadline = _now() + _quote_budget(len(symbols))
     parsed = _quote_pass(symbols, market, currency, names, sectors, deadline, "primary")
 
     missing = [symbol for symbol in symbols if symbol not in parsed]

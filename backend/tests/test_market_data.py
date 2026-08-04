@@ -120,8 +120,15 @@ def test_fetch_quotes_kr_currency(monkeypatch):
 # fetch_indices
 # ---------------------------------------------------------------------------
 
-def test_fetch_indices_covers_us_and_kr_in_one_batch(monkeypatch):
-    """US+KR 지수를 한 번의 download로 조회하고 config 이름을 사용 / One batch download, names from config."""
+def test_fetch_indices_requests_every_symbol_serially_with_an_explicit_timeout(monkeypatch):
+    """
+    US+KR 지수를 심볼당 순차 요청 1건으로 조회하고 config 이름을 사용 / One serial request per index symbol.
+
+    `threads=False` 배치도 내부적으로는 심볼당 순차 요청이므로(yfinance/multi.py `_download_one`)
+    업스트림이 보는 트래픽은 같지만, 이렇게 하면 요청 사이에서 총 데드라인을 확인할 수 있다.
+    A `threads=False` batch is already one sequential request per symbol internally, so upstream sees
+    the same traffic; issuing them ourselves is what lets the total deadline be checked between them.
+    """
     calls = []
 
     def recording_download(symbols, **kw):
@@ -131,21 +138,52 @@ def test_fetch_indices_covers_us_and_kr_in_one_batch(monkeypatch):
     monkeypatch.setattr(market_data.yf, "download", recording_download)
     out = market_data.fetch_indices()
 
-    assert len(calls) == 1
-    requested, kwargs = calls[0]
-    assert requested == list(config.US_INDICES) + list(config.KR_INDICES)
-    assert kwargs["period"] == "5d"
-    assert kwargs["group_by"] == "ticker"
-    assert kwargs["threads"] is False
-    assert kwargs["progress"] is False
-    # yfinance 기본값(10s)에 기대지 않고 명시한다 / explicit, never yfinance's 10s default
-    assert kwargs["timeout"] == market_data.DOWNLOAD_TIMEOUT
+    requested = list(config.US_INDICES) + list(config.KR_INDICES)
+    assert [symbols for symbols, _kwargs in calls] == [[s] for s in requested]
+    for _symbols, kwargs in calls:
+        assert kwargs["period"] == "5d"
+        assert kwargs["group_by"] == "ticker"
+        assert kwargs["threads"] is False
+        assert kwargs["progress"] is False
+        # yfinance 기본값(10s)에 기대지 않고 명시한다 / explicit, never yfinance's 10s default
+        assert kwargs["timeout"] == market_data.DOWNLOAD_TIMEOUT
 
     assert [i.symbol for i in out] == requested
     names = {i.symbol: i.name for i in out}
     assert names["^GSPC"] == config.US_INDICES["^GSPC"]
     assert names["^KQ11"] == config.KR_INDICES["^KQ11"]
     assert all(i.change == pytest.approx(10.0) for i in out)
+
+
+def test_fetch_indices_stops_issuing_requests_when_the_deadline_expires(monkeypatch, caplog):
+    """
+    데드라인이 만료되면 남은 지수 요청을 내지 않고, 파싱된 행만 반환한다 (예외 없음).
+    Once the deadline expires no further index request is issued; the parsed rows are returned as-is.
+
+    지수는 대시보드의 추가 행이지 시장 테이블이 아니므로 부분 결과가 정답이다. 총 데드라인이 없으면
+    느린 업스트림에서 지수+지표만으로 16 × DOWNLOAD_TIMEOUT = 128s가 가능해 콜드 overview 한 건이
+    CloudFront 오리진 타임아웃(60s)을 넘긴다.
+    Indices are additive dashboard rows, not the market table, so a partial result is the right answer.
+    Without a total deadline a slow upstream could spend 16 × DOWNLOAD_TIMEOUT = 128s on indices plus
+    indicators alone, pushing one cold overview past CloudFront's 60s origin read timeout.
+    """
+    clock = {"t": 0.0}
+    calls = []
+
+    def slow_download(symbols, **kw):
+        calls.append(list(symbols))
+        # 요청 2건이면 예산을 소진한다 / two requests exhaust the budget
+        clock["t"] += market_data.INDEX_FETCH_DEADLINE / 2
+        return fake_download(symbols, **kw)
+
+    monkeypatch.setattr(market_data, "_now", lambda: clock["t"])
+    monkeypatch.setattr(market_data.yf, "download", slow_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = market_data.fetch_indices()
+
+    assert len(calls) == 2  # 전 심볼이 아니라 예산이 허용한 만큼만 / only what the budget allowed
+    assert [i.symbol for i in out] == [symbols[0] for symbols in calls]
+    assert "indices_deadline_reached" in {p.get("event") for p in _warning_payloads(caplog)}
 
 
 def test_fetch_indices_skips_missing_symbol_and_warns(monkeypatch, caplog):
@@ -162,7 +200,7 @@ def test_fetch_indices_skips_missing_symbol_and_warns(monkeypatch, caplog):
 
 
 def test_fetch_indices_download_failure_returns_empty_and_warns(monkeypatch, caplog):
-    """다운로드 자체가 실패하면 빈 리스트 + 경고 / Whole-batch failure yields empty list plus warning."""
+    """모든 심볼 요청이 실패하면 빈 리스트 + 경고 / Every symbol's request failing yields an empty list plus warnings."""
     def boom(symbols, **kw):
         raise RuntimeError("network down")
 
@@ -189,9 +227,10 @@ def test_fetch_indicators_values_and_units(monkeypatch):
     monkeypatch.setattr(market_data.yf, "download", recording_download)
     out = market_data.fetch_indicators()
 
-    assert len(calls) == 1
-    assert calls[0][0] == list(config.INDICATORS)
-    assert calls[0][1]["period"] == "5d"
+    # 심볼당 요청 1건, config 순서 그대로 / one request per symbol, in config order
+    assert [symbols for symbols, _kwargs in calls] == [[s] for s in config.INDICATORS]
+    assert all(kwargs["period"] == "5d" for _symbols, kwargs in calls)
+    assert all(kwargs["timeout"] == market_data.DOWNLOAD_TIMEOUT for _symbols, kwargs in calls)
 
     assert len(out) == len(config.INDICATORS)
     by_symbol = {i.symbol: i for i in out}
@@ -218,6 +257,28 @@ def test_fetch_indicators_dropna_uses_last_valid_closes(monkeypatch):
     assert "CL=F" not in by_symbol
     gold = by_symbol["GC=F"]
     assert gold.value == 100.0 and gold.change == 0.0 and gold.change_pct == 0.0
+
+
+def test_fetch_indicators_stops_issuing_requests_when_the_deadline_expires(monkeypatch, caplog):
+    """
+    지표도 같은 데드라인 규율을 따른다 (만료 시 부분 결과 + 경고) / Indicators follow the same deadline discipline.
+    """
+    clock = {"t": 0.0}
+    calls = []
+
+    def slow_download(symbols, **kw):
+        calls.append(list(symbols))
+        clock["t"] += market_data.INDICATOR_FETCH_DEADLINE / 2
+        return fake_download(symbols, **kw)
+
+    monkeypatch.setattr(market_data, "_now", lambda: clock["t"])
+    monkeypatch.setattr(market_data.yf, "download", slow_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = market_data.fetch_indicators()
+
+    assert len(calls) == 2  # 11심볼이 아니라 예산이 허용한 만큼만 / only what the budget allowed
+    assert [i.symbol for i in out] == [symbols[0] for symbols in calls]
+    assert "indicators_deadline_reached" in {p.get("event") for p in _warning_payloads(caplog)}
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +409,53 @@ def test_fetch_quotes_retries_and_raises_when_the_primary_pass_is_all_empty(monk
     assert "quotes_empty" in {p.get("event") for p in _warning_payloads(caplog)}
 
 
+def test_quote_budget_scales_with_symbol_count_and_clamps_to_the_ceiling():
+    """
+    예산 = 심볼 수 × 심볼당 예산, 60s/45s 천장이 정한 상한에서 클램프된다.
+    Budget = symbol count × per-symbol budget, clamped at the ceiling the 60s/45s limits dictate.
+
+    고정 상수는 심볼 수가 바뀌면 의미가 바뀐다 (50심볼에서 25s = 0.5s/심볼 = 실측 0.3s/심볼의
+    1.7배뿐). 심볼당으로 쓰면 유니버스가 커질 때 예산도 함께 자라고, 상한에 걸리는 지점이 명시된다.
+    A flat constant silently changes meaning with the symbol count (25s over 50 symbols is 0.5s each,
+    only 1.7× the measured 0.3s). A per-symbol budget grows with the universe and makes the point where
+    the ceiling binds explicit.
+    """
+    assert market_data._quote_budget(10) == pytest.approx(market_data.QUOTE_BUDGET_PER_SYMBOL * 10)
+    # 현재 유니버스(50심볼)에서는 상한이 유효하다 — 그 한계는 60s/45s 천장이 정한 것이다
+    # At the current 50-symbol universe the clamp binds; that limit is set by the 60s/45s ceilings
+    universe = len(config.US_STOCKS)
+    assert market_data.QUOTE_BUDGET_PER_SYMBOL * universe > market_data.QUOTE_FETCH_DEADLINE_MAX
+    assert market_data._quote_budget(universe) == market_data.QUOTE_FETCH_DEADLINE_MAX
+
+
+def test_fetch_quotes_deadline_scales_down_for_a_small_universe(monkeypatch, caplog):
+    """
+    작은 시장은 50심볼용 상한(25s)을 받지 않는다 — 예산이 심볼 수에 비례해 더 빨리 포기한다.
+    A small market does not get the 50-symbol ceiling: the budget scales down, so it gives up sooner.
+    """
+    symbols = list(config.US_STOCKS[:5])
+    monkeypatch.setattr(config, "US_STOCKS", symbols)
+    budget = market_data._quote_budget(len(symbols))
+    assert budget < market_data.QUOTE_FETCH_DEADLINE_MAX  # 상한 미적용 / the clamp does not bind here
+
+    clock = {"t": 0.0}
+    calls = []
+
+    def slow_download(requested, **kw):
+        calls.append(list(requested))
+        clock["t"] += budget / 2.25  # 요청 3건이면 예산 초과 / three requests overrun the budget
+        return fake_download(requested, **kw)
+
+    monkeypatch.setattr(market_data, "_now", lambda: clock["t"])
+    monkeypatch.setattr(market_data.yf, "download", slow_download)
+    with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
+        out = market_data.fetch_quotes("us")
+
+    assert len(calls) == 3 and len(out) == 3  # 5심볼 전부가 아니라 예산이 허용한 만큼만
+    events = {p.get("event") for p in _warning_payloads(caplog)}
+    assert {"quote_deadline_reached", "quote_retry_skipped"} <= events
+
+
 def test_fetch_quotes_stops_issuing_requests_when_the_deadline_expires(monkeypatch, caplog):
     """
     총 데드라인이 만료되면 새 요청을 내지 않고 가진 것으로 판정한다.
@@ -360,11 +468,12 @@ def test_fetch_quotes_stops_issuing_requests_when_the_deadline_expires(monkeypat
     """
     clock = {"t": 0.0}
     calls = []
+    budget = market_data._quote_budget(len(config.US_STOCKS))
 
     def slow_download(symbols, **kw):
         calls.append(list(symbols))
         # 요청 2건이면 예산을 소진한다 / two requests exhaust the budget
-        clock["t"] += market_data.QUOTE_FETCH_DEADLINE / 2
+        clock["t"] += budget / 2
         return fake_download(symbols, **kw)
 
     monkeypatch.setattr(market_data, "_now", lambda: clock["t"])
