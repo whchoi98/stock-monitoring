@@ -1,7 +1,8 @@
 /**
- * 테마 토글 — `<html data-theme>`만 바꾼다. 색은 전부 토큰이라 이 한 속성이 테마의 전부다.
- * The theme toggle; it only flips `<html data-theme>`. Every colour is a token, so this single
- * attribute is the whole theme.
+ * 테마 토글 — `<html data-theme>`을 바꾸고, 그에 맞춰 theme-color 메타(PWA/브라우저 크롬)를 `--bg` 토큰으로 갱신한다.
+ * 색은 전부 토큰이라 이 한 속성이 테마의 전부다.
+ * The theme toggle: it flips `<html data-theme>` and syncs the theme-color meta (PWA / browser chrome) to the `--bg`
+ * token. Every colour is a token, so this single attribute is the whole theme.
  *
  * **불변식**: `data-theme`은 항상 `dark` 또는 `light`여야 한다 — tokens.css는 이 속성이 붙은
  * `:root`에만 변수를 정의하므로, 속성을 지우면 모든 색이 사라진다. 그래서 어떤 경로로도
@@ -41,6 +42,10 @@ export function ThemeToggle() {
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
+    // 브라우저 크롬(설치형 상단 바·주소창)의 theme-color를 현재 테마의 `--bg`에 맞춘다 — 값은 tokens.css에서만 읽는다
+    // Sync the browser chrome's theme-color (standalone title bar, address bar) to the current theme's `--bg`, read from tokens.css only
+    const background = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+    if (background !== '') document.querySelector('meta[name="theme-color"]')?.setAttribute('content', background)
     try {
       localStorage.setItem(STORAGE_KEY, theme)
     } catch {

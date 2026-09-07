@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Add an installable PWA (ADR-002): a web-app manifest with brand-mark icons and a workbox service worker that precaches the app shell, serves SPA routes offline and caches fonts on first use — `/api/*` is never cached (offline, polls pause on the last data); the status bar shows an offline badge and a toast offers "새로 고침" when a new version is waiting; the backend SPA fallback now keeps real 404s for `/assets/*` and file-like paths so a rolling deploy can never cache HTML under an asset URL
 - Add Korean stock names (`name_ko`) to quotes and stock detail, shown in search results and the quote header, with Korean-name and Hangul-initial (초성) matching in symbol search
 - Add free-form questions to the AI stock analysis panel — a question input with presets, an optional `{question}` body (1–200 chars after normalisation), a per-question cache key `ai:stock:{symbol}:q:{sha256[:16]}`, and the question echoed in the result
 - Add a crosshair synchronised across the price chart and its RSI/MACD sub-panes, with a notice when a period has too few candles for an indicator
@@ -94,6 +95,7 @@ First production release.
 ## [Unreleased]
 
 ### Added
+- 설치형 PWA 추가(ADR-002): 브랜드 마크 아이콘을 담은 웹 앱 매니페스트와 앱 셸을 프리캐시하는 workbox 서비스 워커 — SPA 경로 오프라인 서빙, 폰트는 첫 사용 시 캐시, `/api/*`는 절대 캐시하지 않음(오프라인에서는 폴링이 멈춰 마지막 데이터 유지); 상태 바에 오프라인 배지, 새 버전이 대기 중이면 토스트가 "새로 고침" 제공; 백엔드 SPA fallback은 `/assets/*`·파일형 경로에 진짜 404를 유지해 롤링 배포 중 자산 URL 아래 HTML이 캐시되지 않음
 - 시세·종목 상세에 한글 종목명(`name_ko`) 추가 — 검색 결과와 종목 헤더에 표시, 종목 검색에서 한글명·초성 매칭 지원
 - AI 종목 분석 패널에 자유 질의 추가 — 질문 입력과 프리셋, 선택 본문 `{question}`(정규화 후 1~200자), 질문별 캐시 키 `ai:stock:{symbol}:q:{sha256[:16]}`, 결과에 질문 에코
 - 가격 차트와 RSI/MACD 보조 패널 사이 크로스헤어 동기화 추가 — 지표 계산에 캔들이 부족한 기간에는 안내 표시

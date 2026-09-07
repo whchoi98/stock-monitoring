@@ -8,15 +8,18 @@
  * The route table lives in `main.tsx`, next to RouterProvider: this file must export components only
  * (oxlint's `react/only-export-components`, which preserves HMR), so the routes are not defined here.
  */
+import { useEffect } from 'react'
 import { Link, NavLink, Outlet, useRouteError } from 'react-router-dom'
 
 import { useOverview } from './api/queries.ts'
+import { observeStickyOffsets } from './lib/stickyOffsets.ts'
 import { AlertsWatcher } from './components/common/AlertsWatcher.tsx'
 import { MarketStrip } from './components/common/MarketStrip.tsx'
 import { Panel } from './components/common/Panel.tsx'
 import { StatusBar } from './components/common/StatusBar.tsx'
 import { SymbolSearch } from './components/common/SymbolSearch.tsx'
 import { ThemeToggle } from './components/common/ThemeToggle.tsx'
+import { UpdateToast } from './components/common/UpdateToast.tsx'
 
 function Brand() {
   return (
@@ -43,6 +46,10 @@ export default function App() {
    * `asOf`/`marketOpen` are peeled off the envelope as siblings, so they do not live inside `data`.
    */
   const { data, asOf, marketOpen } = useOverview()
+
+  // 상단 고정 블록·상태 바의 실측 높이를 CSS 변수로 — 토스트가 줄바꿈된 블록을 덮지 않게 (`lib/stickyOffsets.ts`)
+  // Export the sticky blocks' measured heights as CSS variables so toasts never cover a wrapped block (`lib/stickyOffsets.ts`)
+  useEffect(() => observeStickyOffsets(document), [])
 
   return (
     <div className="terminal">
@@ -74,6 +81,8 @@ export default function App() {
       <StatusBar marketOpen={marketOpen} asOf={asOf} />
       {/* 가격 알림은 어느 화면에서든 울려야 하므로 셸에 산다 / Price alerts must fire on any screen, so the watcher lives in the shell */}
       <AlertsWatcher />
+      {/* 서비스 워커 새 버전·오프라인 준비 안내 (PWA) / New-version and offline-ready notices from the service worker (PWA) */}
+      <UpdateToast />
     </div>
   )
 }

@@ -12,7 +12,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 ### 2. Components
 | Component | Path | Purpose |
 |---|---|---|
-| App factory | `backend/app/main.py` | Router registration, lifespan (swap `NullL2`→`DynamoCache`, start scheduler), SPA static serving (`/api` 404s are never rewritten to `index.html`) |
+| App factory | `backend/app/main.py` | Router registration, lifespan (swap `NullL2`→`DynamoCache`, start scheduler), SPA static serving (`/api` 404s are never rewritten to `index.html`; neither are missing `/assets/*`, `/icons/*` or root files such as `sw.js` — a real 404 keeps the PWA worker and CloudFront from caching HTML under an asset URL during a rolling deploy) |
 | Health route | `backend/app/api/health.py` | `GET /api/health` — liveness only, always 200, no external calls; reports per-source status (yahoo/rss/bedrock) + pre-warmed cache ages |
 | Market routes | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, news feed; payload builders reused by the scheduler. `overview_payload` returns a `Partial` whenever a piece falls short (`coverage_shortfall`: full coverage for quotes, a 60% floor for the additive indices/indicators), so the outer `cached()` cannot re-mark yahoo `ok` over a short table |
 | Stock routes | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`); price overlay; simulated data flagged |
@@ -43,7 +43,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 - `backend/app/api/stocks.py` — `detail_view`: fundamentals + live-price overlay assembly
 - `backend/app/api/market.py` — `build_overview`: pure-function assembly of the dashboard payload
 - `backend/app/api/ai.py` — `_sse` (frame format), `_analysis_stream` (the SSE skeleton and the leader/follower registry), `_waiting_heartbeats` / `_permit_wait` (the one heartbeat loop every wait uses)
-- `backend/app/main.py` — SPA fallback rules (`SPA_METHODS`, `API_PREFIX`) and the lifespan sequence
+- `backend/app/main.py` — SPA fallback rules (`SPA_METHODS`, `API_PREFIX`, `_is_static_asset_path`) and the lifespan sequence
 - `backend/tests/test_api_stocks.py`, `backend/tests/test_api_market.py`, `backend/tests/test_api_ai.py` — route contracts
 
 ### 5. Cross-references
@@ -60,7 +60,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
-| 앱 팩토리 | `backend/app/main.py` | 라우터 등록, lifespan(`NullL2`→`DynamoCache` 교체, 스케줄러 기동), SPA 정적 서빙 (`/api` 404는 절대 `index.html`로 바꾸지 않음) |
+| 앱 팩토리 | `backend/app/main.py` | 라우터 등록, lifespan(`NullL2`→`DynamoCache` 교체, 스케줄러 기동), SPA 정적 서빙 (`/api` 404는 절대 `index.html`로 바꾸지 않음. 없는 `/assets/*`·`/icons/*`·`sw.js` 같은 루트 파일도 진짜 404 — 롤링 배포 중 PWA 워커·CloudFront가 자산 URL 아래 HTML을 캐시하지 못하게) |
 | 헬스 라우트 | `backend/app/api/health.py` | `GET /api/health` — 생존 판정 전용, 항상 200, 외부 호출 없음. 소스별 상태(yahoo/rss/bedrock) + 선제 갱신 캐시 age 보고 |
 | 시장 라우트 | `backend/app/api/market.py` | `GET /api/market/overview`, `GET /api/market/quotes?market=us\|kr`, 뉴스 피드. 페이로드 빌더를 스케줄러가 재사용. 조각 중 하나라도 결손이면 `overview_payload`가 `Partial`을 반환한다(`coverage_shortfall` — 시세는 전량, 추가 행인 지수·지표는 60% 하한) → 바깥쪽 `cached()`가 짧은 테이블 위에 yahoo `ok`를 덮어쓰지 못한다 |
 | 종목 라우트 | `backend/app/api/stocks.py` | `GET /api/stocks/{symbol}` (+ `/chart?period=`, `/news`, `/orderbook`, `/investors`). 가격 오버레이, 시뮬레이션 표시 |
@@ -91,7 +91,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 - `backend/app/api/stocks.py` — `detail_view`: 펀더멘털 + 실시간 가격 오버레이 조립
 - `backend/app/api/market.py` — `build_overview`: 대시보드 페이로드 조립 (순수 함수)
 - `backend/app/api/ai.py` — `_sse`(프레임 형식), `_analysis_stream`(SSE 골격 + 선점자/팔로워 레지스트리), `_waiting_heartbeats` / `_permit_wait`(모든 대기가 쓰는 단일 하트비트 루프)
-- `backend/app/main.py` — SPA 폴백 규칙(`SPA_METHODS`, `API_PREFIX`)과 lifespan 순서
+- `backend/app/main.py` — SPA 폴백 규칙(`SPA_METHODS`, `API_PREFIX`, `_is_static_asset_path`)과 lifespan 순서
 - `backend/tests/test_api_stocks.py`, `backend/tests/test_api_market.py`, `backend/tests/test_api_ai.py` — 라우트 계약 테스트
 
 ### 5. 상호 참조

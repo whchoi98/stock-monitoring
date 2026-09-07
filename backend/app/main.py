@@ -51,6 +51,17 @@ SHUTDOWN_TIMEOUT_SEC = 5
 
 # SPA fallback 대상 메서드 / Methods eligible for the SPA fallback
 SPA_METHODS = frozenset({"GET", "HEAD"})
+
+# 자산 경로는 SPA fallback 대상이 아니다 (없으면 진짜 404) — 워커·CDN 캐시가 HTML을 자산으로 담는 일을 막는다.
+# Asset paths are never SPA-fallback targets (a missing one is a real 404), so no worker or CDN cache can store HTML as an asset.
+ASSET_PREFIXES = ("/assets/", "/icons/")
+# 루트 파일의 확장자 — 루트 SPA 라우트(`/`, `/articles`, `/stocks/...`)에는 확장자가 없다 / Root-file suffixes; root SPA routes carry none
+ROOT_FILE_SUFFIXES = (".js", ".css", ".map", ".webmanifest", ".svg", ".png", ".ico", ".txt", ".json", ".xml")
+
+
+def _is_static_asset_path(path: str) -> bool:
+    """자산 디렉터리 또는 확장자 있는 루트 파일 경로인지 / Whether a path is an asset directory or a root file with a suffix."""
+    return path.startswith(ASSET_PREFIXES) or ("/" not in path[1:] and path.endswith(ROOT_FILE_SUFFIXES))
 # API 404는 절대 index.html로 바꾸지 않는다 / An API 404 is never rewritten to index.html
 API_PREFIX = "/api"
 
@@ -206,11 +217,23 @@ def _mount_static(app: FastAPI) -> None:
         return
 
     async def spa_fallback(request: Request, exc: StarletteHTTPException) -> Response:
-        """비-API GET의 404만 index.html로 대체 / Only a non-API GET 404 becomes index.html."""
+        """
+        비-API·비-자산 GET의 404만 index.html로 대체 / Only a non-API, non-asset GET 404 becomes index.html.
+
+        자산·루트 파일 경로(`/assets/*`, `/icons/*`, `sw.js` 같은 루트 파일)는 진짜 404를 유지한다: PWA 워커의 프리캐시·폰트
+        CacheFirst와 CloudFront `/assets/*` 캐시는 200이면 그대로 담으므로, 롤링 배포 창에서 옛 태스크가 새 해시의 청크에
+        200 HTML을 돌려주면 그 HTML이 자산 URL 아래 굳는다. SPA 라우트(`/stocks/005930.KS`처럼 점이 든 것 포함)는 그대로 셸이다.
+        Asset and root-file paths (`/assets/*`, `/icons/*`, root files such as `sw.js`) keep a real 404: the PWA worker's
+        precache/font CacheFirst and CloudFront's `/assets/*` cache store any 200, so an old task answering a new-hash chunk
+        with 200 HTML during a rolling deploy would harden that HTML under the asset URL. SPA routes (dots included, as in
+        `/stocks/005930.KS`) still get the shell.
+        """
+        path = request.url.path
         if (
             exc.status_code == 404
             and request.method in SPA_METHODS
-            and not request.url.path.startswith(API_PREFIX)
+            and not path.startswith(API_PREFIX)
+            and not _is_static_asset_path(path)
         ):
             return FileResponse(index)
         return await http_exception_handler(request, exc)

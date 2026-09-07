@@ -6,6 +6,14 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- PWA (ADR-002): 매니페스트 링크는 vite-plugin-pwa가 빌드 시 주입한다 / the manifest link is injected at build time by vite-plugin-pwa -->
+    <meta name="theme-color" content="#0b0e14" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <!-- `black`: 상태 표시줄 아래에서 콘텐츠가 시작한다 — translucent는 safe-area 처리 없이는 상단 커맨드 바를 가린다 / `black` starts content below the status bar; translucent would cover the top command bar without safe-area handling -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="StockMon" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
     <title>stock-monitoring</title>
   </head>
   <body>

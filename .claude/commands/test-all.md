@@ -1,5 +1,5 @@
 ---
-description: 백엔드 pytest(407) + 프론트엔드 vitest(308) 전체 테스트 실행 후 결과 보고 / Execute the full test suite (backend pytest 407 + frontend vitest 308) and report results
+description: 백엔드 pytest(408) + 프론트엔드 vitest(319) 전체 테스트 실행 후 결과 보고 / Execute the full test suite (backend pytest 408 + frontend vitest 319) and report results
 allowed-tools: Read, Glob, Bash(cd backend && .venv/bin/pytest:*), Bash(cd frontend && npx vitest run:*), Bash(git log:*), Bash(git diff:*)
 ---
 
@@ -16,12 +16,12 @@ The Makefile `test` target is fail-fast — if the backend fails, the frontend n
 **Both suites must run even if one fails, so run each suite command directly:**
 
 ```bash
-# Backend — pytest 407개 / 407 pytest tests
+# Backend — pytest 408개 / 408 pytest tests
 cd backend && .venv/bin/pytest -q
 ```
 
 ```bash
-# Frontend — vitest 308개 (colocated .test.tsx) / 308 vitest tests
+# Frontend — vitest 319개 (colocated .test.tsx) / 319 vitest tests
 cd frontend && npx vitest run
 ```
 
@@ -31,8 +31,8 @@ Run the second command even if the first fails. Collect both results before repo
 ## Step 2: 보고 / Report
 
 다음을 제시한다 / present:
-- 스위트별 실행/통과/실패/스킵 수 (기대값: backend 407, frontend 308, 총 715)
-  / per-suite totals: run, passed, failed, skipped (expected: backend 407, frontend 308, 715 total)
+- 스위트별 실행/통과/실패/스킵 수 (기대값: backend 408, frontend 319, 총 727)
+  / per-suite totals: run, passed, failed, skipped (expected: backend 408, frontend 319, 727 total)
 - 실패 테스트 상세: 파일 경로와 에러 메시지 / failed test details with file paths and error messages
 - 원인이 명백하면 수정 제안 / suggest fixes for failing tests if the cause is apparent
 

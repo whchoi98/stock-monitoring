@@ -2,8 +2,8 @@
  * StatusBar 테스트 — 폴링 문구가 상수에서 오는 것과 기준 시각 칩의 유무를 못박는다.
  * StatusBar tests, pinning that the polling wording comes from the constants and when the as-of chip shows.
  */
-import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { addAlert, alertsStore } from '../../lib/alertsStore.ts'
 import { panelStore, togglePanel } from '../../lib/panelStore.ts'
@@ -15,7 +15,24 @@ beforeEach(() => {
   panelStore.reload()
 })
 
+afterEach(() => {
+  // 스파이(navigator.onLine)가 실패한 단언 뒤에도 남지 않게 / So a spy (navigator.onLine) never outlives a failed assertion
+  vi.restoreAllMocks()
+})
+
 describe('StatusBar', () => {
+  it('브라우저가 오프라인이면 상태 바에 오프라인을 표시하고, 다시 연결되면 지운다 / shows an offline state while the browser is offline and clears it on reconnect', () => {
+    const onLine = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
+    render(<StatusBar marketOpen={true} />)
+    expect(screen.getByText('오프라인')).toBeTruthy()
+
+    onLine.mockReturnValue(true)
+    act(() => {
+      window.dispatchEvent(new Event('online'))
+    })
+    expect(screen.queryByText('오프라인')).toBeNull()
+  })
+
   it('대기 알림 수를 보이고, 접힌 패널이 있으면 초기화 버튼이 전부 펼친다 / shows pending alerts; the reset button expands collapsed panels', () => {
     addAlert('AAPL', 330, 320)
     togglePanel('order-book')

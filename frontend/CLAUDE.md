@@ -6,16 +6,16 @@ Stock monitoring SPA laid out as a terminal workspace (ADR-001), served by the F
 
 ## 구조 / Key Files
 - `src/api/` — `client.ts`(fetch 래퍼), `queries.ts`(**서버 데이터는 @tanstack/react-query 훅으로만**; `useSymbolUniverse(enabled)`는 검색용 두 시장 시세, 키 공유·enabled 게이트), `aiStream.ts`+`lib/sse.ts`(**유일한 예외**: 두 AI 엔드포인트는 SSE `phase`→`delta`*→`final`이라 fetch 직접 사용), `types.ts`(백엔드 `app/models.py` 응답 형태와 일치 유지).
-- `src/components/common/` — `Panel`(모든 위젯의 껍데기: eyebrow·제목·액션·`flush`·`id`로 접기), `Stat`, `MarketStrip`(지수 셀 + 지표 크롤), `SymbolSearch`(⌘K 콤보박스), `StatusBar`/`MarketStatus`/`Clock`, `ScopeTabs`(미국/한국/★관심), `StarButton`, `AlertsWatcher`(가격 알림 판정 + 토스트), `NewsList`(뉴스 행 공용), `ChangeText`, `ThemeToggle`, 배지, `ErrorCard`, `Spinner`.
+- `src/components/common/` — `Panel`(모든 위젯의 껍데기: eyebrow·제목·액션·`flush`·`id`로 접기), `Stat`, `MarketStrip`(지수 셀 + 지표 크롤), `SymbolSearch`(⌘K 콤보박스), `StatusBar`/`MarketStatus`/`Clock`, `ScopeTabs`(미국/한국/★관심), `StarButton`, `AlertsWatcher`(가격 알림 판정 + 토스트), `UpdateToast`(서비스 워커 새 버전·오프라인 준비 토스트, `virtual:pwa-register/react`), `NewsList`(뉴스 행 공용), `ChangeText`, `ThemeToggle`, 배지, `ErrorCard`, `Spinner`.
 - `src/components/market/` — `MarketPulse`, `SectorBars`, `MacroPanel`, `StockTable`(QUOTE MONITOR, 스코프·★), `NewsFeed`(언어 탭·키워드 필터). `src/components/stock/` — `Watchlist`, `StockHeader`(★·`AlertForm`), `PriceChart`(1W~5Y, MA/BOLL/LVL + VOL·RSI·MACD 동기 보조 패널 — 거래량은 메인 오버레이가 아님, 캔들/표 뷰), `CandleTable`, `OrderBook`, `InvestorPanel`, `FundamentalCards`, `ReturnsRow`, `StockNews`, `AIPanel`(질문 입력·프리셋 → `analyze({question})`), `Week52Bar`.
 - `src/components/stock/chartData.ts`, `indicators.ts` — 차트 순수 함수 (변환 / 볼린저·RSI·EMA·MACD·캔들 요약). 직접 단위 테스트 대상.
-- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위 — 심볼·영문·한글 `name_ko`·초성), `hangul`(초성 분해), `markets`(`QuoteScope`), `scopedQuotes`, `newsFilter`, `localStore` + `watchlistStore`/`alertsStore`/`panelStore`(브라우저 전용 사용자 상태), `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
+- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위 — 심볼·영문·한글 `name_ko`·초성), `hangul`(초성 분해), `markets`(`QuoteScope`), `scopedQuotes`, `newsFilter`, `localStore` + `watchlistStore`/`alertsStore`/`panelStore`(브라우저 전용 사용자 상태), `online`(`useOnline` — 상태 바 오프라인 배지), `stickyOffsets`(고정 블록 실측 높이 → `--sticky-top-h/--sticky-bottom-h`, 토스트 앵커), `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`), `public/icons/`(PWA 아이콘), `src/vite-env.d.ts`(`vite-plugin-pwa/react` 타입).
 
 ## 명령 / Commands
 ```bash
 cd frontend
 npm run dev            # dev 서버 (백엔드는 make run으로 :8000)
-npx vitest run         # 테스트 308개 (colocated *.test.tsx / *.test.ts)
+npx vitest run         # 테스트 319개 (colocated *.test.tsx / *.test.ts)
 npx oxlint             # 린트
 npx tsc -b             # 타입 체크 (build:deploy는 tsc를 생략한다)
 npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 배포 산출물)
@@ -32,6 +32,7 @@ npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 
 - **컴포넌트 파일은 컴포넌트만 export** (oxlint `react/only-export-components`) — 상수는 `lib/`로 (예: `lib/markets.ts`).
 - **사용자 상태는 localStorage 스토어로만** (`lib/localStore.ts` → `createLocalStore` + `useLocalStore`): 읽기 실패는 fallback, 쓰기 실패는 세션 메모리. 서버 상태가 아니므로 react-query에 넣지 않는다. 관심·알림은 공유 키 `['quotes', market]`(`useSymbolUniverse(enabled)`)만 읽는다 — 새 폴링을 만들지 말 것.
 - **`attributionLogo`는 보조 패널(RSI/MACD)에서도 끄지 않는다** — 라이선스 가드 테스트가 소스를 검사한다.
+- **PWA 서비스 워커는 앱 셸만 담당한다 (ADR-002)** — `vite.config.ts`의 `VitePWA`가 빌드 산출물을 프리캐시하고 SPA 경로를 `index.html`로 돌린다(`/api/` 제외). **`/api/*`에 워커 라우트를 추가하지 말 것** — 백엔드 신선도 규칙과 비용 방어 바깥의 두 번째 캐시가 된다. 업데이트는 `prompt` 방식(`UpdateToast`) — `autoUpdate`로 바꾸지 않는다(AI 스트리밍 중 자동 리로드 금지).
 
 ## 주의 / Gotchas
 - `build:deploy`는 `../backend/static`을 **비우고** 다시 쓴다 — 백엔드 static에 수동 파일을 두지 말 것.

@@ -39,11 +39,11 @@ FastAPI app serving market data, news, and Bedrock AI analysis; also serves the 
   - 태그 스캔 regex는 전부 `<`를 제외한 `[^<>]*`다 — 그 제외가 선형성의 전부이며(후보별 스캔이 다음 `<`에서 끝나고 런 안 위치는 O(1) 실패) `[^>]*`나 `(.*?)</p>` 류로 바꾸면 O(n²)로 돌아간다. 전략 2는 클래스를 이어 붙인 정규식 대신 `<div>` 태그 하나의 `class` 속성만 읽는다(`_body_container_ends`) — 문자 클래스 여러 개를 한 패턴에 이어 붙이는 것이 옛 이차 스캔의 근원이었다. 옛 `{0,1000}` 길이 상한은 2026-09-07 제거(1000자 넘는 태그를 놓치거나 본문에 남기기만 했음). RSS 파싱은 `defusedxml`만 (XXE/엔티티 확장 차단).
 - **워커는 정확히 1개** (`uvicorn app.main:app`): L1 캐시와 AI 전역 세마포어가 프로세스 단위 — 워커를 늘리면 캐시 분열 + 동시 실행 상한 붕괴.
 - `create_app(background=False)`가 기본 — 테스트는 절대 `background=True`를 쓰지 않는다 (네트워크/AWS 미접촉). L2 연결 실패는 기동을 막지 않는다(NullL2 유지, 로컬 개발).
-- 정적 마운트(`/`)는 항상 마지막 라우트. API 404는 index.html로 재작성하지 않는다.
+- 정적 마운트(`/`)는 항상 마지막 라우트. API 404는 index.html로 재작성하지 않는다. 없는 `/assets/*`·`/icons/*`·확장자 있는 루트 파일(`sw.js`, `manifest.webmanifest`…)도 진짜 404를 유지한다(`_is_static_asset_path`) — PWA 워커 프리캐시·CloudFront `/assets/*` 캐시가 200 HTML을 자산으로 담는 일을 막는다(ADR-002). SPA 라우트는 점이 들어도(`/stocks/005930.KS`) 셸이다.
 
 ## 명령 / Commands
 ```bash
-cd backend && .venv/bin/pytest -q   # 테스트 (407개, 오프라인)
+cd backend && .venv/bin/pytest -q   # 테스트 (408개, 오프라인)
 make run                             # 로컬 실행 (repo 루트, :8000)
 ```
 

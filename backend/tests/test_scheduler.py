@@ -450,6 +450,27 @@ def test_static_serving_returns_index_for_spa_routes(state, static_build):
     assert client.get("/app.js").status_code == 200
 
 
+def test_static_fallback_keeps_real_404_for_asset_and_root_file_paths(state, static_build):
+    """
+    없는 자산·루트 파일은 index.html이 아니라 진짜 404다 / A missing asset or root file is a real 404, never index.html.
+
+    PWA 서비스 워커의 프리캐시·폰트 CacheFirst와 CloudFront `/assets/*` 캐시는 200이면 그대로 저장한다. 롤링 배포 창에서
+    옛 태스크가 새 해시의 청크 요청에 200 HTML을 돌려주면 그 HTML이 자산 URL 아래 굳는다 — 404여야 어느 캐시도 담지 않는다.
+    The PWA worker's precache/font CacheFirst and CloudFront's `/assets/*` cache store any 200. During a rolling deploy an old
+    task answering a new-hash chunk request with 200 HTML would harden that HTML under the asset URL — a 404 is what every
+    cache refuses.
+    """
+    client = TestClient(create_app(state))
+
+    for path in ("/assets/index-deadbeef.js", "/assets/pretendard-x.woff2", "/icons/none.png", "/workbox-cafe0000.js", "/sw.js.map"):
+        response = client.get(path)
+        assert response.status_code == 404, path
+        assert response.text != INDEX_HTML, path
+    # 점이 든 SPA 라우트(KR 종목 코드)는 여전히 셸이다 / An SPA route with a dot (a KR ticker) is still the shell
+    assert client.get("/stocks/005930.KS").text == INDEX_HTML
+    assert client.get("/articles").text == INDEX_HTML
+
+
 def test_static_fallback_never_swallows_api_404(state, static_build):
     """/api 404는 index.html이 아니라 JSON 404를 유지한다 / An /api 404 stays a JSON 404, never index.html."""
     client = TestClient(create_app(state))

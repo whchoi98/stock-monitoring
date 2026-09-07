@@ -28,6 +28,7 @@ stock-monitoring is a real-time stock monitoring web service built on Yahoo Fina
 - **Korean-name symbol search** — A ⌘K / Ctrl+K / `/` command bar ranks the 100-symbol universe by symbol, Latin name and Korean name (`name_ko`), matching Hangul syllables, initials (초성: "ㅅㅅㅈㅈ" → 삼성전자) and the mixed forms an IME emits mid-composition; KR codes also match without their `.KS`/`.KQ` suffix
 - **Watchlist ★ and price alerts (browser-only)** — Star any symbol from the quote table, the watchlist rail or the stock header; set above/below target-price alerts that are evaluated on every quote poll and fire once (a system notification when permitted, a toast otherwise). Watchlist, alerts and collapsed-panel state live only in `localStorage` — the backend never sees them
 - **Terminal workspace UI (ADR-001)** — Every widget sits in a collapsible `Panel` on a panel grid, with a sticky market strip, a watchlist rail on the stock screen and a status bar (market state, polling cadence, pending alerts, KST clock, layout reset); dark/light themes switch only via `<html data-theme>` tokens, with an amber accent and the Korean up = red / down = blue convention
+- **Installable PWA (ADR-002)** — A web-app manifest (dark theme colour, brand-mark icons incl. maskable) and a workbox service worker that owns the app shell only: build output precached, SPA routes served offline, fonts cached on first use, `/api/*` never cached (offline, polling pauses on the last data with a status-bar badge; a cold visit shows failure cards rather than stale quotes); new versions apply only when the user presses "새로 고침" in the update toast
 - **Tiered caching and resilient upstream fetch** — In-memory L1 + DynamoDB L2 with TTL and single-flight key locking, plus a live price overlay from the quotes cache (refreshed every 45 s while a market is open) that keeps cached detail responses fresh. Yahoo Finance is fetched one serial request per symbol under explicit deadlines with a 60 % coverage gate; a short result keeps serving the last good rows and is flagged `degraded` in `/api/health` instead of failing silently
 
 ## Architecture
@@ -125,18 +126,19 @@ stock-monitoring/
       services/          # Yahoo Finance data, charts, fundamentals, news, simulation, summary, Bedrock AI
       cache/             # Tiered cache (in-memory L1 + DynamoDB L2 + single-flight orchestration)
       core/              # Config (symbol universe, Korean names, TTLs, env), scheduler, market hours
-    tests/               # pytest suite (407)
+    tests/               # pytest suite (408)
   frontend/              # React 19 + TypeScript + Vite 8
     src/
       api/               # API client, react-query hooks, SSE AI-stream hooks, types
       components/        # common / market / stock components (chart indicator maths lives in stock/)
-      lib/               # format, clock, search (+ Hangul 초성), news filter, localStorage stores (watchlist, alerts, panels), SSE parser
+      lib/               # format, clock, search (+ Hangul 초성), news filter, localStorage stores (watchlist, alerts, panels), online state (offline badge), SSE parser
       pages/             # Dashboard, StockDetail, ArticleAnalysis
       styles/            # tokens.css (design tokens, dark/light), global.css
+    public/icons/        # PWA icons (192 / 512 / maskable / apple-touch), generated from the brand mark
   infra/                 # AWS CDK v2 (Python), single stack
     stacks/              # CloudFront -> ALB -> ECS Fargate + DynamoDB
   scripts/               # setup.sh one-command setup, install-hooks.sh, smoke.sh post-deploy check
-  docs/                  # architecture.md, api-reference.md, reference/ (per-layer), decisions/ (ADRs), runbooks/, superpowers/ (specs + plans)
+  docs/                  # architecture.md, api-reference.md, reference/ (per-layer), decisions/ (ADR-001 terminal UI, ADR-002 PWA), runbooks/, superpowers/ (specs + plans)
   tests/                 # Harness shell tests (hooks, project structure)
   .github/workflows/     # CI: backend pytest + frontend tsc / oxlint / vitest
   Dockerfile             # Multi-stage build (frontend build -> Python runtime)
@@ -146,13 +148,13 @@ stock-monitoring/
 ## Testing
 
 ```bash
-# Run all tests (backend + frontend) — 407 pytest + 308 vitest
+# Run all tests (backend + frontend) — 408 pytest + 319 vitest
 make test
 
-# Backend only (pytest, 407 tests)
+# Backend only (pytest, 408 tests)
 cd backend && .venv/bin/pytest -q
 
-# Frontend only (vitest, 308 tests) + type check + lint
+# Frontend only (vitest, 319 tests) + type check + lint
 cd frontend && npx vitest run && npx tsc -b && npm run lint
 
 # CI (.github/workflows/ci.yml) runs the same suites on every push / pull request
@@ -207,6 +209,7 @@ stock-monitoring은 Yahoo Finance 데이터를 기반으로 한 실시간 주식
 - **한글 종목명 검색** — ⌘K / Ctrl+K / `/` 커맨드 바가 100개 유니버스를 심볼·영문명·한글 종목명(`name_ko`)으로 순위 매기며, 한글 음절·초성("ㅅㅅㅈㅈ" → 삼성전자)·IME 조합 중 혼합 입력을 모두 맞추고 KR 코드는 `.KS`/`.KQ` 접미사 없이도 맞춘다
 - **관심 종목 ★·가격 알림 (브라우저 전용)** — 시세 표·워치리스트 레일·종목 헤더의 ★로 관심 종목을 모으고, 상향/하향 목표가 알림을 걸면 시세 폴링마다 판정해 한 번만 울린다(권한 허용 시 시스템 알림, 아니면 토스트). 관심 종목·알림·패널 접힘 상태는 `localStorage`에만 저장되며 백엔드는 모른다
 - **터미널 워크스페이스 UI (ADR-001)** — 모든 위젯이 접을 수 있는 `Panel` 그리드에 담기고, 상단 sticky 마켓 스트립·종목 화면의 워치리스트 레일·하단 상태 바(장 상태·폴링 주기·대기 알림·KST 시계·레이아웃 초기화)를 갖춘다; 다크/라이트 테마는 `<html data-theme>` 토큰으로만 전환, 앰버 액센트, 한국 관례 등락색(상승 빨강 / 하락 파랑)
+- **설치형 PWA (ADR-002)** — 웹 앱 매니페스트(다크 테마 색, 브랜드 마크 아이콘·maskable 포함)와 앱 셸만 담당하는 workbox 서비스 워커: 빌드 산출물 프리캐시, SPA 경로 오프라인 서빙, 폰트는 첫 사용 시 캐시, `/api/*`는 절대 캐시하지 않음(오프라인에서는 폴링이 멈춰 마지막 데이터 위에 상태 바 배지, 콜드 진입은 낡은 시세 대신 실패 카드); 새 버전은 업데이트 토스트의 "새로 고침"을 눌러야 적용
 - **계층형 캐시·업스트림 조회 복원력** — 인메모리 L1 + DynamoDB L2(TTL)와 single-flight 키 락, 캐시된 상세 응답의 가격을 장중 45초마다 갱신되는 시세 캐시로 덮어쓰는 가격 오버레이. Yahoo Finance는 심볼당 순차 요청으로 명시적 데드라인 안에서 가져오고 60% 커버리지 게이트를 적용; 미달 시 마지막 정상 행을 계속 서빙하고 `/api/health`에 `degraded`로 표시한다(조용한 실패 금지)
 
 ## 아키텍처
@@ -304,18 +307,19 @@ stock-monitoring/
       services/          # Yahoo Finance 데이터, 차트, 재무지표, 뉴스, 시뮬레이션, 요약, Bedrock AI
       cache/             # 계층형 캐시 (인메모리 L1 + DynamoDB L2 + single-flight 오케스트레이션)
       core/              # 설정(심볼 유니버스·한글 종목명·TTL·env), 스케줄러, 장 운영 시간
-    tests/               # pytest 테스트 (407)
+    tests/               # pytest 테스트 (408)
   frontend/              # React 19 + TypeScript + Vite 8
     src/
       api/               # API 클라이언트, react-query 훅, SSE AI 스트림 훅, 타입
       components/        # common / market / stock 컴포넌트 (차트 지표 계산은 stock/ 안)
-      lib/               # format, clock, 검색(+한글 초성), 뉴스 필터, localStorage 스토어(관심 종목·알림·패널), SSE 파서
+      lib/               # format, clock, 검색(+한글 초성), 뉴스 필터, localStorage 스토어(관심 종목·알림·패널), 온라인 상태(오프라인 배지), SSE 파서
       pages/             # Dashboard, StockDetail, ArticleAnalysis
       styles/            # tokens.css(디자인 토큰, 다크/라이트), global.css
+    public/icons/        # PWA 아이콘 (192 / 512 / maskable / apple-touch), 브랜드 마크로 생성
   infra/                 # AWS CDK v2 (Python), 단일 스택
     stacks/              # CloudFront -> ALB -> ECS Fargate + DynamoDB
   scripts/               # setup.sh 원커맨드 셋업, install-hooks.sh, smoke.sh 배포 후 점검
-  docs/                  # architecture.md, api-reference.md, reference/(계층별), decisions/(ADR), runbooks/, superpowers/(스펙+계획)
+  docs/                  # architecture.md, api-reference.md, reference/(계층별), decisions/(ADR-001 터미널 UI, ADR-002 PWA), runbooks/, superpowers/(스펙+계획)
   tests/                 # 하네스 셸 테스트 (훅, 프로젝트 구조)
   .github/workflows/     # CI: 백엔드 pytest + 프론트 tsc / oxlint / vitest
   Dockerfile             # 멀티스테이지 빌드 (프론트엔드 빌드 -> Python 런타임)
@@ -325,13 +329,13 @@ stock-monitoring/
 ## 테스트
 
 ```bash
-# Run all tests (backend + frontend) — 407 pytest + 308 vitest
+# Run all tests (backend + frontend) — 408 pytest + 319 vitest
 make test
 
-# Backend only (pytest, 407 tests)
+# Backend only (pytest, 408 tests)
 cd backend && .venv/bin/pytest -q
 
-# Frontend only (vitest, 308 tests) + type check + lint
+# Frontend only (vitest, 319 tests) + type check + lint
 cd frontend && npx vitest run && npx tsc -b && npm run lint
 
 # CI (.github/workflows/ci.yml) runs the same suites on every push / pull request

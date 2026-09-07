@@ -471,6 +471,22 @@ button {
   flex-wrap: wrap;
 }
 
+/* 오프라인 배지 — 시스템 액센트로 눈에 띄게 (등락색·--ok는 쓰지 않는다) / The offline badge: system accent so it stands out (never a price colour or --ok) */
+.status-offline {
+  padding: 0 6px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* 좁은 화면에서는 부차 칩을 숨겨 바를 한 줄로 — 토스트가 바 높이(--term-status-h)를 가정한다 / Hide secondary chips on narrow screens so the bar stays one line; toasts assume its height */
+@media (max-width: 560px) {
+  .statusbar .status-secondary {
+    display: none;
+  }
+}
+
 .statusbar strong {
   color: var(--text);
   font-weight: 400;
@@ -2134,10 +2150,12 @@ tr.down .pct {
 }
 
 /* ── 토스트 (가격 알림) / Toasts (price alerts) ── */
+/* 하단 앵커는 상태 바의 실측 높이(`lib/stickyOffsets.ts`가 --sticky-bottom-h로 내보냄) — 좁은 화면에서 바가 줄바꿈해도 토스트가 바를 덮지 않는다. 폴백은 디자인 토큰 */
+/* The bottom anchor is the status bar's measured height (--sticky-bottom-h from `lib/stickyOffsets.ts`), so a wrapped bar on narrow screens is never covered; the token is the fallback */
 .toasts {
   position: fixed;
   right: 12px;
-  bottom: calc(var(--term-status-h) + 12px);
+  bottom: calc(var(--sticky-bottom-h, var(--term-status-h)) + 12px);
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -2164,15 +2182,40 @@ tr.down .pct {
   font-size: 9px;
 }
 
+.toast-dot.accent {
+  color: var(--accent);
+}
+
+/* 시스템 토스트(서비스 워커)는 왼쪽 아래 — 가격 알림 토스트(오른쪽)와 겹치지 않게 / System toasts (service worker) sit bottom-left, clear of the price-alert toasts on the right */
+.toasts-left {
+  right: auto;
+  left: 12px;
+}
+
+/* 좁은 화면에서는 두 스택이 같은 폭을 차지하므로 시스템 토스트를 상단 고정 블록 아래로 올린다 — 앵커는 블록의 실측 높이(--sticky-top-h; 커맨드 바·스트립이 줄바꿈해 125~184px가 된다), 폴백은 토큰 */
+/* On narrow screens both stacks span the width, so system toasts move under the sticky top block — anchored to its measured height (--sticky-top-h; the command bar and strip wrap to 125–184px), token as fallback */
+@media (max-width: 899px) {
+  .toasts-left {
+    top: calc(var(--sticky-top-h, var(--term-top-h)) + 12px);
+    bottom: auto;
+  }
+}
+
 .toast-text {
   flex: 1;
   min-width: 0;
 }
 
+/* 링크(가격 알림)와 버튼(새로 고침)이 같이 쓴다 — 버튼의 UA 기본 모양을 지운다 / Shared by a link (price alert) and a button (refresh); the button's UA chrome is reset */
 .toast-link {
   flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--accent);
+  font: inherit;
   font-weight: 700;
+  cursor: pointer;
 }
 
 .toast-close {
