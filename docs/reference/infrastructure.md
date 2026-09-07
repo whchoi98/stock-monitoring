@@ -16,7 +16,7 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 | CDK stack | `infra/stacks/stock_monitoring_stack.py` | The whole service in one stack: DynamoDB cache, origin-verify secret, ECS cluster/task/service, ALB, CloudFront, alarms |
 | ECS service | `infra/stacks/stock_monitoring_stack.py` (§5–6) | 1 task, 0.5 vCPU / 1 GB, ARM64, private subnets, container health check re-declared on the task definition (ECS ignores the image HEALTHCHECK) |
 | ALB + listener | `infra/stacks/stock_monitoring_stack.py` (§7–8) | Dedicated SG with a single CloudFront prefix-list rule (`pl-22a6434b`); listener default 403, forwards only on `X-Origin-Verify` match |
-| CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | HTTP_ONLY origin, `CACHING_DISABLED` default behavior, `/assets/*` long-cache (immutable vite hashes), custom origin header injection |
+| CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | HTTP_ONLY origin, `CACHING_DISABLED` default behavior, `/assets/*` long-cache (immutable vite hashes), custom origin header injection; ALB origin `read_timeout` 60 s (raised from the 30 s default: a cold article-AI generation ~45 s returned 504 — kept after SSE streaming as belt-and-braces) |
 | Alarms | `infra/stacks/stock_monitoring_stack.py` (§10) | `stock-monitoring-alb-5xx` (ELB-generated 5xx spike) and `stock-monitoring-task-count` (`LiveTaskCount` < 1, missing = breaching) |
 | Smoke test | `scripts/smoke.sh` | Post-deploy: health/overview/quote-rows/SPA fallback via CloudFront + assert direct ALB access is blocked (403 or timeout both pass) |
 
@@ -52,7 +52,7 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 | CDK 스택 | `infra/stacks/stock_monitoring_stack.py` | 단일 스택에 전체 서비스: DynamoDB 캐시, 오리진 검증 시크릿, ECS 클러스터/태스크/서비스, ALB, CloudFront, 알람 |
 | ECS 서비스 | `infra/stacks/stock_monitoring_stack.py` (§5–6) | 태스크 1개, 0.5 vCPU / 1GB, ARM64, private 서브넷. 헬스체크를 태스크 정의에 재선언 (ECS는 이미지 HEALTHCHECK를 무시) |
 | ALB + 리스너 | `infra/stacks/stock_monitoring_stack.py` (§7–8) | CloudFront prefix-list 단일 규칙(`pl-22a6434b`)의 전용 SG. 리스너 기본 403, `X-Origin-Verify` 일치 시에만 forward |
-| CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | 오리진 HTTP_ONLY, 기본 동작 `CACHING_DISABLED`, `/assets/*` 장기 캐시(vite 불변 해시), 커스텀 오리진 헤더 주입 |
+| CloudFront | `infra/stacks/stock_monitoring_stack.py` (§9) | 오리진 HTTP_ONLY, 기본 동작 `CACHING_DISABLED`, `/assets/*` 장기 캐시(vite 불변 해시), 커스텀 오리진 헤더 주입. ALB 오리진 `read_timeout` 60초(기본 30초에서 상향 — 콜드 기사 AI 생성 ~45초가 504를 냈음. SSE 스트리밍 도입 후에도 안전벨트로 유지) |
 | 알람 | `infra/stacks/stock_monitoring_stack.py` (§10) | `stock-monitoring-alb-5xx` (ELB 생성 5xx 급증), `stock-monitoring-task-count` (`LiveTaskCount` < 1, 결측 = breaching) |
 | 스모크 테스트 | `scripts/smoke.sh` | 배포 후: CloudFront 경유 health/overview/시세 행 수/SPA fallback + ALB 직접 접근 차단 확인 (403·타임아웃 모두 통과) |
 

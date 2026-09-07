@@ -25,7 +25,7 @@ A Python CDK v2 app defining exactly one stack, `StockMonitoringStack`, environm
 - **`listener open=False` is load-bearing**: the default (`True`) would make CDK add a `0.0.0.0/0:80` ingress rule to the ALB SG, breaking the "single prefix-list rule" constraint.
 - **Custom origin request policy** (`allViewerAndWhitelistCloudFront` behavior): the managed `ALL_VIEWER_EXCEPT_HOST_HEADER` forwards *no* CloudFront-generated header, but the AI rate limit keys on `CloudFront-Viewer-Address` — so a custom policy whitelists it (user ruling, 2026-08-02). Cost: the viewer Host header now reaches the origin; nothing depends on it.
 - **`BEDROCK_MODEL_ID` is intentionally NOT set in the task environment**: the code default (`global.anthropic.claude-sonnet-4-6`) is the verified production value; only `CACHE_TABLE` and `BEDROCK_REGION` are injected.
-- **Least-privilege IAM**: DynamoDB actions scoped to the table ARN; `bedrock:InvokeModel` requires `*` because the `global.` inference profile resolves to cross-region model ARNs.
+- **Least-privilege IAM**: DynamoDB actions scoped to the table ARN; the Bedrock statement grants both `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` on `*` — the `global.` inference profile resolves to cross-region model ARNs, and the SSE path (`converse_stream`, the sole call primitive) is authorised as `InvokeModelWithResponseStream` (missing it was the 2026-08-04 post-deploy 503).
 - **`RemovalPolicy.DESTROY` on the cache table**: it is a pure cache — nothing to preserve.
 
 ### 4. Code Pointers
@@ -62,7 +62,7 @@ Python CDK v2 앱이 단일 스택 `StockMonitoringStack`을 정의하며, 계�
 - **`listener open=False`가 load-bearing**: 기본값(`True`)이면 CDK가 ALB SG에 `0.0.0.0/0:80` 인바운드를 추가해 "prefix-list 단일 규칙" 제약이 깨진다.
 - **커스텀 origin request policy** (`allViewerAndWhitelistCloudFront` 동작): 관리형 `ALL_VIEWER_EXCEPT_HOST_HEADER`는 CloudFront 생성 헤더를 하나도 전달하지 못하는데, AI 레이트리밋이 `CloudFront-Viewer-Address`를 키로 쓴다 — 그래서 커스텀 정책으로 화이트리스트 (2026-08-02 사용자 결정). 대가는 뷰어 Host 헤더가 오리진에 전달되는 것뿐이며 아무것도 이에 의존하지 않는다.
 - **태스크 환경에 `BEDROCK_MODEL_ID`를 넣지 않는다**: 코드 기본값(`global.anthropic.claude-sonnet-4-6`)이 검증된 운영 값. 주입하는 것은 `CACHE_TABLE`과 `BEDROCK_REGION`뿐.
-- **최소 권한 IAM**: DynamoDB 액션은 테이블 ARN 한정. `bedrock:InvokeModel`은 `global.` 추론 프로파일이 교차 리전 모델 ARN으로 해석되므로 `*` 필요.
+- **최소 권한 IAM**: DynamoDB 액션은 테이블 ARN 한정. Bedrock 정책은 `bedrock:InvokeModel`과 `bedrock:InvokeModelWithResponseStream` 둘 다 `*`에 허용 — `global.` 추론 프로파일이 교차 리전 모델 ARN으로 해석되고, SSE 경로(`converse_stream`, 유일한 호출 프리미티브)는 `InvokeModelWithResponseStream`으로 평가된다(이게 빠져 2026-08-04 배포 직후 503 장애).
 - **캐시 테이블 `RemovalPolicy.DESTROY`**: 순수 캐시 — 보존할 것이 없다.
 
 ### 4. 코드 포인터

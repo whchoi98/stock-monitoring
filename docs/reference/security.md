@@ -15,12 +15,13 @@ Defense in depth across the edge and the app: the ALB is reachable only through 
 | Origin verification | `infra/stacks/stock_monitoring_stack.py` (§3, §8, §9) | CloudFront injects `X-Origin-Verify` (Secrets Manager value); the ALB listener defaults to 403 and forwards only on a header match — direct ALB calls are blocked |
 | ALB security group | `infra/stacks/stock_monitoring_stack.py` (§7) | Single ingress rule: CloudFront origin-facing prefix list (`pl-22a6434b`) on port 80; `open=False` keeps CDK from adding `0.0.0.0/0` |
 | AI rate limiting | `backend/app/api/ai.py`, `backend/app/api/ratelimit.py` | 3 req/min/IP (sliding window) keyed on `CloudFront-Viewer-Address` + global concurrency 2; the limit precedes the cache so even cache hits spend budget |
-| SSRF guard | `backend/app/services/news.py` | Client URLs only via http/https, private/link-local IPs blocked per resolved address, redirects capped at 3 and re-checked |
-| Response size cap | `backend/app/services/news.py` | 256 KB (`MAX_ARTICLE_SIZE`) applied to declared content-length AND streamed bytes; no compression requested (decompression-bomb defense) |
+| SSRF guard | `backend/app/services/news.py` | Client URLs only via http/https, private/link-local IPs blocked per resolved address, redirects capped at 3 and re-checked; the whole fetch (redirects included) runs under a 20 s total deadline (`FETCH_TOTAL_DEADLINE` — httpx timeouts are per read, so a trickling origin could otherwise hold a buffer indefinitely) and inside a dedicated fetch semaphore (`AI_FETCH_CONCURRENCY` 2, separate from the Bedrock one) |
+| Response size cap | `backend/app/services/news.py` | 2 MB (`MAX_ARTICLE_SIZE`, raised from 256 KB on 2026-08-03 — Yahoo article pages are ~850 KB with the body past 300 KB) counted on the *decompressed* streamed bytes; the declared content-length is ignored. No compression is requested (`Accept-Encoding: identity`), and when an origin compresses anyway the inflation is bounded three ways: decompressed ≤ 2 MB, raw bytes read ≤ `MAX_RAW_READ_BYTES` (8× = 16 MB), one inflate step ≤ `DECOMPRESS_STEP` 64 KB; brotli/zstd (not step-boundable) are refused |
+| Charset whitelist | `backend/app/services/news.py` | The origin `charset` is honoured only when it is in `SAFE_CHARSETS` (C-implemented codecs); anything else decodes as utf-8 with replacement — a hostile `charset=punycode` (pure-Python O(n²)) could otherwise stall the event loop for minutes |
 | Bounded regexes | `backend/app/services/news.py` | Every tag-scanning class is `[^<>]{0,1000}` (`MAX_TAG_SCAN`); measured 39–136 s quadratic cases dropped to ≤0.03 s at 262 KB |
 | Safe XML parsing | `backend/app/services/news.py`, `backend/requirements.txt` | `defusedxml` for third-party RSS — entity-expansion DoS and XXE blocked |
 | Fixed error bodies | `backend/app/api/ai.py` | Clients only ever see `rate_limited` / `ai_unavailable` / `ai_failed` / `article_unavailable`; exception text (accounts, ARNs, model ids) goes to server logs only |
-| Least-privilege IAM | `infra/stacks/stock_monitoring_stack.py` (§5) | Task role: DynamoDB actions scoped to the table ARN; `bedrock:InvokeModel` only |
+| Least-privilege IAM | `infra/stacks/stock_monitoring_stack.py` (§5) | Task role: DynamoDB actions scoped to the table ARN; Bedrock limited to `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream` on `*` (the `global.` inference profile resolves to cross-region model ARNs). The SSE path (`converse_stream`) is evaluated as `InvokeModelWithResponseStream` — without it streaming returned 503 `ai_unavailable` in production (2026-08-04) |
 | Input caps | `backend/app/api/ai.py`, `backend/app/models.py` | `MAX_URL_LEN` 2048 / `MAX_TITLE_LEN` 512 / `MAX_QUESTION_LEN` 200 — client input reaches prompts and cache keys, so its length is bounded; the question is also normalised (control characters dropped) and hashed before it enters a key |
 
 ### 3. Key Decisions
@@ -57,12 +58,13 @@ Defense in depth across the edge and the app: the ALB is reachable only through 
 | 오리진 검증 | `infra/stacks/stock_monitoring_stack.py` (§3, §8, §9) | CloudFront가 `X-Origin-Verify`(Secrets Manager 값) 주입. ALB 리스너는 기본 403, 헤더 일치 시에만 forward — ALB 직접 호출 차단 |
 | ALB 보안 그룹 | `infra/stacks/stock_monitoring_stack.py` (§7) | 인바운드 단일 규칙: CloudFront origin-facing prefix list(`pl-22a6434b`) 포트 80. `open=False`로 CDK의 `0.0.0.0/0` 추가 방지 |
 | AI 레이트리밋 | `backend/app/api/ai.py`, `backend/app/api/ratelimit.py` | `CloudFront-Viewer-Address` 키 기준 3회/분/IP(슬라이딩 윈도우) + 전역 동시 실행 2. 리밋이 캐시보다 앞이라 캐시 히트도 예산 소비 |
-| SSRF 가드 | `backend/app/services/news.py` | 클라이언트 URL은 http/https만, 해석된 주소별 사설/링크로컬 IP 차단, 리다이렉트 3회 상한 + 매 홉 재검증 |
-| 응답 크기 상한 | `backend/app/services/news.py` | 256KB(`MAX_ARTICLE_SIZE`)를 선언된 content-length와 실제 스트리밍 바이트 양쪽에 적용. 압축 미요청 (압축 폭탄 방어) |
+| SSRF 가드 | `backend/app/services/news.py` | 클라이언트 URL은 http/https만, 해석된 주소별 사설/링크로컬 IP 차단, 리다이렉트 3회 상한 + 매 홉 재검증. fetch 전체(리다이렉트 포함)는 총 데드라인 20초(`FETCH_TOTAL_DEADLINE` — httpx 타임아웃은 read 단위라 trickle 오리진이 버퍼를 무기한 점유할 수 있었음) 안에서, Bedrock 세마포어와 분리된 전용 fetch 세마포어(`AI_FETCH_CONCURRENCY` 2) 안에서 돈다 |
+| 응답 크기 상한 | `backend/app/services/news.py` | 2MB(`MAX_ARTICLE_SIZE`, 2026-08-03 256KB에서 상향 — Yahoo 기사 페이지 ~850KB, 본문 오프셋 300KB 이후)를 **해제된** 스트리밍 바이트에 적용, 선언된 content-length는 무시. 압축 미요청(`Accept-Encoding: identity`)이며 오리진이 그래도 압축하면 3중 상한: 해제 바이트 ≤ 2MB, 원시 읽기 ≤ `MAX_RAW_READ_BYTES`(8배 = 16MB), 해제 1스텝 ≤ `DECOMPRESS_STEP` 64KB. 스텝 상한이 불가능한 brotli/zstd는 거부 |
+| charset 화이트리스트 | `backend/app/services/news.py` | 오리진 `charset`은 `SAFE_CHARSETS`(C 구현 코덱)에 있을 때만 존중, 그 외는 utf-8/replace로 디코드 — 악의적 `charset=punycode`(순수 파이썬 O(n²))가 이벤트 루프를 수 분 정지시킬 수 있었다 |
 | regex 상한 | `backend/app/services/news.py` | 태그 스캔 클래스는 전부 `[^<>]{0,1000}`(`MAX_TAG_SCAN`). 실측 39–136초 걸리던 O(n²) 케이스가 262KB에서 ≤0.03초로 |
 | 안전한 XML 파싱 | `backend/app/services/news.py`, `backend/requirements.txt` | 3rd-party RSS에 `defusedxml` — 엔티티 확장 DoS·XXE 차단 |
 | 고정 오류 본문 | `backend/app/api/ai.py` | 클라이언트는 `rate_limited` / `ai_unavailable` / `ai_failed` / `article_unavailable`만 본다. 예외 문자열(계정, ARN, 모델 ID)은 서버 로그에만 |
-| 최소 권한 IAM | `infra/stacks/stock_monitoring_stack.py` (§5) | 태스크 롤: DynamoDB 액션은 테이블 ARN 한정, `bedrock:InvokeModel`만 |
+| 최소 권한 IAM | `infra/stacks/stock_monitoring_stack.py` (§5) | 태스크 롤: DynamoDB 액션은 테이블 ARN 한정, Bedrock은 `bedrock:InvokeModel` + `bedrock:InvokeModelWithResponseStream` 두 액션(리소스 `*` — `global.` 추론 프로파일이 교차 리전 ARN으로 해석됨). SSE 경로(`converse_stream`)는 후자로 평가되며, 빠지면 프로덕션 스트리밍이 503 `ai_unavailable`(2026-08-04 실증) |
 | 입력 상한 | `backend/app/api/ai.py`, `backend/app/models.py` | `MAX_URL_LEN` 2048 / `MAX_TITLE_LEN` 512 / `MAX_QUESTION_LEN` 200 — 클라이언트 입력이 프롬프트·캐시 키에 들어가므로 길이 제한. 질문은 정규화(제어문자 제거)하고 키에는 해시만 넣는다 |
 
 ### 3. 주요 결정

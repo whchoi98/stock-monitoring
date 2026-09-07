@@ -19,7 +19,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 | AI routes | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}` (optional JSON body `{"question": "…"}`, 1–200 chars after normalisation; 422 otherwise), `POST /api/ai/articles` — the only `text/event-stream` responses (`phase` → `delta`* → `final`; §3), cost defense in [agent-llm.md](agent-llm.md) |
 | Shared deps | `backend/app/api/deps.py` | `get_state`, `resolve_symbol` (universe gate, 404 outside US 50 + KR 50), cache key builders, `cached()` wrapper (503 + source degraded on failure; a fetcher returning `Partial` is cached and served but still degrades the source) |
 | Rate limiter | `backend/app/api/ratelimit.py` | `SlidingWindowLimiter` used by the AI routes |
-| Models | `backend/app/models.py` | Pydantic response models + the `envelope()` helper |
+| Models | `backend/app/models.py` | Pydantic response models + the `envelope()` helper; `Quote`/`StockDetailResponse` carry `name_ko` (Korean stock name from `config.STOCK_NAMES_KO`, `null` when the customary name has no Hangul), `StockQuestionRequest` normalises the optional AI question |
 | App context | `backend/app/state.py` | `AppState`: tiered cache handle + per-source status (`mark_source`) |
 
 ### 3. Key Decisions
@@ -67,7 +67,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 | AI 라우트 | `backend/app/api/ai.py` | `POST /api/ai/stocks/{symbol}`(선택 JSON 본문 `{"question": "…"}`, 정규화 후 1~200자, 아니면 422), `POST /api/ai/articles` — 유일한 `text/event-stream` 응답(`phase` → `delta`* → `final`, §3). 비용 방어 상세는 [agent-llm.md](agent-llm.md) |
 | 공용 의존성 | `backend/app/api/deps.py` | `get_state`, `resolve_symbol`(유니버스 게이트 — US 50 + KR 50 밖은 404), 캐시 키 빌더, `cached()` 래퍼(실패 시 503 + 소스 degraded. fetcher가 `Partial`을 반환하면 값은 캐시·서빙하되 소스는 degraded) |
 | 레이트리미터 | `backend/app/api/ratelimit.py` | AI 라우트가 쓰는 `SlidingWindowLimiter` |
-| 모델 | `backend/app/models.py` | pydantic 응답 모델 + `envelope()` 헬퍼 |
+| 모델 | `backend/app/models.py` | pydantic 응답 모델 + `envelope()` 헬퍼. `Quote`/`StockDetailResponse`에 `name_ko`(`config.STOCK_NAMES_KO`의 한글 종목명, 관용 표기에 한글이 없으면 `null`), `StockQuestionRequest`가 선택 AI 질문을 정규화 |
 | 앱 컨텍스트 | `backend/app/state.py` | `AppState`: 계층 캐시 핸들 + 소스별 상태(`mark_source`) |
 
 ### 3. 주요 결정

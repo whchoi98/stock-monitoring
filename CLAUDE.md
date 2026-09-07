@@ -48,7 +48,11 @@ infra/                - CDK v2 Python (venv: infra/.venv, cdk.json app = .venv/b
   stacks/stock_monitoring_stack.py - 단일 스택 전체 (캐시/시크릿/ECS/ALB/CloudFront/알람)
 docs/reference/       - 계층별 구현 레퍼런스 (아래 Implementation References)
 docs/superpowers/     - 승인된 설계 스펙 + backend/frontend/infra 구현 계획
+docs/decisions/       - ADR (ADR-001 터미널 디자인 언어)
+docs/runbooks/        - 운영 런북 (quotes-cache-poisoning)
 scripts/smoke.sh      - 배포 후 스모크 (CloudFront 경유 4종 + ALB 직접 차단 확인)
+scripts/setup.sh      - 신규 개발자 원커맨드 셋업 (venv/npm ci/훅 설치 → make test)
+.github/workflows/ci.yml - CI: 백엔드 pytest + 프론트 tsc·oxlint·vitest (Dockerfile은 tsc 생략 — 타입 검사는 CI 책임)
 Dockerfile            - 멀티스테이지 (node:20-slim 프론트 빌드 → python:3.12-slim + static)
 Makefile              - build(프론트→backend/static) / run(:8000) / test(백엔드+프론트)
 ```
@@ -59,7 +63,8 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 # 테스트 / Tests
 cd backend && .venv/bin/pytest -q          # 백엔드 (380)
 cd frontend && npx vitest run              # 프론트 (301)
-make test                                  # 전체
+make test                                  # 전체 (두 스위트 모두 실행 후 종합 판정)
+# CI: .github/workflows/ci.yml — push/PR마다 위 두 스위트 + tsc -b + oxlint
 
 # 로컬 실행 / Local run
 make run                                   # 통합 빌드+실행 → http://localhost:8000
@@ -139,7 +144,7 @@ Per-layer implementation details; read the matching doc before touching a layer.
 - [Data / 데이터](docs/reference/data.md) — L1(메모리)+L2(DynamoDB) 계층 캐시, single-flight 락, TTL 표, 가격 오버레이
 - [API](docs/reference/api.md) — FastAPI 라우트, envelope 규약, 심볼 유니버스, 오류 문구, SPA 서빙
 - [IaC](docs/reference/iac.md) — CDK 단일 스택, VPC lookup 고정, 오리진 시크릿, origin request policy
-- [Frontend](docs/reference/frontend.md) — React SPA 구조, 쿼리 훅·폴링, ApiError 분기, 빌드 경로
+- [Frontend](docs/reference/frontend.md) — React SPA 구조, 쿼리 훅·폴링, AI 스트리밍·자유 질의, 한글·초성 검색, 브라우저 전용 사용자 상태 스토어, ApiError 분기, 빌드 경로
 - [UI](docs/reference/ui.md) — 터미널 디자인 언어(ADR-001), 디자인 토큰, 다크/라이트 테마, 상승=빨강/하락=파랑 규칙, 앰버 액센트
 - [Security / 보안](docs/reference/security.md) — 오리진 검증, AI 레이트리밋 키, SSRF 가드, regex DoS 상한
 - [Agent · LLM](docs/reference/agent-llm.md) — Bedrock 모델 선택 근거, 3중 비용 방어, AI 캐시 키, 프롬프트 입력

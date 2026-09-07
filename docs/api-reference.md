@@ -112,7 +112,7 @@ One market's 50-symbol quote table.
 |-----------|------|----------|-------------|
 | `market` | `"us"` \| `"kr"` | Yes | Any other value → `422` |
 
-**Response** `200 OK` — envelope; `data` is an array of quote objects (`symbol`, `name`, `price`, `change`, `change_pct`, `volume`, `market_cap`, `sector`, …).
+**Response** `200 OK` — envelope; `data` is an array of quote objects (`symbol`, `name`, `name_ko`, `price`, `change`, `change_pct`, `volume`, `market_cap`, `sector`, …). `name_ko` is the Korean stock name from `config.STOCK_NAMES_KO` (`null` when the curated name has no Hangul, e.g. KT, LG).
 
 **Caching**: key `quotes:{market}`, stored TTL 24 h; pre-warmed every **45 s** open / **600 s** closed. `market_cap` refreshes on its own 600 s window.
 
@@ -138,7 +138,7 @@ All routes below take `{symbol}` (see [Symbols](#symbols); unknown → `404`).
 GET /api/stocks/{symbol}
 ```
 
-Detail header, key ratios (P/E, EPS, P/B, beta), 52-week range, market cap, sector, and period returns.
+Detail header (`name`, `name_ko`), key ratios (P/E, EPS, P/B, beta), 52-week range, market cap, sector, and period returns.
 
 **Response** `200 OK` — envelope; `data` is the detail object.
 
@@ -153,7 +153,7 @@ OHLCV candles plus MA5/MA20 and golden/dead-cross signals.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `period` | `"1w"` \| `"1m"` \| `"3m"` \| `"1y"` | No (default `1m`) | Any other value → `422` |
+| `period` | `"1w"` \| `"1m"` \| `"3m"` \| `"6m"` \| `"1y"` \| `"5y"` | No (default `1m`) | `1w` = hourly bars, `5y` = weekly bars, the rest daily. Any other value → `422` |
 
 **Response** `200 OK` — envelope; `data` contains `candles` (`time`, `open`, `high`, `low`, `close`, `volume`), moving averages, and cross signals.
 
@@ -164,7 +164,9 @@ OHLCV candles plus MA5/MA20 and golden/dead-cross signals.
 | `1w` | 600 s (10 min) |
 | `1m` | 3600 s (1 h) |
 | `3m` | 21600 s (6 h) |
+| `6m` | 21600 s (6 h) |
 | `1y` | 86400 s (24 h) |
+| `5y` | 86400 s (24 h) |
 
 #### Get stock news
 ```
@@ -228,24 +230,32 @@ Both are also the only **streaming** endpoints: they answer `text/event-stream` 
 POST /api/ai/stocks/{symbol}
 ```
 
-AI stock analysis as Korean markdown. **No request body.** Prompt inputs (price, P/E, 52-week range, sector, recent news titles) come from the already-cached detail and per-symbol news.
+AI stock analysis as Korean markdown. Prompt inputs (price, P/E, 52-week range, sector, recent news titles) come from the already-cached detail and per-symbol news.
+
+**Request Body** (optional) — with no body the default three-section analysis is produced; with a body the model answers that question in an answer/evidence/risk format.
+
+| Field | Type | Required | Constraints | Description |
+|-------|------|----------|-------------|-------------|
+| `question` | string | No | 1–200 chars after normalisation | Free-form question. Control characters are dropped, `<`/`>` become full-width, whitespace is collapsed; a blank result → `422`. The question is fenced inside the prompt and cannot change the instructions |
 
 **Response** `200 OK`, `text/event-stream`; the `final` event carries the envelope whose `data` is:
 
 ```json
-{ "symbol": "AAPL", "analysis": "## 요약\n..." }
+{ "symbol": "AAPL", "analysis": "## 요약\n...", "question": null }
 ```
 
-**Caching**: key `ai:stock:{symbol}`, TTL **6 h** (`AI_TTL=21600`). Concurrent requests for the same symbol trigger a single Bedrock call: one leader streams and caches, the others heartbeat `phase: waiting` and inherit its outcome.
+`question` echoes the normalised question (`null` for the default analysis) so a cache hit still shows what was answered.
 
-**Errors**: `404` unknown symbol · `429` rate limited (both before the stream starts) · `ai_unavailable` (503) and `ai_failed` (500) arrive inside `final`.
+**Caching**: key `ai:stock:{symbol}` for the default analysis, `ai:stock:{symbol}:q:{sha256(normalised question)[:16]}` per distinct question, TTL **6 h** (`AI_TTL=21600`). Concurrent requests for the same symbol trigger a single Bedrock call: one leader streams and caches, the others heartbeat `phase: waiting` and inherit its outcome.
+
+**Errors**: `404` unknown symbol · `422` invalid `question` (blank after normalisation or over 200 chars) · `429` rate limited (all before the stream starts) · `ai_unavailable` (503) and `ai_failed` (500) arrive inside `final`.
 
 #### Analyze article
 ```
 POST /api/ai/articles
 ```
 
-Article summary, insights, and (for English articles) Korean translation, as Korean markdown. The server fetches the article body itself — SSRF guards apply (public http/https hosts only, 256 KB cap).
+Article summary, insights, and (for English articles) Korean translation, as Korean markdown. The server fetches the article body itself — SSRF guards apply (public http/https hosts only, 2 MB decompressed-body cap with bounded decompression, 20 s total fetch deadline).
 
 **Request Body**
 
@@ -404,7 +414,7 @@ GET /api/market/quotes?market=us
 |----------|------|------|------|
 | `market` | `"us"` \| `"kr"` | 예 | 그 외 값 → `422` |
 
-**응답** `200 OK` — envelope; `data`는 시세 객체 배열 (`symbol`, `name`, `price`, `change`, `change_pct`, `volume`, `market_cap`, `sector`, …).
+**응답** `200 OK` — envelope; `data`는 시세 객체 배열 (`symbol`, `name`, `name_ko`, `price`, `change`, `change_pct`, `volume`, `market_cap`, `sector`, …). `name_ko`는 `config.STOCK_NAMES_KO`의 한글 종목명이다(관용 표기에 한글 음절이 없으면 `null` — 예: KT, LG).
 
 **캐싱**: 키 `quotes:{market}`, 저장 TTL 24시간; **45초**(장중) / **600초**(휴장) 주기 선제 갱신. `market_cap`은 별도 600초 창에서 갱신된다.
 
@@ -430,7 +440,7 @@ GET /api/market/news
 GET /api/stocks/{symbol}
 ```
 
-상세 헤더, 핵심지표(PER, EPS, PBR, 베타), 52주 범위, 시가총액, 섹터, 기간수익률.
+상세 헤더(`name`, `name_ko`), 핵심지표(PER, EPS, PBR, 베타), 52주 범위, 시가총액, 섹터, 기간수익률.
 
 **응답** `200 OK` — envelope; `data`는 상세 객체.
 
@@ -445,7 +455,7 @@ OHLCV 캔들 + MA5/MA20 + 골든/데드 크로스 신호.
 
 | 파라미터 | 타입 | 필수 | 설명 |
 |----------|------|------|------|
-| `period` | `"1w"` \| `"1m"` \| `"3m"` \| `"1y"` | 아니오 (기본 `1m`) | 그 외 값 → `422` |
+| `period` | `"1w"` \| `"1m"` \| `"3m"` \| `"6m"` \| `"1y"` \| `"5y"` | 아니오 (기본 `1m`) | `1w`는 시간봉, `5y`는 주봉, 나머지는 일봉. 그 외 값 → `422` |
 
 **응답** `200 OK` — envelope; `data`는 `candles`(`time`, `open`, `high`, `low`, `close`, `volume`), 이동평균, 크로스 신호 포함.
 
@@ -456,7 +466,9 @@ OHLCV 캔들 + MA5/MA20 + 골든/데드 크로스 신호.
 | `1w` | 600초 (10분) |
 | `1m` | 3600초 (1시간) |
 | `3m` | 21600초 (6시간) |
+| `6m` | 21600초 (6시간) |
 | `1y` | 86400초 (24시간) |
+| `5y` | 86400초 (24시간) |
 
 #### 종목 뉴스 조회
 ```
@@ -520,24 +532,32 @@ GET /api/stocks/{symbol}/investors
 POST /api/ai/stocks/{symbol}
 ```
 
-한국어 마크다운 형식의 AI 종목 분석. **요청 본문 없음.** 프롬프트 입력(가격, PER, 52주 범위, 섹터, 최근 뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져온다.
+한국어 마크다운 형식의 AI 종목 분석. 프롬프트 입력(가격, PER, 52주 범위, 섹터, 최근 뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져온다.
+
+**요청 본문**(선택) — 본문이 없으면 기본 3섹션 분석, 있으면 그 질문에 답변/근거/리스크 형식으로 답한다.
+
+| 필드 | 타입 | 필수 | 제약 | 설명 |
+|------|------|------|------|------|
+| `question` | string | 아니오 | 정규화 후 1~200자 | 자유 질문. 제어문자 제거, `<`/`>` 전각화, 공백 접기 후 비어 있으면 `422`. 프롬프트 안에서 울타리로 격리되어 지시를 바꿀 수 없다 |
 
 **응답** `200 OK`, `text/event-stream`. `final` 이벤트가 envelope을 실어 오고 그 `data`는:
 
 ```json
-{ "symbol": "AAPL", "analysis": "## 요약\n..." }
+{ "symbol": "AAPL", "analysis": "## 요약\n...", "question": null }
 ```
 
-**캐싱**: 키 `ai:stock:{symbol}`, TTL **6시간**(`AI_TTL=21600`). 같은 심볼의 동시 요청은 Bedrock을 한 번만 호출한다 — 선점자가 스트리밍·캐싱하고 나머지는 `phase: waiting` 하트비트 후 그 결과를 승계한다.
+`question`은 정규화된 질문을 그대로 되돌려준다(기본 분석은 `null`) — 캐시 히트에서도 무엇에 대한 답인지 보인다.
 
-**오류**: `404` 유니버스 밖 심볼 · `429` 레이트리밋(둘 다 스트림 시작 전) · `ai_unavailable`(503)·`ai_failed`(500)은 `final` 안에 실려 온다.
+**캐싱**: 기본 분석은 키 `ai:stock:{symbol}`, 질문이 있으면 질문별 `ai:stock:{symbol}:q:{sha256(정규화 질문)[:16]}`, TTL **6시간**(`AI_TTL=21600`). 같은 심볼의 동시 요청은 Bedrock을 한 번만 호출한다 — 선점자가 스트리밍·캐싱하고 나머지는 `phase: waiting` 하트비트 후 그 결과를 승계한다.
+
+**오류**: `404` 유니버스 밖 심볼 · `422` `question` 검증 실패(정규화 후 빈 값 또는 200자 초과) · `429` 레이트리밋(모두 스트림 시작 전) · `ai_unavailable`(503)·`ai_failed`(500)은 `final` 안에 실려 온다.
 
 #### 기사 분석
 ```
 POST /api/ai/articles
 ```
 
-기사 요약·인사이트와 (영문 기사는) 한국어 번역을 한국어 마크다운으로. 서버가 기사 본문을 직접 조회한다 — SSRF 가드 적용(공개 http/https 호스트만, 256KB 캡).
+기사 요약·인사이트와 (영문 기사는) 한국어 번역을 한국어 마크다운으로. 서버가 기사 본문을 직접 조회한다 — SSRF 가드 적용(공개 http/https 호스트만, 해제 본문 2MB 캡 + 압축 해제 상한, fetch 총 데드라인 20초).
 
 **요청 본문**
 
