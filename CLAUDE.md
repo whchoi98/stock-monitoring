@@ -15,12 +15,12 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Backend (`backend/`)
 - Python 3.12, FastAPI + uvicorn (**단일 워커 고정** — L1 캐시·AI 세마포어가 프로세스 단위 / single worker is load-bearing), pydantic v2
 - yfinance (시세/재무), httpx (RSS/기사 조회), boto3 (DynamoDB·Bedrock), defusedxml (RSS 파싱 — 엔티티 확장 DoS 차단)
-- 테스트 / Tests: pytest 380개 (`backend/tests/`)
+- 테스트 / Tests: pytest 407개 (`backend/tests/`)
 
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
 - @tanstack/react-query (서버 상태·폴링), react-router-dom v6, lightweight-charts, react-markdown, @fontsource/pretendard
-- 테스트 / Tests: vitest + @testing-library/react 301개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
+- 테스트 / Tests: vitest + @testing-library/react 308개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
 - UI: 터미널 디자인 언어 (ADR-001) — 패널 그리드 워크스페이스, 마켓 스트립, 워치리스트 레일, 앰버 액센트, JetBrains Mono 숫자 / Terminal design language: panel-grid workspace, market strip, watchlist rail, amber accent, mono numerals
 
 ### Infrastructure (`infra/`)
@@ -61,8 +61,8 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 
 ```bash
 # 테스트 / Tests
-cd backend && .venv/bin/pytest -q          # 백엔드 (380)
-cd frontend && npx vitest run              # 프론트 (301)
+cd backend && .venv/bin/pytest -q          # 백엔드 (407)
+cd frontend && npx vitest run              # 프론트 (308)
 make test                                  # 전체 (두 스위트 모두 실행 후 종합 판정)
 # CI: .github/workflows/ci.yml — push/PR마다 위 두 스위트 + tsc -b + oxlint
 
@@ -121,7 +121,7 @@ After exiting Plan mode (`/plan`), before starting implementation:
 - `backend/app/api/` 라우트 추가/변경 → `docs/reference/api.md` 갱신
 - `backend/app/cache/`·캐시 키·TTL(`config.py`) 변경 → `docs/reference/data.md` 갱신
 - `backend/app/services/bedrock_ai.py`·`backend/app/api/ai.py` (모델/프롬프트/레이트리밋) 변경 → `docs/reference/agent-llm.md` 갱신
-- `backend/app/services/news.py` 가드(SSRF/크기 상한/regex 상한)·오리진 검증·레이트리밋 키 변경 → `docs/reference/security.md` 갱신
+- `backend/app/services/news.py` 가드(SSRF/크기 상한/태그 regex 선형성)·오리진 검증·레이트리밋 키 변경 → `docs/reference/security.md` 갱신
 - `infra/stacks/` 변경 → `docs/reference/iac.md` + `docs/reference/infrastructure.md` 갱신
 - `Dockerfile`·`scripts/smoke.sh` 변경 → `docs/reference/infrastructure.md` 갱신
 - `frontend/src/api/`·라우트 구조 변경 → `docs/reference/frontend.md` 갱신
@@ -146,6 +146,6 @@ Per-layer implementation details; read the matching doc before touching a layer.
 - [IaC](docs/reference/iac.md) — CDK 단일 스택, VPC lookup 고정, 오리진 시크릿, origin request policy
 - [Frontend](docs/reference/frontend.md) — React SPA 구조, 쿼리 훅·폴링, AI 스트리밍·자유 질의, 한글·초성 검색, 브라우저 전용 사용자 상태 스토어, ApiError 분기, 빌드 경로
 - [UI](docs/reference/ui.md) — 터미널 디자인 언어(ADR-001), 디자인 토큰, 다크/라이트 테마, 상승=빨강/하락=파랑 규칙, 앰버 액센트
-- [Security / 보안](docs/reference/security.md) — 오리진 검증, AI 레이트리밋 키, SSRF 가드, regex DoS 상한
+- [Security / 보안](docs/reference/security.md) — 오리진 검증, AI 레이트리밋 키, SSRF 가드, 태그 regex 선형성 가드
 - [Agent · LLM](docs/reference/agent-llm.md) — Bedrock 모델 선택 근거, 3중 비용 방어, AI 캐시 키, 프롬프트 입력
 <!-- /AUTO-MANAGED:references -->

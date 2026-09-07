@@ -22,7 +22,7 @@ stock-monitoring is a real-time stock monitoring web service built on Yahoo Fina
 ## Features
 
 - **Real-time market workspace** — US (S&P 500, NASDAQ, DOW) and KR (KOSPI, KOSDAQ) indices, 100 tracked stocks (US 50 + KR 50) and 11 economic indicators (oil, metals, FX, US 10Y, BTC/ETH) refreshed on a market-hours-aware schedule (45 s quotes / 120 s news); a sticky market strip with an indicator crawl, a MACRO panel, sector heat bars and a quote monitor with US / KR / ★watch scope tabs
-- **Interactive price charts** — Candlestick charts over 1W / 1M / 3M / 6M / 1Y / 5Y (1W in hourly bars, 5Y in weekly bars) rendered with lightweight-charts: MA5/MA20, Bollinger Bands, volume, golden/dead-cross markers, LVL reference lines (previous close, 52-week high/low), RSI(14) and MACD(12,26,9) sub-panes sharing one crosshair, and a candle ⇄ OHLC data-table view
+- **Interactive price charts** — Candlestick charts over 1W / 1M / 3M / 6M / 1Y / 5Y (1W in hourly bars, 5Y in weekly bars) rendered with lightweight-charts: MA5/MA20, Bollinger Bands, golden/dead-cross markers, LVL reference lines (previous close, 52-week high/low), and volume, RSI(14) and MACD(12,26,9) sub-panes sharing one crosshair, and a candle ⇄ OHLC data-table view
 - **Fundamentals and news** — Per-stock financial metrics plus a US/KR RSS news wire with language tabs (all / 한국어 / English) and a title-keyword filter; article bodies are fetched behind SSRF guards, a 20 s total fetch deadline and a 2 MB decompressed-size cap with decompression-bomb bounds
 - **AI analysis with Amazon Bedrock** — Stock and news-article analysis with Claude (`global.anthropic.claude-sonnet-4-6`) streamed over SSE (`phase` → `delta`* → `final`); the stock panel accepts a free-form question (1–200 chars, with presets) that is normalised and fenced inside the prompt and cached per question; guarded by a per-IP rate limit, a 6-hour result cache and a global concurrency cap
 - **Korean-name symbol search** — A ⌘K / Ctrl+K / `/` command bar ranks the 100-symbol universe by symbol, Latin name and Korean name (`name_ko`), matching Hangul syllables, initials (초성: "ㅅㅅㅈㅈ" → 삼성전자) and the mixed forms an IME emits mid-composition; KR codes also match without their `.KS`/`.KQ` suffix
@@ -125,7 +125,7 @@ stock-monitoring/
       services/          # Yahoo Finance data, charts, fundamentals, news, simulation, summary, Bedrock AI
       cache/             # Tiered cache (in-memory L1 + DynamoDB L2 + single-flight orchestration)
       core/              # Config (symbol universe, Korean names, TTLs, env), scheduler, market hours
-    tests/               # pytest suite (380)
+    tests/               # pytest suite (407)
   frontend/              # React 19 + TypeScript + Vite 8
     src/
       api/               # API client, react-query hooks, SSE AI-stream hooks, types
@@ -146,13 +146,13 @@ stock-monitoring/
 ## Testing
 
 ```bash
-# Run all tests (backend + frontend) — 380 pytest + 301 vitest
+# Run all tests (backend + frontend) — 407 pytest + 308 vitest
 make test
 
-# Backend only (pytest, 380 tests)
+# Backend only (pytest, 407 tests)
 cd backend && .venv/bin/pytest -q
 
-# Frontend only (vitest, 301 tests) + type check + lint
+# Frontend only (vitest, 308 tests) + type check + lint
 cd frontend && npx vitest run && npx tsc -b && npm run lint
 
 # CI (.github/workflows/ci.yml) runs the same suites on every push / pull request
@@ -201,7 +201,7 @@ stock-monitoring은 Yahoo Finance 데이터를 기반으로 한 실시간 주식
 ## 주요 기능
 
 - **실시간 시장 워크스페이스** — 미국(S&P 500, NASDAQ, DOW)·한국(KOSPI, KOSDAQ) 지수, 추적 종목 100개(미국 50 + 한국 50), 경제 지표 11종(원유·금속·환율·미 10년물·BTC/ETH)을 장 운영 시간 인지 스케줄(시세 45초 / 뉴스 120초)로 갱신; 지표 크롤이 흐르는 상단 마켓 스트립, MACRO 패널, 섹터 등락 막대, 미국 / 한국 / ★관심 스코프 탭이 있는 시세 표
-- **인터랙티브 가격 차트** — lightweight-charts 기반 1W / 1M / 3M / 6M / 1Y / 5Y(1주는 시간봉, 5년은 주봉) 캔들스틱 차트: MA5/MA20·볼린저 밴드·거래량·골든/데드 크로스 마커·LVL 기준선(전일 종가, 52주 고/저), 크로스헤어를 공유하는 RSI(14)·MACD(12,26,9) 보조 패널, 캔들 ⇄ OHLC 데이터 표 뷰 전환
+- **인터랙티브 가격 차트** — lightweight-charts 기반 1W / 1M / 3M / 6M / 1Y / 5Y(1주는 시간봉, 5년은 주봉) 캔들스틱 차트: MA5/MA20·볼린저 밴드·골든/데드 크로스 마커·LVL 기준선(전일 종가, 52주 고/저), 크로스헤어를 공유하는 거래량·RSI(14)·MACD(12,26,9) 보조 패널, 캔들 ⇄ OHLC 데이터 표 뷰 전환
 - **재무지표·뉴스** — 종목별 재무 지표와 언어 탭(전체 / 한국어 / English)·제목 키워드 필터를 갖춘 미국/한국 RSS 뉴스 와이어; 기사 본문 조회는 SSRF 가드, 총 데드라인 20초, 2MB 해제 크기 상한(압축 폭탄 방어)을 거친다
 - **Amazon Bedrock AI 분석** — Claude(`global.anthropic.claude-sonnet-4-6`) 기반 종목·뉴스 기사 분석을 SSE(`phase` → `delta`* → `final`)로 스트리밍; 종목 패널은 자유 질문(1~200자, 프리셋 포함)을 받아 정규화·프롬프트 울타리 처리 후 질문별로 캐시하며, IP당 레이트리밋·6시간 결과 캐시·전역 동시 실행 제한으로 비용을 방어
 - **한글 종목명 검색** — ⌘K / Ctrl+K / `/` 커맨드 바가 100개 유니버스를 심볼·영문명·한글 종목명(`name_ko`)으로 순위 매기며, 한글 음절·초성("ㅅㅅㅈㅈ" → 삼성전자)·IME 조합 중 혼합 입력을 모두 맞추고 KR 코드는 `.KS`/`.KQ` 접미사 없이도 맞춘다
@@ -304,7 +304,7 @@ stock-monitoring/
       services/          # Yahoo Finance 데이터, 차트, 재무지표, 뉴스, 시뮬레이션, 요약, Bedrock AI
       cache/             # 계층형 캐시 (인메모리 L1 + DynamoDB L2 + single-flight 오케스트레이션)
       core/              # 설정(심볼 유니버스·한글 종목명·TTL·env), 스케줄러, 장 운영 시간
-    tests/               # pytest 테스트 (380)
+    tests/               # pytest 테스트 (407)
   frontend/              # React 19 + TypeScript + Vite 8
     src/
       api/               # API 클라이언트, react-query 훅, SSE AI 스트림 훅, 타입
@@ -325,13 +325,13 @@ stock-monitoring/
 ## 테스트
 
 ```bash
-# Run all tests (backend + frontend) — 380 pytest + 301 vitest
+# Run all tests (backend + frontend) — 407 pytest + 308 vitest
 make test
 
-# Backend only (pytest, 380 tests)
+# Backend only (pytest, 407 tests)
 cd backend && .venv/bin/pytest -q
 
-# Frontend only (vitest, 301 tests) + type check + lint
+# Frontend only (vitest, 308 tests) + type check + lint
 cd frontend && npx vitest run && npx tsc -b && npm run lint
 
 # CI (.github/workflows/ci.yml) runs the same suites on every push / pull request

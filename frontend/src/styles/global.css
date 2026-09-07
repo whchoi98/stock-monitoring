@@ -1493,14 +1493,16 @@ tr.down .pct {
  * lightweight-charts sizes its canvas from the container's box, so CSS must give it a height; colours are out of
  * CSS's reach on a canvas, so PriceChart reads the tokens and passes them in.
  */
+/* 거래량이 별도 패널(아래 .pane-canvas-volume 84px)로 나가면서 메인 캔버스는 380px에서 300px로 낮아졌다 — 둘을 합치면 예전 높이에 가깝다(+4px 패널 여백) */
+/* The volume moved into its own pane (.pane-canvas-volume, 84px), so the main canvas went from 380px to 300px; together they come close to the old height (+4px pane gap) */
 .price-chart {
   width: 100%;
-  height: 380px;
+  height: 300px;
 }
 
 @media (max-width: 899px) {
   .price-chart {
-    height: 280px;
+    height: 220px;
   }
 }
 
@@ -2038,6 +2040,17 @@ tr.down .pct {
 .pane-canvas {
   width: 100%;
   height: 120px;
+}
+
+/* 거래량 패널은 지표 패널보다 낮다 — 막대 높이 비교만 필요하다 / The volume pane is shorter than the indicator panes; only bar heights need comparing */
+.pane-canvas-volume {
+  height: 84px;
+}
+
+@media (max-width: 899px) {
+  .pane-canvas-volume {
+    height: 64px;
+  }
 }
 
 /* 데이터 부족 안내 — 캔버스 위 중앙 / The not-enough-data notice, centred over the canvas */

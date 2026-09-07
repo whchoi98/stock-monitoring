@@ -27,7 +27,7 @@ By default, review unstaged changes from `git diff`. The user may specify differ
 - 캐시 계층(L1 memory / L2 DynamoDB tiered) 경합, single-flight 키 락 위반 / cache-tier races, single-flight lock violations
 - 가격 오버레이 규칙 훼손: quotes 캐시(60s)가 detail 캐시(600s)의 price/change/volume을 덮어써야 함 / price-overlay rule: quotes cache must overwrite detail cache price fields
 - 보안 취약점 (OWASP Top 10) — 특히 아래 프로젝트 고유 가드 / security vulnerabilities, especially project-specific guards:
-  - 뉴스 본문 추출의 SSRF 가드 + 2MB 스트리밍 캡(원시 읽기 16MB·스텝 64KB 압축 해제 상한 포함) + regex 백트래킹 상한(`[^<>]{0,MAX_TAG_SCAN}`) 약화 여부
+  - 뉴스 본문 추출의 SSRF 가드 + 2MB 스트리밍 캡(원시 읽기 16MB·스텝 64KB 압축 해제 상한 포함) + `<`를 제외한 `[^<>]*` 태그 regex·태그 단위 class 파싱(선형성) 약화 여부(`[^>]*`·`(.*?)</p>`·문자 클래스 다중 연결 금지)
   - AI 레이트리밋 키는 CloudFront-Viewer-Address 헤더 (XFF는 위조 가능 — 사용 금지)
   - ALB 접근은 CloudFront prefix-list SG + X-Origin-Verify 헤더 경유만 허용
 - 성능 문제 / performance problems

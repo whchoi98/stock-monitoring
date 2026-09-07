@@ -34,6 +34,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Raise the article AI response cap from 2048 to 4096 tokens so long translation-plus-summary outputs are no longer truncated and cached truncated (stock analyses stay at 1024)
 
 ### Fixed
+- Fix the main price axis printing 0 / -50000 / -100000 on wide-range periods such as 5Y — the volume moved from an overlay on the main chart into its own synced VOL sub-pane, and the candle series pads below in price units with the autoscale floor clamped at 0 (no pixel margin below, marker margin included), so the axis never extends below zero even when a symbol's 5Y range is many times its low; pane fills run with the time-scale link muted so a cached period switch still fits the main chart to the new data
+- Fix article extraction missing `<article>`, body `<div>` and `<p>` tags whose attributes exceed 1000 characters and leaving 1000+ character tags (data-URI images) in the text — the tag regexes drop the length cap (they stay linear by excluding `<`) and stage 2 parses each `<div>`'s `class` attribute instead of chaining several character classes in one regex
+- Fix article extraction swallowing the site footer when a page has no `</article>` within the window (a truncated page, or an article longer than it) — an unclosed `<article>` or body-`<div>` window now stops at the next structural boundary (`<footer`, `</main>`, `<nav`) instead of word-filtering paragraphs, and the window grew from 100k to 250k characters so 100k+ articles are read whole; `<pre>`/`<divider>`/`data-class=` no longer pass as `<p>`/`<div>`/`class=`
 - Fix `/api/health` and the market overview reporting Yahoo as healthy while the quote table was short — a partial quotes, indices or indicators fetch now marks the source degraded, and one market's failure no longer blocks the other market or the overview refresh in the scheduler
 - Fix a cold `/api/market/overview` exceeding the CloudFront 60s origin timeout — the indices and indicators fetches now run under their own deadlines (3s/5s) and the quote budget scales per symbol (0.9s, capped at 20s)
 - Fix the blank US stock table (live incident 2026-08-04) — quotes are fetched serially per symbol with an explicit 8s request timeout, a wall-clock deadline, a jittered retry of only the missing symbols and a 60% coverage floor, and an all-empty result no longer evicts the last good quotes from the cache
@@ -109,6 +112,9 @@ First production release.
 - 기사 AI 응답 토큰 상한을 2048에서 4096으로 상향 — 긴 번역+요약 결과가 잘린 채 캐시되지 않음(종목 분석은 1024 유지)
 
 ### Fixed
+- 5Y처럼 범위가 넓은 기간에서 메인 가격축이 0 / -50000 / -100000까지 찍히던 문제 수정 — 거래량을 메인 차트 오버레이에서 별도 동기 VOL 보조 패널로 분리하고, 캔들 시리즈의 아래 여백을 가격 단위로 주며 autoscale 바닥을 0에서 클램프(하단 픽셀 여백·마커 여백 0)해 5Y 범위가 최저가의 수십 배인 종목에서도 축이 0 아래로 내려가지 않음; 패널 채우기는 시간축 링크를 끊고 수행해 캐시 히트 기간 전환에서도 메인 차트가 새 데이터에 맞춰짐
+- 속성이 1000자를 넘는 `<article>`·본문 `<div>`·`<p>`를 놓치고 1000자 초과 태그(data-URI 이미지)를 본문에 남기던 기사 추출 문제 수정 — 태그 regex의 길이 상한을 없애고(`<` 제외로 선형 유지) 전략 2는 문자 클래스 여러 개를 한 정규식에 이어 붙이는 대신 `<div>`마다 `class` 속성을 파싱
+- 창 안에 `</article>`이 없는 페이지(잘린 페이지, 창보다 긴 기사)에서 기사 추출이 사이트 푸터까지 삼키던 문제 수정 — 닫히지 않은 `<article>`·본문 `<div>` 창은 단락을 단어로 걸러 내는 대신 다음 구조 경계(`<footer`, `</main>`, `<nav`)에서 멈추고, 창을 100k→250k자로 늘려 100k 넘는 기사도 끝까지 읽음; `<pre>`/`<divider>`/`data-class=`는 더 이상 `<p>`/`<div>`/`class=`로 통과하지 않음
 - 시세 표가 결손인데 `/api/health`·시장 overview가 Yahoo를 정상으로 보고하던 문제 수정 — 부분 시세·지수·지표 조회는 소스를 degraded로 표시하고, 스케줄러에서 한 시장의 실패가 다른 시장·overview 갱신을 막지 않음
 - 콜드 `/api/market/overview`가 CloudFront 오리진 60초 타임아웃을 넘기던 문제 수정 — 지수·지표 조회에 각각 데드라인(3s/5s) 적용, 시세 예산은 심볼당 0.9s(상한 20s)로 스케일
 - 미국 종목 표가 빈 화면이 되던 라이브 장애(2026-08-04) 수정 — 시세를 심볼별 직렬 조회(요청 타임아웃 8초, 전체 데드라인, 누락 심볼만 지터 재시도, 커버리지 하한 60%)로 바꾸고, 전 심볼 빈 결과가 캐시의 마지막 정상 시세를 밀어내지 않도록 변경

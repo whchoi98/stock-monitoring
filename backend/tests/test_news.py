@@ -698,13 +698,12 @@ async def test_fetch_article_content_bounds_backtracking_on_unclosed_tag_shapes(
     """
     닫히지 않은 태그가 반복되는 입력에서 추출이 즉시 끝난다 / Extraction finishes immediately on repeated unclosed tags.
 
-    보장하는 것은 "모든 입력에 선형"이 아니라 **후보 시작 위치당 작업량이 상수로 묶인다**는 것이다
-    (`[^<>]{0,MAX_TAG_SCAN}` + 단락 짝맞추기 1패스 + `str.find` 창). 그래서 각 형태를 개별적으로
+    보장하는 것은 선형성이다: 태그 스캔 클래스가 `<`를 제외하므로 후보마다 스캔이 다음 `<`에서 끝나고
+    (런 안의 위치는 O(1) 실패), 단락 짝맞추기는 1패스, 창은 `str.find`다. 그래도 각 형태를 개별적으로
     시간 상한으로 묶는다 - 한 형태만 재보면 다른 형태의 회귀를 놓친다.
-    The guarantee is not "linear for every input" but that the work per candidate start position is
-    constant-bounded (`[^<>]{0,MAX_TAG_SCAN}`, a single pairing pass for paragraphs, and a `str.find`
-    window). Each shape therefore gets its own time bound: measuring one shape would miss a regression in
-    another.
+    The guarantee is linearity: the tag-scanning classes exclude `<`, so each candidate's scan ends at the next
+    `<` (positions inside the run fail in O(1)), paragraphs are paired in one pass, and windows use `str.find`.
+    Each shape still gets its own time bound: measuring one shape would miss a regression in another.
 
     수정 전 실측치는 파라미터로 들어온다 (39.4s / 136.1s / 43.4s / 34.2s @262KB). 수정 후에는 모두
     0.03초 미만이므로, 여유를 크게 둔 1초 상한이 회귀를 명확히 잡는다.
@@ -746,6 +745,300 @@ async def test_fetch_article_content_still_extracts_around_a_pathological_tail(m
 
     assert content == KEPT_PARAGRAPH
     assert elapsed < 1.0, f"extraction took {elapsed:.1f}s"
+
+
+# ---------------------------------------------------------------------------
+# 긴 속성·데이터 URI·닫히지 않은 <article> (2026-09-07 추출 Minor 3건)
+# Long attributes, data URIs and an unclosed <article> (the three extraction minors, 2026-09-07)
+# ---------------------------------------------------------------------------
+
+# 옛 태그 스캔 상한(1000자)을 넘는 속성 값 / An attribute value past the old 1000-character tag-scan cap
+LONG_ATTR = "x" * 1500
+# 49자: 컨테이너 안(전략 1·2, 20자 기준)에서는 남고 페이지 전체(전략 3, 50자 기준)에서는 버려진다 -
+# 그래서 이 단락이 나오면 컨테이너를 찾은 것이고, 아래 NAV가 나오면 전략 3으로 떨어진 것이다.
+# 49 chars: kept inside a container (stages 1-2, 20-char floor), dropped page-wide (stage 3, 50-char floor) -
+# so seeing it proves the container was found, while seeing NAV below proves the fall-through to stage 3.
+CONTAINER_BODY = "Body paragraph inside the container, long enough."
+NAV_BODY = "Navigation paragraph outside the container that stage three would keep because it is long."
+KEPT_LONG_BODY = "Article body paragraph that is comfortably longer than fifty characters to survive."
+
+
+async def test_fetch_article_content_strips_a_tag_longer_than_a_thousand_characters(monkeypatch):
+    """
+    단락 안의 1000자 초과 태그(data-URI `<img>`)가 본문 텍스트에 남지 않는다.
+    A tag longer than 1000 characters inside a paragraph (a data-URI `<img>`) does not survive into the text.
+
+    `<[^<>]*>`는 `<`를 제외하므로 길이 상한 없이도 선형이다 - 상한은 태그를 본문에 남기기만 했다.
+    `<[^<>]*>` is linear without a length cap because it excludes `<`; the cap only ever leaked tags into the body.
+    """
+    _patch_dns(monkeypatch)
+    html = (
+        "<article><p>Text before the image "
+        f'<img src="data:image/png;base64,{"A" * 1500}" alt="chart">'
+        " and text after it.</p></article>"
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == "Text before the image and text after it."
+
+
+@pytest.mark.parametrize(
+    "opening_tag",
+    [
+        pytest.param(f'<article data-track="{LONG_ATTR}">', id="article_with_long_attribute"),
+        pytest.param(f'<article class="story" style="{LONG_ATTR}" itemscope>', id="article_with_long_style_between_attributes"),
+    ],
+)
+async def test_stage_one_matches_an_article_tag_with_a_long_attribute(monkeypatch, opening_tag):
+    """전략 1은 속성이 1000자를 넘는 `<article>`도 찾는다 / Stage 1 finds an `<article>` whose attributes exceed 1000 chars."""
+    _patch_dns(monkeypatch)
+    html = (
+        f"<html><body><nav><p>{NAV_BODY}</p></nav>"
+        f"{opening_tag}<p>{CONTAINER_BODY}</p></article>"
+        "</body></html>"
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == CONTAINER_BODY
+
+
+@pytest.mark.parametrize(
+    "opening_tag",
+    [
+        pytest.param(f'<div class="article-body" data-config="{LONG_ATTR}">', id="long_attribute_after_class"),
+        pytest.param(f'<div style="{LONG_ATTR}" class="wrap article-body">', id="long_attribute_before_class"),
+        pytest.param(f'<div class="{LONG_ATTR} article-body">', id="long_class_value"),
+    ],
+)
+async def test_stage_two_matches_a_body_div_with_a_long_attribute(monkeypatch, opening_tag):
+    """전략 2는 속성이 1000자를 넘는 본문 `<div>`도 찾는다 / Stage 2 finds a body `<div>` whose attributes exceed 1000 chars."""
+    _patch_dns(monkeypatch)
+    html = (
+        f"<html><body><nav><p>{NAV_BODY}</p></nav>"
+        f"{opening_tag}<p>{CONTAINER_BODY}</p></div>"
+        "</body></html>"
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == CONTAINER_BODY
+
+
+async def test_stage_two_only_reads_the_class_attribute(monkeypatch):
+    """
+    본문 클래스 이름이 다른 속성에만 있으면 컨테이너가 아니다 / A body class name in another attribute does not make a container.
+
+    태그 단위로 `class="..."` 값만 검사하므로 `data-target="article-body"`에는 반응하지 않는다.
+    Only the `class="..."` value is inspected per tag, so `data-target="article-body"` is ignored.
+    """
+    _patch_dns(monkeypatch)
+    html = (
+        f'<html><body><div data-target="article-body"><p>{CONTAINER_BODY}</p></div>'
+        f"<p>{NAV_BODY}</p></body></html>"
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    # 컨테이너가 없으니 전략 3: 50자 초과인 NAV_BODY만 남는다 / No container, so stage 3 keeps only the 50+ char NAV_BODY
+    assert await news.fetch_article_content(ARTICLE_URL) == NAV_BODY
+
+
+async def test_stage_two_prefers_the_class_priority_order(monkeypatch):
+    """
+    본문 클래스는 `ARTICLE_BODY_CLASSES` 순서대로 시도한다 - 문서 순서가 아니다.
+    Body classes are tried in `ARTICLE_BODY_CLASSES` order, not document order.
+    """
+    _patch_dns(monkeypatch)
+    later_but_preferred = "Paragraph in the article-body container that comes later in the page."
+    earlier_but_lower = "Paragraph in the view_con container that appears earlier in the page."
+    html = (
+        f'<html><body><div class="view_con"><p>{earlier_but_lower}</p></div>'
+        f'<div class="article-body"><p>{later_but_preferred}</p></div></body></html>'
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == later_but_preferred
+
+
+async def test_pre_block_is_not_a_paragraph_opener(monkeypatch):
+    """`<p` 접두 태그(`<pre>`, `<path>`, `<picture>`)는 단락이 아니다 / Tags merely starting with `<p` (`<pre>`, `<path>`, `<picture>`) are not paragraphs."""
+    _patch_dns(monkeypatch)
+    html = f"<article><pre>code sample</pre><p>{CONTAINER_BODY}</p></article>"
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    # `<pre>`가 단락을 열면 그 뒤 `<p>`가 무시돼 본문 앞에 "code sample"이 붙는다 / An opener at `<pre>` would swallow the `<p>` and prefix the body
+    assert await news.fetch_article_content(ARTICLE_URL) == CONTAINER_BODY
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        pytest.param(f'<divider class="article-body"><p>{CONTAINER_BODY}</p></divider><p>{NAV_BODY}</p>', id="divider_is_not_a_div"),
+        pytest.param(f'<div data-class="article-body"><p>{CONTAINER_BODY}</p></div><p>{NAV_BODY}</p>', id="data-class_is_not_class"),
+        pytest.param(f'<articles-list><p>{CONTAINER_BODY}</p></articles-list><p>{NAV_BODY}</p>', id="articles-list_is_not_article"),
+    ],
+)
+async def test_container_tag_names_must_match_exactly(monkeypatch, html):
+    """`<div`·`<article`·`class=`는 접두가 아니라 정확한 이름이어야 컨테이너다 / Only exact `<div`, `<article` and `class=` make a container."""
+    _patch_dns(monkeypatch)
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    # 컨테이너가 없으니 전략 3: 50자 초과인 NAV_BODY만 / No container, so stage 3 keeps only the 50+ char NAV_BODY
+    assert await news.fetch_article_content(ARTICLE_URL) == NAV_BODY
+
+
+async def test_paragraph_tag_with_a_long_attribute_is_still_a_paragraph(monkeypatch):
+    """속성이 1000자를 넘는 `<p>`도 단락이다 / A `<p>` whose attributes exceed 1000 chars is still a paragraph."""
+    _patch_dns(monkeypatch)
+    html = f'<article><p style="{LONG_ATTR}">{CONTAINER_BODY}</p></article>'
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == CONTAINER_BODY
+
+
+# 컨테이너를 닫지 못한 창이 멈춰야 하는 구조 경계 / Structural boundaries an unclosed container window must stop at
+FOOTER_HTML = (
+    "<footer><p>Subscribe to our newsletter for the latest headlines delivered daily.</p>"
+    "<p>Copyright 2026 Example Media. All rights reserved worldwide.</p></footer>"
+)
+DEAL_TERMS = "Terms of the deal were not disclosed, but people familiar said it topped a billion."
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        pytest.param("<footer>", id="footer"),
+        pytest.param("</main>", id="main_close"),
+    ],
+)
+async def test_unclosed_article_window_stops_at_a_structural_boundary(monkeypatch, boundary):
+    """
+    `</article>`이 없으면(잘린 페이지, 100k 넘는 기사) 창을 다음 구조 경계에서 끊는다 - 단어 필터는 걸지 않는다.
+    Without `</article>` (a truncated page, an article past the window) the window stops at the next structural
+    boundary; no word filter is applied.
+
+    "terms of"·"subscribers" 같은 마커는 금융 기사 본문에 흔하다(실측: Yahoo 기사 20건 중 1건이 이 경로에서 정상 단락을
+    잃었다). 그래서 푸터를 잘라내는 일은 단락 텍스트가 아니라 마크업 경계가 맡는다.
+    Markers such as "terms of" or "subscribers" are ordinary finance prose (measured: 1 of 20 live Yahoo pages lost a real
+    paragraph on this path), so cutting the footer is the markup boundary's job, not the paragraph text's.
+    """
+    _patch_dns(monkeypatch)
+    html = (
+        f"<article><p>{KEPT_LONG_BODY}</p><p>{DEAL_TERMS}</p>"
+        f"{boundary}<p>Subscribe to our newsletter for the latest headlines delivered daily.</p>"
+        "<p>Copyright 2026 Example Media. All rights reserved worldwide.</p>"
+        # `</article>` 없음 / no `</article>`
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == f"{KEPT_LONG_BODY}\n\n{DEAL_TERMS}"
+
+
+async def test_breadcrumb_nav_inside_an_unclosed_article_does_not_cut_the_body(monkeypatch):
+    """
+    `<article>` 첫머리의 브레드크럼 `<nav>`는 경계가 아니다 - 실측 Yahoo 기사가 본문 90자 앞에 `<nav`를 둔다.
+    A breadcrumb `<nav>` at the head of `<article>` is no boundary - live Yahoo pages put `<nav` 90 chars before the body.
+    """
+    _patch_dns(monkeypatch)
+    html = (
+        '<article><nav class="breadcrumb"><a href="/">Home</a></nav>'
+        f"<p>{KEPT_LONG_BODY}</p><p>{DEAL_TERMS}</p>{FOOTER_HTML}"
+        # `</article>` 없음 / no `</article>`
+    )
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == f"{KEPT_LONG_BODY}\n\n{DEAL_TERMS}"
+
+
+async def test_bare_less_than_in_prose_is_not_a_tag(monkeypatch):
+    """
+    본문의 `<`·`>` 부호는 태그가 아니다 - 태그는 글자·`/`·`!`로 시작한다 / A `<`/`>` sign in prose is no tag: tags start with a letter, `/` or `!`.
+
+    옛 `<[^<>]{0,1000}>`는 "1 < 2 and 3 > 2"의 부호 사이를 태그로 보고 지웠고, 상한을 없애면 그 삭제가 1000자 넘는 구간까지 커진다.
+    The old `<[^<>]{0,1000}>` treated the span between the signs in "1 < 2 and 3 > 2" as a tag and deleted it; without the cap
+    that deletion would grow past 1000 characters.
+    """
+    _patch_dns(monkeypatch)
+    prose = "Yields moved as 2 < 3 and the spread stayed above 1 > 0 for most of the session this week."
+    html = f"<article><p>{prose}</p></article>"
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == prose
+
+
+async def test_body_class_window_stops_at_a_structural_boundary(monkeypatch):
+    """
+    전략 2의 고정 창도 같은 규칙이다 - 본문 `<div>` 뒤의 `<footer>` 단락은 들어오지 않는다.
+    Stage 2's fixed window follows the same rule: `<footer>` paragraphs after the body `<div>` stay out.
+    """
+    _patch_dns(monkeypatch)
+    html = f'<div class="article-body"><p>{KEPT_LONG_BODY}</p><p>{DEAL_TERMS}</p></div>{FOOTER_HTML}'
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == f"{KEPT_LONG_BODY}\n\n{DEAL_TERMS}"
+
+
+async def test_article_longer_than_the_old_window_is_extracted_whole(monkeypatch):
+    """
+    100k자를 넘는 `<article>`도 끝까지 읽는다 (실측 Yahoo 기사 span 최대 ~107k) / An `<article>` past 100k chars is read to its end.
+    """
+    _patch_dns(monkeypatch)
+    filler = "<div>" + "x" * 120_000 + "</div>"
+    tail = "Closing paragraph that appears after one hundred and twenty thousand characters of markup."
+    html = f"<article><p>{KEPT_LONG_BODY}</p>{filler}<p>{tail}</p></article>{FOOTER_HTML}"
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == f"{KEPT_LONG_BODY}\n\n{tail}"
+
+
+async def test_closed_article_keeps_paragraphs_that_mention_boilerplate_words(monkeypatch):
+    """
+    `</article>`이 있으면 컨테이너 안은 신뢰한다 - "subscribe"를 언급하는 기사 문장을 버리지 않는다.
+    With `</article>` present the container is trusted: an article sentence mentioning "subscribe" stays.
+    """
+    _patch_dns(monkeypatch)
+    business = "The company said subscribers grew as more readers subscribe to its bundle."
+    html = f"<article><p>{KEPT_LONG_BODY}</p><p>{business}</p></article>"
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    assert await news.fetch_article_content(ARTICLE_URL) == f"{KEPT_LONG_BODY}\n\n{business}"
+
+
+# 태그 스캔에 길이 상한이 없을 때 이차가 될 수 있는 형태들 - 상한을 채운 긴 속성 런.
+# Shapes that could turn quadratic without a tag-scan length cap: long attribute runs filling the cap.
+LONG_ATTRIBUTE_RUN_SHAPES = [
+    ("div_then_body_class_repeated", "<div " + 'class="article-body" ' * (news.MAX_ARTICLE_SIZE // 21)),
+    ("div_then_letters", "<div " + "a" * (news.MAX_ARTICLE_SIZE - 5)),
+    ("div_then_kilobyte_class_values", "<div " + ('class="' + "a" * 1000 + " ") * (news.MAX_ARTICLE_SIZE // 1008)),
+    ("p_then_letters", "<p " + "a" * (news.MAX_ARTICLE_SIZE - 3)),
+    ("article_then_letters", "<article " + "a" * (news.MAX_ARTICLE_SIZE - 9)),
+    ("img_then_letters_inside_p", "<p><img " + "a" * (news.MAX_ARTICLE_SIZE - 12) + "</p>"),
+    ("kilobyte_tags_inside_p", "<p>" + ("<a " + "b" * 1000) * (news.MAX_ARTICLE_SIZE // 1003) + "</p>"),
+]
+
+
+@pytest.mark.parametrize(
+    "html", [pytest.param(html, id=shape_id) for shape_id, html in LONG_ATTRIBUTE_RUN_SHAPES],
+)
+async def test_fetch_article_content_stays_fast_on_long_attribute_runs(monkeypatch, html):
+    """
+    긴 속성 런에서도 추출은 1초 안에 끝난다 / Extraction finishes within a second on long attribute runs.
+
+    태그 스캔 클래스가 `<`를 제외하므로 후보마다 스캔이 다음 `<`에서 끝나고, 런 안의 위치들은 `<`로
+    시작하지 않아 즉시 실패한다 - 길이 상한 없이 선형이다. 전략 2는 태그 하나의 `class` 값만 읽으므로
+    다중 클래스 백트래킹도 없다. 이 테스트가 그 두 주장을 못 박는다.
+    The tag-scanning classes exclude `<`, so each candidate's scan ends at the next `<` and the positions inside
+    the run fail at once for not starting with `<` - linear without a length cap. Stage 2 reads one tag's `class`
+    value at a time, so there is no multi-class backtracking either. This test pins both claims.
+    """
+    _patch_dns(monkeypatch)
+    assert len(html) >= news.MAX_ARTICLE_SIZE - 1100   # 반복 단위가 상한을 거의 채운다 / the repeated unit nearly fills the cap
+    _patch_transport(monkeypatch, {ARTICLE_URL: _resp(html)})
+
+    started = time.perf_counter()
+    content = await news.fetch_article_content(ARTICLE_URL)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, f"extraction took {elapsed:.1f}s on a long attribute run"
+    assert isinstance(content, str)
 
 
 async def test_paragraph_extraction_runs_off_the_event_loop(monkeypatch):

@@ -24,7 +24,7 @@ For each changed file, apply the code-review skill criteria:
 - 프로젝트 가이드라인 준수 (CLAUDE.md: Python 타입힌트·async 우선, TS strict·함수형 컴포넌트, 한/영 병기 주석)
 - 버그 탐지 / bug detection (로직 오류, 캐시 계층 경합, 보안, 성능)
 - 프로젝트 고유 보안 가드 훼손 여부 / project-specific security guards:
-  SSRF 가드·2MB 캡(압축 해제 상한 포함)·regex 백트래킹 상한, CloudFront-Viewer-Address 레이트리밋 키, X-Origin-Verify
+  SSRF 가드·2MB 캡(압축 해제 상한 포함)·태그 regex 선형성(`<` 제외), CloudFront-Viewer-Address 레이트리밋 키, X-Origin-Verify
 - 코드 품질 / code quality (중복, 복잡도, 테스트 커버리지)
 
 ## Step 3: 스코어링과 필터 / Score and Filter

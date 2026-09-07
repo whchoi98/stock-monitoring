@@ -1,10 +1,10 @@
 /**
- * 가격 차트 (PRICE ACTION) — 캔들 + MA5/MA20 + 볼린저 밴드 + 거래량 + 골든/데드 크로스 마커 + 기준선(전일·52주 고/저),
- * 그리고 메인 차트에 시간축이 동기화된 RSI(14)·MACD(12,26,9) 보조 패널. 기간 탭(1W…5Y), 지표 토글, 캔들/표 뷰 전환,
+ * 가격 차트 (PRICE ACTION) — 캔들 + MA5/MA20 + 볼린저 밴드 + 골든/데드 크로스 마커 + 기준선(전일·52주 고/저), 그리고 메인
+ * 차트에 시간축·크로스헤어가 동기화된 거래량·RSI(14)·MACD(12,26,9) 보조 패널. 기간 탭(1W…5Y), 지표 토글, 캔들/표 뷰 전환,
  * 크로스헤어가 가리키는 캔들의 OHLC 레전드를 갖는다.
- * The price chart: candles, MA5/MA20, Bollinger Bands, volume, golden/dead cross markers, reference levels (previous
- * close, 52-week high/low), plus RSI(14) and MACD(12,26,9) sub-panes whose time scales follow the main chart. It has
- * period tabs (1W…5Y), indicator toggles, a candle/table view switch and an OHLC legend for the hovered candle.
+ * The price chart: candles, MA5/MA20, Bollinger Bands, golden/dead cross markers, reference levels (previous close,
+ * 52-week high/low), plus volume, RSI(14) and MACD(12,26,9) sub-panes whose time scales and crosshair follow the main
+ * chart. It has period tabs (1W…5Y), indicator toggles, a candle/table view switch and an OHLC legend for the hovered candle.
  *
  * **색 예외 (계획이 승인한 유일한 예외)**: lightweight-charts 옵션은 canvas에 그리므로 CSS 변수를 받지 못한다. 그래서 이
  * 컴포넌트만 `getComputedStyle`로 토큰 값을 읽어 넘긴다. 하드코딩된 색은 없고, 읽는 이름은 전부 tokens.css의 변수다. 테마
@@ -13,11 +13,14 @@
  * variables, so this component alone reads the token values through `getComputedStyle`. The theme toggle only flips
  * `<html data-theme>`, so that attribute is watched and the chart rebuilt on a change.
  *
- * **보조 패널은 별도 차트다** — lightweight-charts v4는 단일 패널이라, RSI/MACD는 각자 `createChart`로 만들고 메인과
- * `subscribeVisibleLogicalRangeChange`로 양방향 동기화한다. 가격축 최소 폭을 같게 두어 x축이 정확히 겹친다.
- * **The sub-panes are separate charts**: lightweight-charts v4 is single-pane, so RSI/MACD each get their own
+ * **보조 패널은 별도 차트다** — lightweight-charts v4는 단일 패널이라, 거래량/RSI/MACD는 각자 `createChart`로 만들고 메인과
+ * `subscribeVisibleLogicalRangeChange`로 양방향 동기화한다. 가격축 최소 폭을 같게 두어 x축이 정확히 겹친다. 거래량도 패널인
+ * 이유: 메인의 오버레이로 두면 메인 가격축이 거래량 띠만큼 아래 여백을 가져야 하고, 그 여백이 5Y처럼 범위가 넓은 기간에서
+ * 축 라벨을 0 아래(-50000…)까지 이어지게 했다.
+ * **The sub-panes are separate charts**: lightweight-charts v4 is single-pane, so volume/RSI/MACD each get their own
  * `createChart`, linked to the main chart two ways through `subscribeVisibleLogicalRangeChange`; an equal minimum
- * price-axis width keeps the x axes aligned.
+ * price-axis width keeps the x axes aligned. The volume is a pane too: as an overlay it forced a bottom margin on the
+ * main price axis, which on wide ranges such as 5Y ran the labels below 0 (-50000…).
  *
  * 데이터 변환은 `chartData.ts`, 지표 계산은 `indicators.ts`의 순수 함수가 맡고(jsdom에서 차트는 못 돌지만 그 함수들은
  * 테스트된다), 이 파일은 차트 수명주기만 다룬다: 생성/파괴는 마운트·테마·표시여부에서만, 폴링 갱신은 `setData`로, 토글은
@@ -27,6 +30,7 @@
  */
 import { useQueryClient } from '@tanstack/react-query'
 import type {
+  AutoscaleInfo,
   IChartApi,
   IPriceLine,
   ISeriesApi,
@@ -107,11 +111,29 @@ const VIEWS: { value: View; label: string }[] = [
   { value: 'table', label: '표' },
 ]
 
-/** 거래량 히스토그램이 차지하는 아래쪽 비율 (스펙: 하단 20%) / The share of the pane the volume takes (spec: the bottom 20%) */
-const VOLUME_SHARE = 0.2
+/**
+ * 메인 가격축의 여백. 위쪽은 픽셀 비율 여백, **아래쪽은 0** — 아래 여백은 `PRICE_FLOOR_PAD`가 가격 단위로 준다.
+ * 라이브러리는 여백 띠(마커 여백 포함)까지 축 라벨을 찍으므로, 픽셀 여백을 두면 5Y처럼 범위가 최저가의 몇 배인 종목(NVDA·
+ * SK하이닉스)에서 축 바닥이 0 아래로 내려가 "0"·음수 라벨이 나온다. 거래량이 메인의 오버레이였을 때는 그 띠가 26%였다.
+ * The main price scale's margins: a pixel-ratio margin above, **zero below** — the padding below comes from
+ * `PRICE_FLOOR_PAD` in price units. The library draws axis labels into the margin bands (marker margins included), so a
+ * pixel margin below lets the axis floor sink under 0 on 5Y for symbols whose range is several times their low (NVDA,
+ * SK hynix), printing "0" and negative labels. With the volume overlaid on the main chart that band was 26%.
+ */
+const PRICE_SCALE_MARGINS = { top: 0.08, bottom: 0 }
 
-/** 캔들이 거래량 띠를 침범하지 않도록 두는 여유 / The gap that keeps the candles clear of the volume band */
-const PRICE_BOTTOM_MARGIN = VOLUME_SHARE + 0.06
+/**
+ * 캔들 아래 여백 — 가격 범위의 비율로 주되 바닥은 0에서 멈춘다 (`autoscaleInfoProvider`). 0.095 = 옛 8% 픽셀 여백과 같은 크기
+ * (0.08 / 0.84). 마커(골든/데드 크로스)의 아래 픽셀 여백도 0으로 두어 축이 0 아래로 내려갈 길을 모두 막는다 — 최저가가 범위의
+ * 9.5%보다 작은 종목에서만 맨 아래 마커가 조금 잘릴 수 있다.
+ * The padding below the candles as a share of the price range, floored at 0 (`autoscaleInfoProvider`). 0.095 equals the
+ * old 8% pixel margin (0.08 / 0.84). The markers' pixel margin below is zeroed too, closing every path below 0; only when
+ * the low is under 9.5% of the range can the lowest marker clip slightly.
+ */
+const PRICE_FLOOR_PAD = 0.095
+
+/** 거래량 패널의 위 여백 — 막대는 바닥에 붙는다 / The volume pane's top margin; the bars sit on the floor */
+const VOLUME_SCALE_MARGINS = { top: 0.15, bottom: 0 }
 
 /**
  * 가격축 최소 폭 — 메인과 보조 패널이 같은 값을 쓰므로 x축이 정확히 겹친다 (라벨 폭이 달라도).
@@ -210,7 +232,6 @@ interface ChartHandle {
   ma20: ISeriesApi<'Line'>
   bollUpper: ISeriesApi<'Line'>
   bollLower: ISeriesApi<'Line'>
-  volume: ISeriesApi<'Histogram'>
   styles: ChartStyles
 }
 
@@ -222,7 +243,19 @@ interface RsiPane {
   chart: IChartApi
   series: ISeriesApi<'Line'>
   values: Map<string, number>
-  unlink: () => void
+  link: TimeLink
+}
+
+/**
+ * 거래량 패널 — 메인 차트의 오버레이가 아니라 RSI/MACD와 같은 동기 보조 패널이다. 그래야 메인 가격축이 가격 범위만 담당한다.
+ * The volume pane: a synced sub-pane like RSI/MACD rather than an overlay on the main chart, so the main price axis covers
+ * the price range alone.
+ */
+interface VolumePane {
+  chart: IChartApi
+  series: ISeriesApi<'Histogram'>
+  values: Map<string, number>
+  link: TimeLink
 }
 
 interface MacdPane {
@@ -233,7 +266,7 @@ interface MacdPane {
   /** = `line` — 크로스헤어 가로선은 MACD 선을 따른다 / The MACD line, which the crosshair's horizontal line follows */
   series: ISeriesApi<'Line'>
   values: Map<string, number>
-  unlink: () => void
+  link: TimeLink
 }
 
 /** 시각 키 → 값 (크로스헤어 동기화가 가로선 위치를 잡는 데 쓴다) / Time key to value, so crosshair sync can place the horizontal line */
@@ -283,26 +316,49 @@ function createPaneChart(container: HTMLElement, styles: ChartStyles): IChartApi
   })
 }
 
+/** 메인 ↔ 보조 패널 시간축 링크 / The time-scale link between the main chart and a sub-pane */
+interface TimeLink {
+  unlink: () => void
+  /**
+   * `fn` 동안 양방향 전파를 끊는다. 패널에 `setData`하면 라이브러리가 그 패널의 논리 범위를 **동기적으로** 재계산·발화하는데,
+   * 그 (옛 바 간격의) 범위가 메인으로 되돌아가면 메인이 큐에 넣어 둔 `fitContent`(rAF까지 지연)를 교체해 버린다.
+   * Cut both directions while `fn` runs. `setData` on a pane makes the library recompute and fire that pane's logical
+   * range **synchronously**; echoed back to the main chart, that (old-bar-spacing) range would replace the `fitContent`
+   * the main chart has queued (deferred to rAF).
+   */
+  silently: (fn: () => void) => void
+}
+
 /**
  * 두 차트의 시간축을 양방향으로 잇는다 — 재진입 가드로 서로를 무한히 깨우지 않는다.
  * Link two charts' time scales both ways, with a re-entrancy guard so they never wake each other forever.
  */
-function linkTimeScales(main: IChartApi, pane: IChartApi): () => void {
+function linkTimeScales(main: IChartApi, pane: IChartApi): TimeLink {
   let syncing = false
-  const forward = (from: IChartApi, to: IChartApi) => (range: LogicalRange | null) => {
+  const forward = (to: IChartApi) => (range: LogicalRange | null) => {
     if (syncing || range === null) return
     syncing = true
     to.timeScale().setVisibleLogicalRange(range)
     syncing = false
-    void from
   }
-  const onMain = forward(main, pane)
-  const onPane = forward(pane, main)
+  const onMain = forward(pane)
+  const onPane = forward(main)
   main.timeScale().subscribeVisibleLogicalRangeChange(onMain)
   pane.timeScale().subscribeVisibleLogicalRangeChange(onPane)
-  return () => {
-    main.timeScale().unsubscribeVisibleLogicalRangeChange(onMain)
-    pane.timeScale().unsubscribeVisibleLogicalRangeChange(onPane)
+  return {
+    unlink: () => {
+      main.timeScale().unsubscribeVisibleLogicalRangeChange(onMain)
+      pane.timeScale().unsubscribeVisibleLogicalRangeChange(onPane)
+    },
+    silently: (fn) => {
+      const was = syncing
+      syncing = true
+      try {
+        fn()
+      } finally {
+        syncing = was
+      }
+    },
   }
 }
 
@@ -313,7 +369,12 @@ function linkTimeScales(main: IChartApi, pane: IChartApi): () => void {
  * no values (null first value on its price scale) or a time missing from its scale. Sync is decoration, so a failure only
  * clears that chart's crosshair.
  */
-function placeCrosshair(chart: IChartApi, price: number, time: Time, series: ISeriesApi<'Line' | 'Candlestick'>): void {
+function placeCrosshair(
+  chart: IChartApi,
+  price: number,
+  time: Time,
+  series: ISeriesApi<'Line' | 'Candlestick' | 'Histogram'>,
+): void {
   try {
     chart.setCrosshairPosition(price, time, series)
   } catch {
@@ -327,32 +388,58 @@ function syncRange(main: IChartApi, pane: IChartApi): void {
   if (range !== null) pane.timeScale().setVisibleLogicalRange(range)
 }
 
+/*
+ * 패널 채우기는 링크를 끊은 채로 한다 — `setData`가 발화하는 패널 범위가 메인의 `fitContent`를 덮어쓰지 않게 (`TimeLink.silently`).
+ * 메인이 rAF에서 맞춰지면 메인→패널 전파가 패널을 따라오게 한다.
+ * A pane is filled with the link cut, so the range its `setData` fires cannot override the main chart's `fitContent`
+ * (`TimeLink.silently`); once the main chart fits at rAF, the main→pane forward brings the pane along.
+ */
+function fillVolume(pane: VolumePane, main: IChartApi, data: ChartData, styles: ChartStyles): void {
+  const values = new Map<string, number>()
+  const bars = data.candles.flatMap((candle) => {
+    const time = toChartTime(candle.time)
+    if (time === null) return []
+    values.set(timeKey(time), candle.volume)
+    // 막대 색은 캔들 방향을 따른다 / Each bar's colour follows its candle
+    const color = candle.close >= candle.open ? styles.volumeUp : styles.volumeDown
+    return [{ time, value: candle.volume, color }]
+  })
+  pane.link.silently(() => {
+    pane.series.setData(bars)
+    syncRange(main, pane.chart)
+  })
+  pane.values = values
+}
+
 function fillRsi(pane: RsiPane, main: IChartApi, data: ChartData): void {
   const times = data.candles.map((candle) => candle.time)
   const values = rsi(data.candles.map((candle) => candle.close), RSI_PERIOD)
   // 워밍업 구간은 공백 포인트로 — 패널의 논리 인덱스가 메인의 캔들 인덱스와 1:1이어야 한다 / Warm-up as whitespace: the pane's logical index must match the main chart's
-  pane.series.setData(toLineSeriesWithGaps(times, values))
+  pane.link.silently(() => {
+    pane.series.setData(toLineSeriesWithGaps(times, values))
+    syncRange(main, pane.chart)
+  })
   pane.values = valuesByTime(times, values)
-  syncRange(main, pane.chart)
 }
 
 function fillMacd(pane: MacdPane, main: IChartApi, data: ChartData, styles: ChartStyles): void {
   const times = data.candles.map((candle) => candle.time)
   const out = macd(data.candles.map((candle) => candle.close))
-  pane.line.setData(toLineSeriesWithGaps(times, out.macd))
+  const histogram = times.flatMap((time, index) => {
+    const chartTime = toChartTime(time)
+    if (chartTime === null) return []
+    const value = out.histogram[index]
+    // 워밍업 구간은 공백 포인트 / Warm-up as whitespace
+    if (value === null || value === undefined) return [{ time: chartTime }]
+    return [{ time: chartTime, value, color: value >= 0 ? styles.volumeUp : styles.volumeDown }]
+  })
+  pane.link.silently(() => {
+    pane.line.setData(toLineSeriesWithGaps(times, out.macd))
+    pane.signal.setData(toLineSeriesWithGaps(times, out.signal))
+    pane.histogram.setData(histogram)
+    syncRange(main, pane.chart)
+  })
   pane.values = valuesByTime(times, out.macd)
-  pane.signal.setData(toLineSeriesWithGaps(times, out.signal))
-  pane.histogram.setData(
-    times.flatMap((time, index) => {
-      const chartTime = toChartTime(time)
-      if (chartTime === null) return []
-      const value = out.histogram[index]
-      // 워밍업 구간은 공백 포인트 / Warm-up as whitespace
-      if (value === null || value === undefined) return [{ time: chartTime }]
-      return [{ time: chartTime, value, color: value >= 0 ? styles.volumeUp : styles.volumeDown }]
-    }),
-  )
-  syncRange(main, pane.chart)
 }
 
 /** 기준선 — 상세 화면이 넘겨준다 (0 센티널은 그리지 않는다) / Reference levels handed in by the detail screen (0 sentinels are skipped) */
@@ -397,9 +484,11 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
   const queryClient = useQueryClient()
 
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const volRef = useRef<HTMLDivElement | null>(null)
   const rsiRef = useRef<HTMLDivElement | null>(null)
   const macdRef = useRef<HTMLDivElement | null>(null)
   const handleRef = useRef<ChartHandle | null>(null)
+  const volumePaneRef = useRef<VolumePane | null>(null)
   const rsiPaneRef = useRef<RsiPane | null>(null)
   const macdPaneRef = useRef<MacdPane | null>(null)
   /** 최신 데이터 — 보조 패널이 생길 때 바로 채우기 위해 / The latest data, so a new pane can fill itself at once */
@@ -424,14 +513,14 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
   const syncingRef = useRef(false)
 
   /*
-   * 크로스헤어 방송 — 어느 차트(메인·RSI·MACD)에서 움직였든 레전드를 갱신하고 나머지 차트의 크로스헤어를 같은 시각에
+   * 크로스헤어 방송 — 어느 차트(메인·거래량·RSI·MACD)에서 움직였든 레전드를 갱신하고 나머지 차트의 크로스헤어를 같은 시각에
    * 놓는다 (`setCrosshairPosition`, 가로선은 그 차트 시리즈의 해당 시각 값). 차트 밖으로 나가면 모두 지운다. ref만 읽으므로
    * 이펙트가 잡은 클로저가 낡지 않는다.
-   * Broadcast the crosshair: whichever chart (main, RSI, MACD) moved, refresh the legend and put the other charts'
+   * Broadcast the crosshair: whichever chart (main, volume, RSI, MACD) moved, refresh the legend and put the other charts'
    * crosshairs at the same time (`setCrosshairPosition`; the horizontal line sits on that chart's series value at that
    * time). Leaving a chart clears them all. It reads refs only, so the closure an effect captured never goes stale.
    */
-  const broadcastCrosshair = useCallback((source: 'main' | 'rsi' | 'macd', param: MouseEventParams) => {
+  const broadcastCrosshair = useCallback((source: 'main' | 'vol' | 'rsi' | 'macd', param: MouseEventParams) => {
     if (syncingRef.current) return
     syncingRef.current = true
     try {
@@ -446,7 +535,8 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
         else placeCrosshair(main.chart, candle.close, param.time, main.candles)
       }
 
-      const panes: Array<['rsi' | 'macd', RsiPane | MacdPane | null]> = [
+      const panes: Array<['vol' | 'rsi' | 'macd', VolumePane | RsiPane | MacdPane | null]> = [
+        ['vol', volumePaneRef.current],
         ['rsi', rsiPaneRef.current],
         ['macd', macdPaneRef.current],
       ]
@@ -506,8 +596,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       rightPriceScale: {
         borderColor: styles.grid,
         minimumWidth: PRICE_AXIS_WIDTH,
-        // 아래쪽은 거래량 띠에 넘겨준다 / The lower band belongs to the volume
-        scaleMargins: { top: 0.08, bottom: PRICE_BOTTOM_MARGIN },
+        scaleMargins: PRICE_SCALE_MARGINS,
       },
       timeScale: { borderColor: styles.grid },
       /*
@@ -529,6 +618,17 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       wickUpColor: styles.up,
       wickDownColor: styles.down,
       ...(priceFormat === undefined ? {} : { priceFormat }),
+      // 아래 여백은 가격 단위로, 바닥은 0 — `PRICE_FLOOR_PAD` 참조 / Padding below in price units, floored at 0 — see `PRICE_FLOOR_PAD`
+      autoscaleInfoProvider: (original: () => AutoscaleInfo | null) => {
+        const info = original()
+        if (info === null) return info
+        const { minValue, maxValue } = info.priceRange
+        const pad = (maxValue - minValue) * PRICE_FLOOR_PAD
+        return {
+          priceRange: { minValue: Math.max(0, minValue - pad), maxValue },
+          margins: { above: info.margins?.above ?? 0, below: 0 },
+        }
+      },
     })
 
     /** 보조선 — 가격축 라벨/기준선을 만들지 않는다 / Overlays: no axis label, no price line */
@@ -545,25 +645,11 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     const bollUpper = chart.addLineSeries(line(styles.band, LineStyle.Dashed))
     const bollLower = chart.addLineSeries(line(styles.band, LineStyle.Dashed))
 
-    /*
-     * 거래량은 자기만의 오버레이 가격축(`priceScaleId: ''`)에 올리고 그 축을 아래 20%로 밀어 가격 스케일과 섞이지 않게 한다.
-     * 막대 색은 캔들 방향을 따른다 (데이터 이펙트에서 점마다 지정).
-     * The volume sits on its own overlay price scale, pushed into the bottom 20%; each bar's colour follows its candle.
-     */
-    const volume = chart.addHistogramSeries({
-      color: styles.volumeUp,
-      priceScaleId: '',
-      priceFormat: { type: 'volume' },
-      priceLineVisible: false,
-      lastValueVisible: false,
-    })
-    volume.priceScale().applyOptions({ scaleMargins: { top: 1 - VOLUME_SHARE, bottom: 0 } })
-
     // 크로스헤어 → 레전드 + 보조 패널 동기화. 차트 밖(time 없음)이면 레전드는 마지막 캔들로, 패널은 지운다 / Crosshair to legend and sub-panes; off-chart falls back
     const onCrosshair = (param: MouseEventParams) => broadcastCrosshair('main', param)
     chart.subscribeCrosshairMove(onCrosshair)
 
-    handleRef.current = { chart, candles, ma5, ma20, bollUpper, bollLower, volume, styles }
+    handleRef.current = { chart, candles, ma5, ma20, bollUpper, bollLower, styles }
     fittedRef.current = null
     // 이전 차트의 기준선은 그 시리즈와 함께 죽었다 / The previous chart's reference lines died with its series
     levelLinesRef.current = []
@@ -581,6 +667,47 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       handleRef.current = null
     }
   }, [showChart, theme, currency, broadcastCrosshair])
+
+  /*
+   * 거래량 패널 — VOL 토글이 켜져 컨테이너가 생기면 만들고, 메인과 시간축을 잇고, 최신 데이터로 바로 채운다.
+   * 메인 차트의 오버레이였을 때는 메인 가격축이 거래량 띠만큼 아래 여백을 두어야 했고, 그 여백이 5Y 같은 넓은 범위에서
+   * 음수 라벨(0 / -50000 / -100000)을 만들었다. 별도 패널은 그 결합을 끊는다.
+   * The volume pane: created when the VOL toggle renders its container, linked to the main chart and filled from the latest
+   * data at once. As an overlay it forced a bottom margin on the main price axis, which on wide ranges such as 5Y produced
+   * negative labels (0 / -50000 / -100000); a separate pane cuts that coupling.
+   */
+  useEffect(() => {
+    const container = volRef.current
+    const main = handleRef.current
+    if (container === null || main === null) return
+
+    const chart = createPaneChart(container, main.styles)
+    const histogram = chart.addHistogramSeries({
+      color: main.styles.volumeUp,
+      priceFormat: { type: 'volume' },
+      priceLineVisible: false,
+      lastValueVisible: true,
+    })
+    histogram.priceScale().applyOptions({ scaleMargins: VOLUME_SCALE_MARGINS })
+    const pane: VolumePane = { chart, series: histogram, values: new Map(), link: linkTimeScales(main.chart, chart) }
+    volumePaneRef.current = pane
+    if (dataRef.current !== undefined) fillVolume(pane, main.chart, dataRef.current, main.styles)
+    const onCrosshair = (param: MouseEventParams) => broadcastCrosshair('vol', param)
+    chart.subscribeCrosshairMove(onCrosshair)
+
+    const observer = new ResizeObserver(() => {
+      chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
+    })
+    observer.observe(container)
+
+    return () => {
+      observer.disconnect()
+      chart.unsubscribeCrosshairMove(onCrosshair)
+      pane.link.unlink()
+      chart.remove()
+      volumePaneRef.current = null
+    }
+  }, [visible.vol, showChart, theme, currency, broadcastCrosshair])
 
   /*
    * RSI 보조 패널 — 토글이 켜져 컨테이너가 생기면 만들고, 메인과 시간축을 잇고, 최신 데이터로 바로 채운다.
@@ -613,7 +740,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
         title: '',
       })
     }
-    const pane: RsiPane = { chart, series: line, values: new Map(), unlink: linkTimeScales(main.chart, chart) }
+    const pane: RsiPane = { chart, series: line, values: new Map(), link: linkTimeScales(main.chart, chart) }
     rsiPaneRef.current = pane
     if (dataRef.current !== undefined) fillRsi(pane, main.chart, dataRef.current)
     // 패널 위의 크로스헤어도 메인·다른 패널로 방송한다 / A crosshair on this pane broadcasts to the main chart and the other pane
@@ -628,7 +755,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     return () => {
       observer.disconnect()
       chart.unsubscribeCrosshairMove(onCrosshair)
-      pane.unlink()
+      pane.link.unlink()
       chart.remove()
       rsiPaneRef.current = null
     }
@@ -667,7 +794,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       signal,
       series: line,
       values: new Map(),
-      unlink: linkTimeScales(main.chart, chart),
+      link: linkTimeScales(main.chart, chart),
     }
     macdPaneRef.current = pane
     if (dataRef.current !== undefined) fillMacd(pane, main.chart, dataRef.current, main.styles)
@@ -682,7 +809,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     return () => {
       observer.disconnect()
       chart.unsubscribeCrosshairMove(onCrosshair)
-      pane.unlink()
+      pane.link.unlink()
       chart.remove()
       macdPaneRef.current = null
     }
@@ -706,14 +833,6 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     handle.bollUpper.setData(toLineSeries(times, bands.upper))
     handle.bollLower.setData(toLineSeries(times, bands.lower))
 
-    handle.volume.setData(
-      data.candles.flatMap((candle) => {
-        const time = toChartTime(candle.time)
-        if (time === null) return []
-        const color = candle.close >= candle.open ? handle.styles.volumeUp : handle.styles.volumeDown
-        return [{ time, value: candle.volume, color }]
-      }),
-    )
     handle.candles.setMarkers(
       toMarkers(data.signals, { golden: handle.styles.up, dead: handle.styles.down }),
     )
@@ -731,19 +850,25 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       .timeScale()
       .applyOptions({ timeVisible: times.some((time) => time.includes('T')), secondsVisible: false })
 
+    // 패널을 먼저 채우고 `fitContent`를 마지막에 큐에 넣는다 — 패널 채우기가 링크를 끊고 돌지만(`silently`), 순서까지 지켜
+    // 어느 쪽 방어가 깨져도 메인의 맞춤이 살아남게 한다 (`PriceChart.range.test.tsx`가 실제 라이브러리로 고정한다).
+    // Fill the panes first and queue `fitContent` last: the fills already run with the link cut (`silently`), but the
+    // order is kept too so the main chart's fit survives if either defence breaks (`PriceChart.range.test.tsx` pins
+    // it with the real library).
+    if (volumePaneRef.current !== null) fillVolume(volumePaneRef.current, handle.chart, data, handle.styles)
+    if (rsiPaneRef.current !== null) fillRsi(rsiPaneRef.current, handle.chart, data)
+    if (macdPaneRef.current !== null) fillMacd(macdPaneRef.current, handle.chart, data, handle.styles)
+
     const fitKey = `${data.symbol}:${data.period}:${data.candles.length}`
     if (fittedRef.current !== fitKey) {
       handle.chart.timeScale().fitContent()
       fittedRef.current = fitKey
     }
-
-    if (rsiPaneRef.current !== null) fillRsi(rsiPaneRef.current, handle.chart, data)
-    if (macdPaneRef.current !== null) fillMacd(macdPaneRef.current, handle.chart, data, handle.styles)
   }, [data, showChart, theme, currency])
 
   /*
-   * 지표 토글 — 시리즈를 지우고 다시 만들지 않고 `visible`만 바꾼다 (보조 패널은 자기 이펙트가 생성/파괴한다).
-   * The overlay toggles only flip `visible`, never recreate a series (the sub-panes are created/destroyed by their own effects).
+   * 지표 토글 — 시리즈를 지우고 다시 만들지 않고 `visible`만 바꾼다 (거래량·RSI·MACD 패널은 자기 이펙트가 생성/파괴한다).
+   * The overlay toggles only flip `visible`, never recreate a series (the volume, RSI and MACD panes are created/destroyed by their own effects).
    */
   useEffect(() => {
     const handle = handleRef.current
@@ -752,7 +877,6 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     handle.ma20.applyOptions({ visible: visible.ma20 })
     handle.bollUpper.applyOptions({ visible: visible.boll })
     handle.bollLower.applyOptions({ visible: visible.boll })
-    handle.volume.applyOptions({ visible: visible.vol })
   }, [visible, showChart, theme, currency])
 
   /*
@@ -881,6 +1005,12 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
           )}
           {/* 크기는 CSS가 정한다 — lightweight-charts가 컨테이너 크기를 읽어 캔버스를 만든다 / CSS owns the size; the library reads the container's box */}
           <div className="price-chart" ref={containerRef} />
+          {visible.vol && (
+            <div className="chart-pane">
+              <span className="pane-label">VOL</span>
+              <div className="pane-canvas pane-canvas-volume" ref={volRef} />
+            </div>
+          )}
           {visible.rsi && (
             <div className="chart-pane">
               <span className="pane-label">RSI {RSI_PERIOD}</span>
