@@ -35,7 +35,7 @@ import type {
   Time,
 } from 'lightweight-charts'
 import { createChart, LineStyle } from 'lightweight-charts'
-import { type CSSProperties, useEffect, useRef, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { useChart } from '../../api/queries.ts'
 import type { ChartData, ChartPeriod } from '../../api/types.ts'
@@ -53,7 +53,14 @@ import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 import { CandleTable } from './CandleTable.tsx'
-import { priceFormatFor, toCandleSeries, toChartTime, toLineSeries, toMarkers } from './chartData.ts'
+import {
+  priceFormatFor,
+  toCandleSeries,
+  toChartTime,
+  toLineSeries,
+  toLineSeriesWithGaps,
+  toMarkers,
+} from './chartData.ts'
 import { bollingerBands, macd, rsi, summarizeCandle } from './indicators.ts'
 
 /** 기간 탭 — 라벨은 대문자 관례, 값은 백엔드 `ChartPeriod` / The period tabs; uppercase labels over the backend's `ChartPeriod` */
@@ -113,6 +120,10 @@ const PRICE_BOTTOM_MARGIN = VOLUME_SHARE + 0.06
 const PRICE_AXIS_WIDTH = 80
 
 const RSI_PERIOD = 14
+
+/** 보조 패널이 값을 하나라도 갖기 위한 최소 캔들 수 — 모자라면 패널 위에 안내를 띄운다 / Minimum candles for a sub-pane to hold a value; below that a notice overlays the pane */
+const RSI_MIN_CANDLES = RSI_PERIOD + 1
+const MACD_MIN_CANDLES = 26 + 9
 
 /** 차트에 넘길 스타일 값 — 전부 CSS 토큰에서 읽는다 / The style values handed to the chart, all read from CSS tokens */
 interface ChartStyles {
@@ -197,9 +208,14 @@ interface ChartHandle {
   styles: ChartStyles
 }
 
+/**
+ * 보조 패널 한 벌 — `series`는 크로스헤어 동기화가 가로선을 앉힐 시리즈, `values`는 시각 키 → 그 시리즈의 값.
+ * One sub-pane: `series` is where crosshair sync places the horizontal line, `values` maps a time key to that series' value.
+ */
 interface RsiPane {
   chart: IChartApi
-  line: ISeriesApi<'Line'>
+  series: ISeriesApi<'Line'>
+  values: Map<string, number>
   unlink: () => void
 }
 
@@ -208,7 +224,21 @@ interface MacdPane {
   histogram: ISeriesApi<'Histogram'>
   line: ISeriesApi<'Line'>
   signal: ISeriesApi<'Line'>
+  /** = `line` — 크로스헤어 가로선은 MACD 선을 따른다 / The MACD line, which the crosshair's horizontal line follows */
+  series: ISeriesApi<'Line'>
+  values: Map<string, number>
   unlink: () => void
+}
+
+/** 시각 키 → 값 (크로스헤어 동기화가 가로선 위치를 잡는 데 쓴다) / Time key to value, so crosshair sync can place the horizontal line */
+function valuesByTime(times: string[], values: (number | null)[]): Map<string, number> {
+  const map = new Map<string, number>()
+  for (let i = 0; i < times.length; i += 1) {
+    const value = values[i]
+    const time = toChartTime(times[i]!)
+    if (value !== null && value !== undefined && time !== null) map.set(timeKey(time), value)
+  }
+  return map
 }
 
 /**
@@ -228,7 +258,14 @@ function createPaneChart(container: HTMLElement, styles: ChartStyles): IChartApi
     grid: { vertLines: { color: styles.grid }, horzLines: { color: styles.grid } },
     crosshair: {
       vertLine: { color: styles.crosshair, labelBackgroundColor: styles.crosshair },
-      horzLine: { color: styles.crosshair, labelBackgroundColor: styles.crosshair },
+      /*
+       * 가로선은 숨긴다 — 동기화된 크로스헤어는 시각(세로선)만 의미가 있고, 워밍업 구간(값 없음)에서도 세로선이 따라가야
+       * 한다. `setCrosshairPosition`에 넘기는 가격은 그래서 자리 표시자일 뿐이다.
+       * The horizontal line is hidden: a synced crosshair carries meaning only through time (the vertical line), and it
+       * must follow into the warm-up region too, where there is no value — so the price handed to `setCrosshairPosition`
+       * is merely a placeholder.
+       */
+      horzLine: { visible: false, labelVisible: false },
     },
     rightPriceScale: {
       borderColor: styles.grid,
@@ -263,6 +300,21 @@ function linkTimeScales(main: IChartApi, pane: IChartApi): () => void {
   }
 }
 
+/**
+ * 크로스헤어를 놓되 라이브러리 단언을 삼킨다 — `setCrosshairPosition`은 값이 하나도 없는 차트(가격축 기준값 null)나 시간축에
+ * 없는 시각에서 "Value is null"을 던진다. 동기화는 장식이므로 실패해도 그 차트의 크로스헤어만 지운다.
+ * Place the crosshair, swallowing the library's assertion: `setCrosshairPosition` throws "Value is null" on a chart with
+ * no values (null first value on its price scale) or a time missing from its scale. Sync is decoration, so a failure only
+ * clears that chart's crosshair.
+ */
+function placeCrosshair(chart: IChartApi, price: number, time: Time, series: ISeriesApi<'Line' | 'Candlestick'>): void {
+  try {
+    chart.setCrosshairPosition(price, time, series)
+  } catch {
+    chart.clearCrosshairPosition()
+  }
+}
+
 /** 메인의 현재 시야를 보조 패널에 맞춘다 (데이터를 넣은 직후) / Match the pane to the main chart's current range (right after data) */
 function syncRange(main: IChartApi, pane: IChartApi): void {
   const range = main.timeScale().getVisibleLogicalRange()
@@ -271,20 +323,26 @@ function syncRange(main: IChartApi, pane: IChartApi): void {
 
 function fillRsi(pane: RsiPane, main: IChartApi, data: ChartData): void {
   const times = data.candles.map((candle) => candle.time)
-  pane.line.setData(toLineSeries(times, rsi(data.candles.map((candle) => candle.close), RSI_PERIOD)))
+  const values = rsi(data.candles.map((candle) => candle.close), RSI_PERIOD)
+  // 워밍업 구간은 공백 포인트로 — 패널의 논리 인덱스가 메인의 캔들 인덱스와 1:1이어야 한다 / Warm-up as whitespace: the pane's logical index must match the main chart's
+  pane.series.setData(toLineSeriesWithGaps(times, values))
+  pane.values = valuesByTime(times, values)
   syncRange(main, pane.chart)
 }
 
 function fillMacd(pane: MacdPane, main: IChartApi, data: ChartData, styles: ChartStyles): void {
   const times = data.candles.map((candle) => candle.time)
   const out = macd(data.candles.map((candle) => candle.close))
-  pane.line.setData(toLineSeries(times, out.macd))
-  pane.signal.setData(toLineSeries(times, out.signal))
+  pane.line.setData(toLineSeriesWithGaps(times, out.macd))
+  pane.values = valuesByTime(times, out.macd)
+  pane.signal.setData(toLineSeriesWithGaps(times, out.signal))
   pane.histogram.setData(
     times.flatMap((time, index) => {
-      const value = out.histogram[index]
       const chartTime = toChartTime(time)
-      if (value === null || value === undefined || chartTime === null) return []
+      if (chartTime === null) return []
+      const value = out.histogram[index]
+      // 워밍업 구간은 공백 포인트 / Warm-up as whitespace
+      if (value === null || value === undefined) return [{ time: chartTime }]
       return [{ time: chartTime, value, color: value >= 0 ? styles.volumeUp : styles.volumeDown }]
     }),
   )
@@ -355,6 +413,51 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
   const retry = () => {
     void queryClient.invalidateQueries({ queryKey: ['chart', symbol, period] })
   }
+
+  /** 크로스헤어 동기화 재진입 가드 — 한 차트의 `setCrosshairPosition`이 그 차트의 이벤트를 다시 부르지 않게 / Re-entrancy guard for crosshair sync */
+  const syncingRef = useRef(false)
+
+  /*
+   * 크로스헤어 방송 — 어느 차트(메인·RSI·MACD)에서 움직였든 레전드를 갱신하고 나머지 차트의 크로스헤어를 같은 시각에
+   * 놓는다 (`setCrosshairPosition`, 가로선은 그 차트 시리즈의 해당 시각 값). 차트 밖으로 나가면 모두 지운다. ref만 읽으므로
+   * 이펙트가 잡은 클로저가 낡지 않는다.
+   * Broadcast the crosshair: whichever chart (main, RSI, MACD) moved, refresh the legend and put the other charts'
+   * crosshairs at the same time (`setCrosshairPosition`; the horizontal line sits on that chart's series value at that
+   * time). Leaving a chart clears them all. It reads refs only, so the closure an effect captured never goes stale.
+   */
+  const broadcastCrosshair = useCallback((source: 'main' | 'rsi' | 'macd', param: MouseEventParams) => {
+    if (syncingRef.current) return
+    syncingRef.current = true
+    try {
+      const key = param.time === undefined ? null : timeKey(param.time)
+      const index = key === null ? undefined : timeIndexRef.current.get(key)
+      setHover(index ?? null)
+
+      const main = handleRef.current
+      if (main !== null && source !== 'main') {
+        const candle = index === undefined ? undefined : dataRef.current?.candles[index]
+        if (param.time === undefined || candle === undefined) main.chart.clearCrosshairPosition()
+        else placeCrosshair(main.chart, candle.close, param.time, main.candles)
+      }
+
+      const panes: Array<['rsi' | 'macd', RsiPane | MacdPane | null]> = [
+        ['rsi', rsiPaneRef.current],
+        ['macd', macdPaneRef.current],
+      ]
+      for (const [name, pane] of panes) {
+        if (pane === null || name === source) continue
+        // 값이 하나도 없는 패널(짧은 기간의 MACD)은 가격축 기준값이 없어 크로스헤어를 놓을 수 없다 / A pane with no values (MACD on a short window) has no price-scale anchor
+        if (param.time === undefined || index === undefined || pane.values.size === 0) {
+          pane.chart.clearCrosshairPosition()
+          continue
+        }
+        // 가로선은 숨겨져 있으므로 값이 없는 슬롯(워밍업)에서는 자리 표시자 0으로 세로선만 세운다 / With the horizontal line hidden, a value-less slot uses 0 as a placeholder
+        placeCrosshair(pane.chart, pane.values.get(key ?? '') ?? 0, param.time, pane.series)
+      }
+    } finally {
+      syncingRef.current = false
+    }
+  }, [])
 
   const hasCandles = data !== undefined && data.candles.length > 0
   /** 차트 컨테이너를 렌더하는 조건 — 아래 생성 이펙트의 전제다 / When the container is rendered, which the create effects depend on */
@@ -450,14 +553,8 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
     })
     volume.priceScale().applyOptions({ scaleMargins: { top: 1 - VOLUME_SHARE, bottom: 0 } })
 
-    // 크로스헤어 → 레전드. 차트 밖(time 없음)이면 마지막 캔들로 되돌린다 / Crosshair to legend; off-chart falls back to the last candle
-    const onCrosshair = (param: MouseEventParams) => {
-      if (param.time === undefined) {
-        setHover(null)
-        return
-      }
-      setHover(timeIndexRef.current.get(timeKey(param.time)) ?? null)
-    }
+    // 크로스헤어 → 레전드 + 보조 패널 동기화. 차트 밖(time 없음)이면 레전드는 마지막 캔들로, 패널은 지운다 / Crosshair to legend and sub-panes; off-chart falls back
+    const onCrosshair = (param: MouseEventParams) => broadcastCrosshair('main', param)
     chart.subscribeCrosshairMove(onCrosshair)
 
     handleRef.current = { chart, candles, ma5, ma20, bollUpper, bollLower, volume, styles }
@@ -477,7 +574,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       chart.remove()
       handleRef.current = null
     }
-  }, [showChart, theme, currency])
+  }, [showChart, theme, currency, broadcastCrosshair])
 
   /*
    * RSI 보조 패널 — 토글이 켜져 컨테이너가 생기면 만들고, 메인과 시간축을 잇고, 최신 데이터로 바로 채운다.
@@ -510,9 +607,12 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
         title: '',
       })
     }
-    const pane: RsiPane = { chart, line, unlink: linkTimeScales(main.chart, chart) }
+    const pane: RsiPane = { chart, series: line, values: new Map(), unlink: linkTimeScales(main.chart, chart) }
     rsiPaneRef.current = pane
     if (dataRef.current !== undefined) fillRsi(pane, main.chart, dataRef.current)
+    // 패널 위의 크로스헤어도 메인·다른 패널로 방송한다 / A crosshair on this pane broadcasts to the main chart and the other pane
+    const onCrosshair = (param: MouseEventParams) => broadcastCrosshair('rsi', param)
+    chart.subscribeCrosshairMove(onCrosshair)
 
     const observer = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
@@ -521,11 +621,12 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
 
     return () => {
       observer.disconnect()
+      chart.unsubscribeCrosshairMove(onCrosshair)
       pane.unlink()
       chart.remove()
       rsiPaneRef.current = null
     }
-  }, [visible.rsi, showChart, theme, currency])
+  }, [visible.rsi, showChart, theme, currency, broadcastCrosshair])
 
   /* MACD 보조 패널 — RSI와 같은 수명주기 / The MACD pane, same lifecycle as RSI */
   useEffect(() => {
@@ -553,9 +654,19 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
       lastValueVisible: false,
       crosshairMarkerVisible: false,
     })
-    const pane: MacdPane = { chart, histogram, line, signal, unlink: linkTimeScales(main.chart, chart) }
+    const pane: MacdPane = {
+      chart,
+      histogram,
+      line,
+      signal,
+      series: line,
+      values: new Map(),
+      unlink: linkTimeScales(main.chart, chart),
+    }
     macdPaneRef.current = pane
     if (dataRef.current !== undefined) fillMacd(pane, main.chart, dataRef.current, main.styles)
+    const onCrosshair = (param: MouseEventParams) => broadcastCrosshair('macd', param)
+    chart.subscribeCrosshairMove(onCrosshair)
 
     const observer = new ResizeObserver(() => {
       chart.applyOptions({ width: container.clientWidth, height: container.clientHeight })
@@ -564,11 +675,12 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
 
     return () => {
       observer.disconnect()
+      chart.unsubscribeCrosshairMove(onCrosshair)
       pane.unlink()
       chart.remove()
       macdPaneRef.current = null
     }
-  }, [visible.macd, showChart, theme, currency])
+  }, [visible.macd, showChart, theme, currency, broadcastCrosshair])
 
   /*
    * 데이터 반영 — 폴링·기간 변경은 `setData`로만 처리한다. 보조 패널이 있으면 함께 채운다.
@@ -766,12 +878,18 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
           {visible.rsi && (
             <div className="chart-pane">
               <span className="pane-label">RSI {RSI_PERIOD}</span>
+              {data.candles.length < RSI_MIN_CANDLES && (
+                <span className="pane-note">캔들 {RSI_MIN_CANDLES}개 이상 필요 (현재 {data.candles.length}) — 더 긴 기간을 선택하세요</span>
+              )}
               <div className="pane-canvas" ref={rsiRef} />
             </div>
           )}
           {visible.macd && (
             <div className="chart-pane">
               <span className="pane-label">MACD 12·26·9</span>
+              {data.candles.length < MACD_MIN_CANDLES && (
+                <span className="pane-note">캔들 {MACD_MIN_CANDLES}개 이상 필요 (현재 {data.candles.length}) — 더 긴 기간을 선택하세요</span>
+              )}
               <div className="pane-canvas" ref={macdRef} />
             </div>
           )}

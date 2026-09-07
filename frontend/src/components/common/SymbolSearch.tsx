@@ -113,7 +113,7 @@ export function SymbolSearch() {
         aria-controls={listId}
         aria-autocomplete="list"
         aria-activedescendant={active >= 0 ? optionId(active) : undefined}
-        placeholder="종목 검색 · 심볼 또는 종목명"
+        placeholder="종목 검색 · 심볼 · 종목명 · 초성"
         autoComplete="off"
         spellCheck={false}
         value={query}
@@ -150,7 +150,16 @@ export function SymbolSearch() {
                 onMouseMove={() => setActiveIndex(index)}
               >
                 <span className="search-symbol mono">{quote.symbol}</span>
-                <span className="search-name">{quote.name}</span>
+                {/* 한글 종목명이 있으면 앞에, 영문은 보조로 / The Korean name leads when present, the Latin name follows */}
+                <span className="search-name">
+                  {quote.name_ko != null && quote.name_ko !== quote.name ? (
+                    <>
+                      {quote.name_ko} <span className="search-name-en">{quote.name}</span>
+                    </>
+                  ) : (
+                    quote.name
+                  )}
+                </span>
                 <span className="search-market badge">{quote.market.toUpperCase()}</span>
               </li>
             ))}

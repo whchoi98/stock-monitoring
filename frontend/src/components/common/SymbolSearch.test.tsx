@@ -17,10 +17,11 @@ import { SymbolSearch } from './SymbolSearch.tsx'
 
 vi.mock('../../api/queries.ts', () => ({ useSymbolUniverse: vi.fn() }))
 
-function quote(symbol: string, name: string, market: Quote['market'] = 'us'): Quote {
+function quote(symbol: string, name: string, market: Quote['market'] = 'us', name_ko: string | null = null): Quote {
   return {
     symbol,
     name,
+    name_ko,
     price: 1,
     change: 0,
     change_pct: 0,
@@ -35,7 +36,7 @@ function quote(symbol: string, name: string, market: Quote['market'] = 'us'): Qu
 const UNIVERSE = [
   quote('AAPL', 'Apple'),
   quote('AMZN', 'Amazon'),
-  quote('005930.KS', 'Samsung Electronics', 'kr'),
+  quote('005930.KS', 'Samsung Electronics', 'kr', '삼성전자'),
 ]
 
 function Detail() {
@@ -76,7 +77,11 @@ describe('SymbolSearch', () => {
     fireEvent.change(input(), { target: { value: 'a' } })
 
     const options = screen.getAllByRole('option')
-    expect(options.map((o) => o.textContent)).toEqual(['AAPLAppleUS', 'AMZNAmazonUS', '005930.KSSamsung ElectronicsKR'])
+    expect(options.map((o) => o.textContent)).toEqual([
+      'AAPLAppleUS',
+      'AMZNAmazonUS',
+      '005930.KS삼성전자 Samsung ElectronicsKR',
+    ])
     expect(options[0]!.getAttribute('aria-selected')).toBe('true')
     expect(input().getAttribute('aria-expanded')).toBe('true')
     expect(input().getAttribute('aria-activedescendant')).toBe(options[0]!.id)
@@ -101,6 +106,18 @@ describe('SymbolSearch', () => {
     fireEvent.keyDown(input(), { key: 'ArrowUp' })
 
     expect(screen.getAllByRole('option')[2]!.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('한글·초성 질의도 찾는다 / Korean and initials queries find the symbol', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: '삼성' } })
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(['005930.KS삼성전자 Samsung ElectronicsKR'])
+
+    fireEvent.change(input(), { target: { value: 'ㅅㅅㅈㅈ' } })
+    expect(screen.getAllByRole('option')).toHaveLength(1)
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    expect(screen.getByText('상세 005930.KS')).toBeTruthy()
   })
 
   it('옵션 클릭도 이동한다 / clicking an option navigates too', () => {

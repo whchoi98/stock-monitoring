@@ -5,9 +5,10 @@ Pydantic data model definitions - API request/response schemas.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ============================================================================
@@ -18,6 +19,9 @@ class Quote(BaseModel):
     """개별 주식 시세 정보 / Individual stock quote information."""
     symbol: str
     name: str
+    # 한글 종목명 (검색·표시용, `config.STOCK_NAMES_KO`) — 유니버스 밖 심볼은 None
+    # Korean name for search and display (`config.STOCK_NAMES_KO`); None outside the universe
+    name_ko: Optional[str] = None
     price: float
     change: float
     change_pct: float
@@ -99,6 +103,7 @@ class StockDetailResponse(BaseModel):
     """종목 상세 정보 응답 / Stock detail information response."""
     symbol: str
     name: str
+    name_ko: Optional[str] = None
     market: str = "US"
     currency: str = "USD"
     price: float = 0.0
@@ -179,3 +184,35 @@ def envelope(data: Any, market_open: bool, as_of: Optional[str] = None) -> dict:
         "marketOpen": market_open,
         "data": data,
     }
+
+
+# ---------------------------------------------------------------------------
+# AI 자유 질의 / Free-form AI question
+# ---------------------------------------------------------------------------
+
+# 질문 길이 상한 — 프롬프트 비용과 주입 면적을 함께 묶는다 / The question cap, bounding prompt cost and injection surface alike
+MAX_QUESTION_LEN = 200
+
+_WHITESPACE_RUN = re.compile(r"\s+")
+
+
+def normalize_question(text: str) -> str:
+    """
+    질문 정규화 — 제어문자 제거, 공백 접기, 앞뒤 공백 제거. 캐시 키와 프롬프트가 같은 문자열을 본다.
+    Normalise a question: drop control characters, collapse whitespace, trim. The cache key and the prompt see one string.
+    """
+    printable = "".join(ch for ch in text if ch.isprintable() or ch.isspace())
+    return _WHITESPACE_RUN.sub(" ", printable).strip()
+
+
+class StockQuestionRequest(BaseModel):
+    """종목 AI 분석의 선택 본문 — 사용자 질문 / The optional body of a stock analysis: the user's question."""
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_LEN)
+
+    @field_validator("question")
+    @classmethod
+    def _normalized(cls, value: str) -> str:
+        cleaned = normalize_question(value)
+        if not cleaned:
+            raise ValueError("question must not be blank")
+        return cleaned

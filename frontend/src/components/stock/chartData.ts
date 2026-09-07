@@ -14,6 +14,7 @@ import type {
   SeriesMarker,
   Time,
   UTCTimestamp,
+  WhitespaceData,
 } from 'lightweight-charts'
 
 import type { Candle, CrossSignal } from '../../api/types.ts'
@@ -98,6 +99,29 @@ export function toLineSeries(times: string[], values: (number | null)[]): LineDa
     const time = toChartTime(times[i]!)
     if (time === null) continue
     points.push({ time, value })
+  }
+  return points
+}
+
+/**
+ * 공백을 보존하는 라인 시리즈 — null은 값 없는 공백 포인트(`{time}`)가 된다. 보조 패널(RSI/MACD)용:
+ * 패널의 논리 인덱스가 메인 차트의 캔들 인덱스와 1:1이어야 시간축 동기화와 크로스헤어 동기화가 맞는다.
+ * 워밍업 구간을 그냥 버리면(`toLineSeries`) 패널의 0번 슬롯이 메인의 15번 캔들이 되어 선이 왼쪽으로 몰린다.
+ * A gap-preserving line series: a null becomes a value-less whitespace point (`{time}`). For the sub-panes (RSI/MACD):
+ * a pane's logical index must map 1:1 onto the main chart's candle index for range and crosshair sync to line up.
+ * Dropping the warm-up (`toLineSeries`) would make the pane's slot 0 the main chart's 15th candle and pile the line left.
+ */
+export function toLineSeriesWithGaps(
+  times: string[],
+  values: (number | null)[],
+): (LineData<Time> | WhitespaceData<Time>)[] {
+  const length = Math.min(times.length, values.length)
+  const points: (LineData<Time> | WhitespaceData<Time>)[] = []
+  for (let i = 0; i < length; i += 1) {
+    const time = toChartTime(times[i]!)
+    if (time === null) continue
+    const value = values[i]!
+    points.push(value === null ? { time } : { time, value })
   }
   return points
 }

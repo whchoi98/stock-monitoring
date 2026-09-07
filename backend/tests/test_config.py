@@ -29,6 +29,18 @@ def test_names_and_sectors_cover_universe():
             f"Stock {symbol} missing in STOCK_SECTORS"
 
 
+def test_korean_names_cover_universe():
+    """모든 종목에 한글 종목명이 있고 대표 종목의 표기가 맞는지 검증 / Every stock has a Korean name; spot-check the wording."""
+    for symbol in config.US_STOCKS + config.KR_STOCKS:
+        assert symbol in config.STOCK_NAMES_KO, f"Stock {symbol} missing in STOCK_NAMES_KO"
+        assert config.STOCK_NAMES_KO[symbol].strip(), f"Stock {symbol} has a blank Korean name"
+    assert config.STOCK_NAMES_KO["005930.KS"] == "삼성전자"
+    assert config.STOCK_NAMES_KO["247540.KQ"] == "에코프로비엠"
+    assert config.STOCK_NAMES_KO["AAPL"] == "애플"
+    # 관용적 한글 표기가 없는 종목은 영문 표기를 그대로 둔다 / Names without a customary Korean form keep the Latin one
+    assert config.STOCK_NAMES_KO["030200.KS"] == "KT"
+
+
 def test_constants_present():
     """모든 필수 상수가 설정되어 있는지 검증 / Verify all required constants are present."""
     assert hasattr(config, "REFRESH_INTERVAL"), "REFRESH_INTERVAL not found"

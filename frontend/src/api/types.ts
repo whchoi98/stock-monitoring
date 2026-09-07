@@ -44,6 +44,13 @@ export interface Envelope<T> {
 export interface Quote {
   symbol: string
   name: string
+  /**
+   * 한글 종목명 (`config.STOCK_NAMES_KO`) — 검색(한글·초성)과 보조 표시용. 유니버스 밖이면 null.
+   * 테스트 픽스처가 생략할 수 있어 선택 필드로 둔다.
+   * The Korean name (`config.STOCK_NAMES_KO`) for search (Hangul, initials) and secondary display; null outside the
+   * universe. Optional so fixtures may omit it.
+   */
+  name_ko?: string | null
   price: number
   change: number
   change_pct: number
@@ -152,6 +159,8 @@ export interface ChartData {
 export interface StockDetail {
   symbol: string
   name: string
+  /** 한글 종목명 — `Quote.name_ko`와 같다 / The Korean name, as on `Quote.name_ko` */
+  name_ko?: string | null
   market: Market
   currency: Currency
   price: number
@@ -273,10 +282,24 @@ export interface Overview {
 // AI 분석 / AI analysis
 // ---------------------------------------------------------------------------
 
-/** 종목 AI 분석 결과 — `analysis`는 한국어 마크다운 / Stock AI analysis; `analysis` is Korean markdown */
+/**
+ * 종목 AI 분석 결과 — `analysis`는 한국어 마크다운. 질문으로 요청했으면 `question`(정규화된 질문)이 함께 온다 — 캐시
+ * 히트에서도 화면이 무엇에 대한 답인지 알 수 있다.
+ * Stock AI analysis; `analysis` is Korean markdown. When requested with a question, `question` (normalised) comes along,
+ * so even a cache hit tells the screen what was answered.
+ */
 export interface StockAnalysis {
   symbol: string
   analysis: string
+  question?: string
+}
+
+/**
+ * 종목 AI 분석의 선택 본문 — 사용자 질문 (백엔드 `StockQuestionRequest`, 정규화 후 1~200자).
+ * The optional stock-analysis body: the user's question (the backend's `StockQuestionRequest`, 1–200 chars normalised).
+ */
+export interface StockQuestionRequest {
+  question: string
 }
 
 /** 기사 AI 분석 요청 본문 / The article AI analysis request body */

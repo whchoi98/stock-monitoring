@@ -546,6 +546,7 @@ def _parse_quotes(
                 Quote(
                     symbol=symbol,
                     name=names.get(symbol, symbol),
+                    name_ko=config.STOCK_NAMES_KO.get(symbol),
                     price=price,
                     change=change,
                     change_pct=pct,

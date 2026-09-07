@@ -71,7 +71,12 @@ export function StockHeader({ symbol }: StockHeaderProps) {
             <span className="badge">{MARKET_LABEL[data.market]}</span>
             {data.sector !== '' && <span className="badge">{data.sector}</span>}
           </div>
-          <h1 className="qh-name">{data.name}</h1>
+          <h1 className="qh-name">
+            {data.name}
+            {data.name_ko != null && data.name_ko !== data.name && (
+              <span className="qh-name-ko"> · {data.name_ko}</span>
+            )}
+          </h1>
         </div>
 
         <div className="qh-quote">

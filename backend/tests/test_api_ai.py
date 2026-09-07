@@ -1204,3 +1204,70 @@ def test_limiter_window_slides_and_prunes_idle_ips():
     assert limiter.allow("5.6.7.8") is True
     # 오래된 IP 항목은 맵에서 사라진다 (무한 증가 방지) / Stale IP entries leave the map (no unbounded growth)
     assert list(limiter._hits) == ["5.6.7.8"]
+
+
+# ---------------------------------------------------------------------------
+# 종목 자유 질의 / Free-form stock question
+# ---------------------------------------------------------------------------
+
+def test_stock_question_reaches_the_prompt_and_gets_its_own_cache_key(client, bedrock, state):
+    """
+    질문은 정규화되어 프롬프트 인자와 final·캐시에 실리고, 기본 분석과 다른 키에 저장된다.
+    A question is normalised, reaches the prompt kwargs, the final and the cache, under a key of its own.
+    """
+    response = client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": "  배당   정책은\t어떤가요?  "})
+
+    final = _final(response)
+    assert final["data"] == {
+        "symbol": US_SYMBOL,
+        "analysis": STOCK_ANALYSIS,
+        "question": "배당 정책은 어떤가요?",
+    }
+    assert bedrock.stock_calls[-1]["question"] == "배당 정책은 어떤가요?"
+    # 기본 분석 키는 건드리지 않는다 / The default analysis key is untouched
+    assert state.cache.l1.get(f"ai:stock:{US_SYMBOL}") is None
+    question_keys = [k for k in state.cache.l2.store if k.startswith(f"ai:stock:{US_SYMBOL}:q:")]
+    assert len(question_keys) == 1
+    # 키에는 질문 원문이 아니라 해시만 들어간다 / The key carries a hash, never the raw text
+    assert "배당" not in question_keys[0]
+    assert state.cache.l2.store[question_keys[0]][2] == config.AI_TTL
+
+
+def test_same_question_shares_the_cache_and_a_different_one_does_not(client, bedrock, state):
+    """같은 질문은 두 번째부터 캐시 히트, 다른 질문은 새 Bedrock 호출 / A repeat question is a cache hit; a different one is a new call."""
+    assert set(_final(client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": "리스크는?"}))) == ENVELOPE_KEYS
+    assert len(bedrock.stock_calls) == 1
+
+    second = _final(client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": " 리스크는? "}))
+    assert len(bedrock.stock_calls) == 1
+    assert second["data"]["question"] == "리스크는?"
+
+    _final(client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": "밸류에이션은?"}))
+    assert len(bedrock.stock_calls) == 2
+    assert len([k for k in state.cache.l2.store if k.startswith(f"ai:stock:{US_SYMBOL}:q:")]) == 2
+
+
+def test_default_analysis_is_unaffected_by_a_cached_question(client, bedrock, state):
+    """질문 캐시가 있어도 본문 없는 요청은 기본 분석을 따로 만든다 / A cached question never answers a body-less request."""
+    _final(client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": "리스크는?"}))
+    final = _final(client.post(f"/api/ai/stocks/{US_SYMBOL}"))
+
+    assert final["data"] == {"symbol": US_SYMBOL, "analysis": STOCK_ANALYSIS}
+    assert len(bedrock.stock_calls) == 2
+    assert "question" not in bedrock.stock_calls[-1]
+
+
+@pytest.mark.parametrize("question", ["", "   ", "\t\n", "가" * 201])
+def test_blank_or_overlong_questions_are_422_before_the_stream(client, bedrock, question):
+    """빈·공백·상한 초과 질문은 스트림 전에 422 JSON / Blank, whitespace-only or overlong questions are a 422 before any stream."""
+    response = client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": question})
+
+    assert response.status_code == 422
+    assert bedrock.stock_calls == []
+
+
+def test_question_strips_control_characters(client, bedrock):
+    """제어문자는 프롬프트에 닿기 전에 제거된다 / Control characters are removed before the prompt."""
+    _final(client.post(f"/api/ai/stocks/{US_SYMBOL}", json={"question": "리스크\u0000는\u001b[31m?"}))
+
+    assert bedrock.stock_calls[-1]["question"] == "리스크는[31m?"

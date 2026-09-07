@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiPhase, AiStream } from '../../api/aiStream.ts'
 import { useStockAIStream } from '../../api/aiStream.ts'
 import { ApiError } from '../../api/client.ts'
-import type { StockAnalysis } from '../../api/types.ts'
+import type { StockAnalysis, StockQuestionRequest } from '../../api/types.ts'
 import { AIPanel } from './AIPanel.tsx'
 
 vi.mock('../../api/aiStream.ts', () => ({ useStockAIStream: vi.fn() }))
@@ -23,7 +23,9 @@ vi.mock('../../api/aiStream.ts', () => ({ useStockAIStream: vi.fn() }))
 const analyze = vi.fn()
 
 /** 훅 상태 하나 — 기본은 "아직 아무 것도 시작하지 않은" 상태 / One hook state; the default is "nothing started yet" */
-function stream(over: Partial<AiStream<StockAnalysis>>): AiStream<StockAnalysis> {
+type StockStream = AiStream<StockAnalysis, StockQuestionRequest | void>
+
+function stream(over: Partial<StockStream>): StockStream {
   return {
     phase: null,
     streamText: '',
@@ -62,6 +64,56 @@ describe('AIPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'AI 분석' }))
 
     expect(analyze).toHaveBeenCalledTimes(1)
+    // 질문이 비어 있으면 본문 없는 기본 분석이다 / An empty question is the body-less default analysis
+    expect(analyze).toHaveBeenCalledWith()
+  })
+
+  it('질문을 넣고 제출하면 그 질문으로 요청하고, 보낸 질문을 보여준다 / a typed question is sent as the body and shown', () => {
+    renderPanel()
+
+    // 앞뒤 공백은 잘라 보낸다 (안쪽 공백 정규화는 백엔드 몫) / Outer whitespace is trimmed; inner normalisation is the backend's job
+    fireEvent.change(screen.getByRole('textbox', { name: 'AI 질문' }), {
+      target: { value: '  배당 정책은 어떤가요?  ' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'AI 분석' }))
+
+    expect(analyze).toHaveBeenCalledWith({ question: '배당 정책은 어떤가요?' })
+
+    // 스트리밍 중에는 보낸 질문이 답 위에 보인다 / While streaming, the sent question sits above the answer
+    vi.mocked(useStockAIStream).mockReturnValue(stream({ isLoading: true, streamText: '답변 중' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'AI 질문' }), { target: { value: 'x' } })
+    expect(screen.getByText('배당 정책은 어떤가요?')).toBeTruthy()
+  })
+
+  it('프리셋을 누르면 바로 그 질문으로 요청한다 / a preset runs that question at once', () => {
+    renderPanel()
+
+    fireEvent.click(screen.getByRole('button', { name: '가장 큰 리스크는 무엇인가요?' }))
+
+    expect(analyze).toHaveBeenCalledWith({ question: '가장 큰 리스크는 무엇인가요?' })
+    expect((screen.getByRole('textbox', { name: 'AI 질문' }) as HTMLInputElement).value).toBe(
+      '가장 큰 리스크는 무엇인가요?',
+    )
+  })
+
+  it('final의 question이 누적 상태보다 우선한다 (캐시 히트) / the final’s question wins, as on a cache hit', () => {
+    vi.mocked(useStockAIStream).mockReturnValue(
+      stream({ data: { symbol: 'AAPL', analysis: '## 답변\n\n좋습니다.', question: '캐시된 질문' } }),
+    )
+
+    renderPanel()
+
+    expect(screen.getByText('캐시된 질문')).toBeTruthy()
+    expect(screen.getByRole('heading', { level: 2, name: '답변' })).toBeTruthy()
+  })
+
+  it('실행 중에는 입력·프리셋도 잠긴다 / input and presets lock while a run is in flight', () => {
+    vi.mocked(useStockAIStream).mockReturnValue(stream({ isLoading: true, phase: 'analyzing' }))
+
+    renderPanel()
+
+    expect(screen.getByRole('textbox', { name: 'AI 질문' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: '가장 큰 리스크는 무엇인가요?' }).hasAttribute('disabled')).toBe(true)
   })
 
   /*

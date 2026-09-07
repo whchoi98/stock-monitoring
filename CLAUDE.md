@@ -15,12 +15,12 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Backend (`backend/`)
 - Python 3.12, FastAPI + uvicorn (**단일 워커 고정** — L1 캐시·AI 세마포어가 프로세스 단위 / single worker is load-bearing), pydantic v2
 - yfinance (시세/재무), httpx (RSS/기사 조회), boto3 (DynamoDB·Bedrock), defusedxml (RSS 파싱 — 엔티티 확장 DoS 차단)
-- 테스트 / Tests: pytest 364개 (`backend/tests/`)
+- 테스트 / Tests: pytest 376개 (`backend/tests/`)
 
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
 - @tanstack/react-query (서버 상태·폴링), react-router-dom v6, lightweight-charts, react-markdown, @fontsource/pretendard
-- 테스트 / Tests: vitest + @testing-library/react 280개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
+- 테스트 / Tests: vitest + @testing-library/react 292개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
 - UI: 터미널 디자인 언어 (ADR-001) — 패널 그리드 워크스페이스, 마켓 스트립, 워치리스트 레일, 앰버 액센트, JetBrains Mono 숫자 / Terminal design language: panel-grid workspace, market strip, watchlist rail, amber accent, mono numerals
 
 ### Infrastructure (`infra/`)
@@ -42,7 +42,7 @@ frontend/             - React 19 + TS + Vite 8
   src/api/            - client(fetch 래퍼·ApiError), queries(react-query 훅·폴링 상수·useSymbolUniverse), types
   src/components/     - common/(Panel·MarketStrip·SymbolSearch·StatusBar·NewsList…) market/(MarketPulse·StockTable…) stock/(Watchlist·PriceChart·OrderBook·AIPanel…)
   src/pages/          - Dashboard(시장 워크스페이스), StockDetail(종목 워크스페이스), ArticleAnalysis
-  src/lib/            - format, clock, search, markets(QuoteScope), scopedQuotes, newsFilter, localStore(+watchlist/alerts/panel 스토어 — 브라우저 전용), aiMessages, articleLink, sse
+  src/lib/            - format, clock, search(+hangul 초성), markets(QuoteScope), scopedQuotes, newsFilter, localStore(+watchlist/alerts/panel 스토어 — 브라우저 전용), aiMessages, articleLink, sse
   src/styles/         - tokens.css(디자인 토큰 — 색상 하드코딩 금지), global.css
 infra/                - CDK v2 Python (venv: infra/.venv, cdk.json app = .venv/bin/python3 app.py)
   stacks/stock_monitoring_stack.py - 단일 스택 전체 (캐시/시크릿/ECS/ALB/CloudFront/알람)
@@ -57,8 +57,8 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 
 ```bash
 # 테스트 / Tests
-cd backend && .venv/bin/pytest -q          # 백엔드 (364)
-cd frontend && npx vitest run              # 프론트 (280)
+cd backend && .venv/bin/pytest -q          # 백엔드 (376)
+cd frontend && npx vitest run              # 프론트 (292)
 make test                                  # 전체
 
 # 로컬 실행 / Local run

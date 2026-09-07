@@ -19,7 +19,13 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { createSseParser } from '../lib/sse.ts'
 import { ApiError, readDetail } from './client.ts'
-import type { ArticleAnalysis, ArticleAnalysisRequest, Envelope, StockAnalysis } from './types.ts'
+import type {
+  ArticleAnalysis,
+  ArticleAnalysisRequest,
+  Envelope,
+  StockAnalysis,
+  StockQuestionRequest,
+} from './types.ts'
 
 /** 진행 단계 — 백엔드 `phase` 이벤트의 값 그대로 / The phase values, exactly as the backend emits them */
 export type AiPhase = 'fetching' | 'analyzing' | 'waiting'
@@ -321,13 +327,15 @@ function useAiStream<TData, TBody>(path: string): AiStream<TData, TBody> {
 /**
  * 종목 AI 분석 스트림 / The stock AI analysis stream.
  *
- * `analyze()`는 인자를 받지 않는다 — `POST /api/ai/stocks/{symbol}`은 본문이 없고, 구 `useStockAI`와 호출
- * 형태가 같아야 화면 코드가 그대로 옮겨진다.
- * `analyze()` takes no argument: `POST /api/ai/stocks/{symbol}` has no body, and matching the old
- * `useStockAI` call shape is what lets the UI code move over unchanged.
+ * `analyze()`는 기본 분석, `analyze({ question })`은 그 질문에 대한 답을 요청한다 — 본문이 없으면 `POST` 본문도
+ * Content-Type도 붙지 않는다 (`requestInit`). 두 형태는 백엔드에서 다른 캐시 키를 가진다.
+ * `analyze()` requests the default analysis, `analyze({ question })` an answer to that question; without a body neither a
+ * POST body nor a Content-Type is sent (`requestInit`). The two shapes have different cache keys on the backend.
  */
-export function useStockAIStream(symbol: string): AiStream<StockAnalysis> {
-  return useAiStream<StockAnalysis, void>(`/api/ai/stocks/${encodeURIComponent(symbol)}`)
+export function useStockAIStream(symbol: string): AiStream<StockAnalysis, StockQuestionRequest | void> {
+  return useAiStream<StockAnalysis, StockQuestionRequest | void>(
+    `/api/ai/stocks/${encodeURIComponent(symbol)}`,
+  )
 }
 
 /** 기사 AI 분석 스트림 (요약·번역·인사이트) / The article AI analysis stream */

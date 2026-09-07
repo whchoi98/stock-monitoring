@@ -7,15 +7,15 @@ Stock monitoring SPA laid out as a terminal workspace (ADR-001), served by the F
 ## 구조 / Key Files
 - `src/api/` — `client.ts`(fetch 래퍼), `queries.ts`(**서버 데이터는 @tanstack/react-query 훅으로만**; `useSymbolUniverse(enabled)`는 검색용 두 시장 시세, 키 공유·enabled 게이트), `aiStream.ts`+`lib/sse.ts`(**유일한 예외**: 두 AI 엔드포인트는 SSE `phase`→`delta`*→`final`이라 fetch 직접 사용), `types.ts`(백엔드 `app/models.py` 응답 형태와 일치 유지).
 - `src/components/common/` — `Panel`(모든 위젯의 껍데기: eyebrow·제목·액션·`flush`·`id`로 접기), `Stat`, `MarketStrip`(지수 셀 + 지표 크롤), `SymbolSearch`(⌘K 콤보박스), `StatusBar`/`MarketStatus`/`Clock`, `ScopeTabs`(미국/한국/★관심), `StarButton`, `AlertsWatcher`(가격 알림 판정 + 토스트), `NewsList`(뉴스 행 공용), `ChangeText`, `ThemeToggle`, 배지, `ErrorCard`, `Spinner`.
-- `src/components/market/` — `MarketPulse`, `SectorBars`, `MacroPanel`, `StockTable`(QUOTE MONITOR, 스코프·★), `NewsFeed`(언어 탭·키워드 필터). `src/components/stock/` — `Watchlist`, `StockHeader`(★·`AlertForm`), `PriceChart`(1W~5Y, MA/BOLL/VOL/LVL + RSI·MACD 보조 패널, 캔들/표 뷰), `CandleTable`, `OrderBook`, `InvestorPanel`, `FundamentalCards`, `ReturnsRow`, `StockNews`, `AIPanel`, `Week52Bar`.
+- `src/components/market/` — `MarketPulse`, `SectorBars`, `MacroPanel`, `StockTable`(QUOTE MONITOR, 스코프·★), `NewsFeed`(언어 탭·키워드 필터). `src/components/stock/` — `Watchlist`, `StockHeader`(★·`AlertForm`), `PriceChart`(1W~5Y, MA/BOLL/VOL/LVL + RSI·MACD 보조 패널, 캔들/표 뷰), `CandleTable`, `OrderBook`, `InvestorPanel`, `FundamentalCards`, `ReturnsRow`, `StockNews`, `AIPanel`(질문 입력·프리셋 → `analyze({question})`), `Week52Bar`.
 - `src/components/stock/chartData.ts`, `indicators.ts` — 차트 순수 함수 (변환 / 볼린저·RSI·EMA·MACD·캔들 요약). 직접 단위 테스트 대상.
-- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위), `markets`(`QuoteScope`), `scopedQuotes`, `newsFilter`, `localStore` + `watchlistStore`/`alertsStore`/`panelStore`(브라우저 전용 사용자 상태), `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
+- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위 — 심볼·영문·한글 `name_ko`·초성), `hangul`(초성 분해), `markets`(`QuoteScope`), `scopedQuotes`, `newsFilter`, `localStore` + `watchlistStore`/`alertsStore`/`panelStore`(브라우저 전용 사용자 상태), `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
 
 ## 명령 / Commands
 ```bash
 cd frontend
 npm run dev            # dev 서버 (백엔드는 make run으로 :8000)
-npx vitest run         # 테스트 280개 (colocated *.test.tsx / *.test.ts)
+npx vitest run         # 테스트 292개 (colocated *.test.tsx / *.test.ts)
 npx oxlint             # 린트
 npx tsc -b             # 타입 체크 (build:deploy는 tsc를 생략한다)
 npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 배포 산출물)

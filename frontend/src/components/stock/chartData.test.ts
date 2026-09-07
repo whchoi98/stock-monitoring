@@ -12,7 +12,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Candle, CrossSignal } from '../../api/types.ts'
-import { priceFormatFor, toCandleSeries, toChartTime, toLineSeries, toMarkers } from './chartData.ts'
+import { priceFormatFor, toCandleSeries, toChartTime, toLineSeries, toLineSeriesWithGaps, toMarkers } from './chartData.ts'
 
 /** 일봉 캔들 하나 / One daily candle */
 const DAILY: Candle = {
@@ -166,5 +166,23 @@ describe('priceFormatFor', () => {
 
   it('통화를 모르면 옵션을 만들지 않는다 (라이브러리 기본값 유지) / with no currency it produces no option, leaving the library default', () => {
     expect(priceFormatFor(undefined)).toBeUndefined()
+  })
+})
+
+describe('toLineSeriesWithGaps', () => {
+  it('null은 공백 포인트로 남겨 인덱스를 보존한다 / a null stays as a whitespace point, preserving the index', () => {
+    expect(toLineSeriesWithGaps(['2026-07-29', '2026-07-30', '2026-07-31'], [null, null, 3])).toEqual([
+      { time: '2026-07-29' },
+      { time: '2026-07-30' },
+      { time: '2026-07-31', value: 3 },
+    ])
+  })
+
+  it('해석 불가한 시각만 버린다 / only an unreadable time is dropped', () => {
+    expect(toLineSeriesWithGaps(['bad', '2026-07-31'], [1, 2])).toEqual([{ time: '2026-07-31', value: 2 }])
+  })
+
+  it('길이가 어긋나면 짧은 쪽에서 멈춘다 / mismatched lengths stop at the shorter side', () => {
+    expect(toLineSeriesWithGaps(['2026-07-30', '2026-07-31'], [1])).toEqual([{ time: '2026-07-30', value: 1 }])
   })
 })

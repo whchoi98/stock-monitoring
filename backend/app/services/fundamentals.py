@@ -288,6 +288,7 @@ def fetch_detail(symbol: str) -> StockDetailResponse:
     return StockDetailResponse(
         symbol=symbol,
         name=config.STOCK_NAMES.get(symbol, symbol),
+        name_ko=config.STOCK_NAMES_KO.get(symbol),
         market=market,
         currency=currency,
         price=price,

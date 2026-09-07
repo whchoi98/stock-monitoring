@@ -216,6 +216,7 @@ class FakeServices:
         return StockDetailResponse(
             symbol=symbol,
             name=config.STOCK_NAMES.get(symbol, symbol),
+            name_ko=config.STOCK_NAMES_KO.get(symbol),
             market=market,
             currency="KRW" if market == "kr" else "USD",
             price=FAKE_DETAIL_PRICE,

@@ -92,3 +92,15 @@ Phase 1이 **외형**을 터미널로 바꿨다면 Phase 2는 참조 이미지�
 
 ## 5. 문서 / Docs to sync
 `docs/reference/api.md`(기간 집합), `data.md`(TTL 표), `frontend.md`, `ui.md`, `frontend/CLAUDE.md`, 루트 `CLAUDE.md`(테스트 수).
+
+## 6. Phase 3 후속 (2026-09-07 오후, `/goal` "검색에 한글 종목명, AI 자유 질의, 보조 패널 크로스헤어 동기화")
+
+- **한글 종목명**: 백엔드 `config.STOCK_NAMES_KO`(US 50 + KR 50, 관용 표기 없으면 영문 그대로) → `Quote.name_ko`/`StockDetailResponse.name_ko`(Optional).
+  프론트 `searchSymbols`가 한글 접두·포함과 **초성**(`lib/hangul.ts`: 음절 → 초성, 초성만인 질의 판정)까지 같은 순위 규칙으로 맞춘다.
+  검색 옵션은 한글명을 앞에, 영문명을 보조로; 종목 헤더는 `영문 · 한글`.
+- **AI 자유 질의**: `POST /api/ai/stocks/{symbol}`에 선택 본문 `{question}`(pydantic 검증기가 정규화, 1~200자). 캐시 키
+  `ai:stock:{symbol}:q:{sha256[:16]}`, 프롬프트는 `<question>` 격리 + 지시 무시·데이터 범위·매매 지시 금지, 결과에 `question` 에코.
+  프론트 `AIPanel`은 질문 입력 + 프리셋 4개, 빈 질문은 기존 기본 분석. 레이트리밋·동시성·TTL 불변.
+- **크로스헤어 동기화**: `PriceChart.broadcastCrosshair` — 메인·RSI·MACD 어느 차트의 `subscribeCrosshairMove`든 나머지에
+  `setCrosshairPosition`(가로선은 그 시리즈의 같은 시각 값), 나가면 `clearCrosshairPosition`, 재진입 가드. 레전드도 같은 인덱스.
+- 테스트: 백엔드 364 → 376 (한글명 커버리지, 질문 정규화·키·캐시·422·제어문자, 프롬프트 격리/절단), 프론트 280 → 292 (초성, 한글 검색, AIPanel 질문·프리셋·잠금).

@@ -2040,6 +2040,23 @@ tr.down .pct {
   height: 120px;
 }
 
+/* 데이터 부족 안내 — 캔버스 위 중앙 / The not-enough-data notice, centred over the canvas */
+.pane-note {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
 .pane-label {
   position: absolute;
   top: 4px;
@@ -2250,6 +2267,89 @@ tr.down .pct {
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* ── AI 질문 입력 / The AI question input ── */
+.ai-ask {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ai-ask-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  color: var(--text-strong);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.ai-ask-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.ai-ask-input::placeholder {
+  color: var(--text-dim);
+}
+
+.ai-ask-input:disabled {
+  color: var(--text-dim);
+}
+
+.ai-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.ai-presets .tab {
+  height: 20px;
+  border: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+.ai-presets .tab:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* 답 위에 놓이는 질문 — 무엇에 대한 답인지 / The question above the answer */
+.ai-question {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border-left: 2px solid var(--accent);
+  background: var(--panel-raised);
+  color: var(--text-strong);
+  font-size: 12px;
+}
+
+.ai-question-mark {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+/* ── 한글 종목명 보조 표기 / Korean-name secondary labels ── */
+.search-name-en {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.qh-name-ko {
+  color: var(--text-dim);
 }
 
 /* ── 모션 최소화 / Reduced motion ── */

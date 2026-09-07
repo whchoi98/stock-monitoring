@@ -39,7 +39,7 @@ from pydantic import BaseModel, Field
 from app.api import deps, stocks
 from app.api.ratelimit import SlidingWindowLimiter
 from app.core import config
-from app.models import envelope
+from app.models import envelope, StockQuestionRequest
 from app.services import bedrock_ai, news
 from app.state import AppState, STATUS_DEGRADED, STATUS_OK
 
@@ -85,9 +85,20 @@ def _warn(event: str, **fields: Any) -> None:
 # 캐시 키 / Cache keys
 # ---------------------------------------------------------------------------
 
-def key_stock_ai(symbol: str) -> str:
-    """종목 분석 캐시 키 / Stock analysis cache key."""
-    return f"ai:stock:{symbol}"
+def key_stock_ai(symbol: str, question: Optional[str] = None) -> str:
+    """
+    종목 AI 캐시 키 / The stock AI cache key.
+
+    질문이 있으면 정규화된 질문의 SHA-256 앞 16자리를 붙인다 — 같은 질문은 6시간 동안 캐시를 공유하고(비용 방어),
+    다른 질문은 기본 분석 캐시를 오염시키지 않는다. 질문 원문은 키에 넣지 않는다 (키 길이·문자 집합 통제).
+    With a question the first 16 hex digits of the normalised question's SHA-256 are appended: the same question shares
+    the 6h cache (cost defence) while a different one never pollutes the default analysis. The raw text never enters
+    the key (length and character set stay bounded).
+    """
+    if not question:
+        return f"ai:stock:{symbol}"
+    digest = hashlib.sha256(question.encode("utf-8")).hexdigest()[:16]
+    return f"ai:stock:{symbol}:q:{digest}"
 
 
 def key_article_ai(url: str) -> str:
@@ -610,13 +621,21 @@ async def recent_news_titles(state: AppState, symbol: str) -> List[str]:
 @router.post("/stocks/{symbol}")
 async def post_stock_analysis(
     request: Request,
+    body: Optional[StockQuestionRequest] = None,
     symbol: str = Depends(deps.resolve_symbol),
     state: AppState = Depends(deps.get_state),
 ) -> Any:
     """
     종목 AI 분석 SSE 스트림 (한국어 마크다운) / AI stock analysis as an SSE stream of Korean markdown.
 
-    본문은 없다. 프롬프트 입력(가격/PER/52주/섹터/뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져오므로
+    본문은 선택이다 — `{"question": "..."}`(1~200자, 정규화 후)를 주면 기본 3섹션 분석 대신 그 질문에 답한다.
+    질문은 캐시 키에 해시로 들어가(`key_stock_ai`) 같은 질문은 6시간 캐시를 공유하고, 프롬프트에서는 구분자 안에
+    격리된다(`bedrock_ai._stock_prompt`). 레이트리밋·동시성 상한은 질문 유무와 무관하게 같다.
+    The body is optional: `{"question": "..."}` (1–200 chars after normalisation) answers that question instead of the
+    default three sections. The question enters the cache key as a hash (`key_stock_ai`), so one question shares the
+    6h cache, and is fenced inside the prompt (`bedrock_ai._stock_prompt`). Rate limit and concurrency cap are unchanged.
+
+    프롬프트 입력(가격/PER/52주/섹터/뉴스 제목)은 이미 캐시된 상세·종목뉴스에서 가져오므로
     AI 요청이 yfinance/RSS를 새로 때리는 일은 보통 없다. 그 수집은 첫 `phase` 이벤트 **뒤**에 수행한다
     (TTFB를 캐시·업스트림에 묶지 않는다).
     There is no request body. The prompt inputs (price, P/E, 52-week range, sector, news titles) come from
@@ -634,6 +653,10 @@ async def post_stock_analysis(
         return limited
     semaphore = get_semaphore(request)
     inflight = get_inflight(request)
+    # 모델 검증기가 이미 정규화했다 (공백 접기·제어문자 제거·빈 문자열 거절) / Already normalised by the model validator
+    question = body.question if body is not None else None
+    # 질문이 없을 때는 기존 호출 형태를 그대로 유지한다 (키·인자 모두) / Without a question the call shape is unchanged (key and kwargs alike)
+    extra_kwargs = {"question": question} if question else {}
 
     async def produce() -> AsyncIterator[Tuple[str, dict]]:
         # 가격 오버레이가 적용된 상세를 그대로 쓴다 (테이블·헤더·호가와 같은 가격으로 분석한다)
@@ -655,6 +678,7 @@ async def post_stock_analysis(
                 # 프롬프트는 대문자 시장 코드를 쓴다 ("US"/"KR") / The prompt expects an upper-case market code
                 market=(detail.get("market") or deps.market_of(symbol)).upper(),
                 news_titles=titles,
+                **extra_kwargs,
             ),
             # 첫 이벤트가 이미 analyzing이었다 - permit을 기다렸을 때만 다시 알린다
             # The first event was already `analyzing`; it is re-announced only after a permit wait
@@ -672,10 +696,16 @@ async def post_stock_analysis(
         _analysis_stream(
             state,
             inflight,
-            key_stock_ai(symbol),
+            key_stock_ai(symbol, question),
             PHASE_ANALYZING,
             produce,
-            lambda analysis: {"symbol": symbol, "analysis": analysis},
+            # 질문이 있으면 결과에 함께 담아 캐시 히트에서도 화면이 무엇에 대한 답인지 알게 한다
+            # With a question the result carries it, so even a cache hit tells the screen what was answered
+            lambda analysis: (
+                {"symbol": symbol, "analysis": analysis, "question": question}
+                if question
+                else {"symbol": symbol, "analysis": analysis}
+            ),
         ),
         media_type="text/event-stream",
         headers=SSE_HEADERS,
