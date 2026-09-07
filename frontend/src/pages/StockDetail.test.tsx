@@ -40,6 +40,8 @@ vi.mock('../api/queries.ts', () => ({
   useOrderBook: () => LOADING,
   useInvestors: () => LOADING,
   useStockNews: () => LOADING,
+  // 워치리스트 레일 — 상세가 로딩 중이면 마운트되지 않지만, 모듈 계약은 완전해야 한다 / The watchlist rail; not mounted while the detail loads, but the module contract must be complete
+  useQuotes: () => LOADING,
 }))
 
 /** SSE 프레임 하나 / One SSE frame */

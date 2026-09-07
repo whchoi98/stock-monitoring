@@ -1,9 +1,11 @@
 /**
- * 시세 표 — 한 시장의 종목을 컬럼 정렬 가능한 표로 보여주고, 행을 누르면 종목 상세로 보낸다.
- * The quote table: one market's stocks as a column-sortable table whose rows open the stock detail.
+ * 시세 표 (QUOTE MONITOR) — 한 시장의 종목을 컬럼 정렬 가능한 밀집 표로, 행을 누르면 종목 화면으로.
+ * The quote monitor: one market's stocks as a dense, column-sortable table whose rows open the stock screen.
  *
  * 정렬은 로컬 state다 (서버 재조회 없음). 초기 상태는 "정렬 없음" — 백엔드가 준 순서를 그대로 보여준다.
- * Sorting is local state with no refetch; the initial state is "unsorted", i.e. the backend's own order.
+ * 시장 토글은 패널 머리에 앉는다 — 시장 화면이 `onMarketChange`를 넘길 때만 렌더된다 (표 자체는 시장을 소유하지 않는다).
+ * Sorting is local state with no refetch; the initial state is "unsorted". The market toggle sits in the panel head
+ * and renders only when the market screen passes `onMarketChange` (the table itself owns no market).
  */
 import { useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
@@ -11,20 +13,14 @@ import { useNavigate } from 'react-router-dom'
 
 import { useQuotes } from '../../api/queries.ts'
 import type { Market, Quote } from '../../api/types.ts'
-import {
-  changeClass,
-  formatMarketCap,
-  formatPct,
-  formatPrice,
-  formatVolume,
-} from '../../lib/format.ts'
+import { changeClass, formatMarketCap, formatPct, formatPrice, formatVolume } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
-import { Card } from '../common/Card.tsx'
 import { ChangeText } from '../common/ChangeText.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
+import { MARKET_LABEL } from '../../lib/markets.ts'
+import { MarketTabs } from '../common/MarketTabs.tsx'
+import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
-
-const MARKET_LABEL: Record<Market, string> = { us: '미국', kr: '한국' }
 
 /** 문자로 정렬하는 컬럼 / Columns sorted as text */
 type TextKey = 'symbol' | 'name'
@@ -54,10 +50,8 @@ interface Sort {
 /**
  * 두 시세를 한 컬럼 기준으로 비교 / Compare two quotes on one column.
  *
- * 결측 시총(`null`)은 가장 작은 값으로 취급한다 — 내림차순이면 맨 아래, 오름차순이면 맨 위에 모인다.
- * 스케줄러가 시총을 채우기 전(콜드 스타트 직후)에도 정렬이 깨지지 않아야 한다.
- * A missing cap (`null`) counts as the smallest value, so it collects at the bottom when descending and
- * at the top when ascending; sorting must survive a cold start, before the scheduler fills caps in.
+ * 결측 시총(`null`)은 가장 작은 값으로 취급한다 — 스케줄러가 시총을 채우기 전(콜드 스타트 직후)에도 정렬이 깨지지 않는다.
+ * A missing cap (`null`) counts as the smallest value, so sorting survives a cold start before caps are filled in.
  */
 function compare(a: Quote, b: Quote, column: Column): number {
   if (column.text) return a[column.key].localeCompare(b[column.key])
@@ -65,22 +59,19 @@ function compare(a: Quote, b: Quote, column: Column): number {
 }
 
 export interface StockTableProps {
-  /** 표시할 시장 — 탭 상태는 대시보드가 소유한다 / The market to show; the dashboard owns the tab state */
+  /** 표시할 시장 / The market to show */
   market: Market
+  /** 시장 토글 — 넘기면 패널 머리에 토글이 생긴다 / The market toggle; passing it puts the toggle in the panel head */
+  onMarketChange?: (market: Market) => void
 }
 
-export function StockTable({ market }: StockTableProps) {
+export function StockTable({ market, onMarketChange }: StockTableProps) {
   const { data, asOf, isLoading, error } = useQuotes(market)
   const [sort, setSort] = useState<Sort | null>(null)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  /*
-   * F2 훅은 `refetch`를 노출하지 않으므로(계약: `{data, asOf, marketOpen, isLoading, error}`)
-   * 재시도는 이 위젯의 쿼리 키만 무효화한다 — 키는 `api/queries.ts`의 `['quotes', market]`과 같아야 한다.
-   * The F2 hooks expose no `refetch` (their contract is `{data, asOf, marketOpen, isLoading, error}`), so
-   * a retry invalidates just this widget's key, which must mirror `['quotes', market]` in `api/queries.ts`.
-   */
+  // 재시도는 이 위젯의 쿼리 키만 무효화한다 — 키는 `api/queries.ts`의 `['quotes', market]`과 같아야 한다 / The retry invalidates just this key
   const retry = () => {
     void queryClient.invalidateQueries({ queryKey: ['quotes', market] })
   }
@@ -108,13 +99,26 @@ export function StockTable({ market }: StockTableProps) {
   }
 
   return (
-    <Card title={`${MARKET_LABEL[market]} 시세`} action={<AsOfBadge asOf={asOf} />}>
+    <Panel
+      eyebrow="QUOTE MONITOR"
+      title={`${MARKET_LABEL[market]} 시세`}
+      action={
+        <>
+          {onMarketChange !== undefined && <MarketTabs value={market} onChange={onMarketChange} />}
+          {rows.length > 0 && <span className="badge">{rows.length}종목</span>}
+          <AsOfBadge asOf={asOf} />
+        </>
+      }
+      flush
+    >
       {isLoading ? (
-        <Spinner />
+        <div className="panel-pad">
+          <Spinner />
+        </div>
       ) : rows.length === 0 ? (
-        <p className="empty">표시할 종목이 없습니다</p>
+        <p className="empty panel-pad">표시할 종목이 없습니다</p>
       ) : (
-        <div className="table-scroll">
+        <div className="table-scroll quotes-scroll">
           <table className="stock-table">
             <thead>
               <tr>
@@ -160,16 +164,14 @@ export function StockTable({ market }: StockTableProps) {
                   >
                     <td className="cell-symbol">{quote.symbol}</td>
                     <td className="cell-name">{quote.name}</td>
-                    <td className="cell-number cell-price">
-                      {formatPrice(quote.price, quote.currency)}
-                    </td>
+                    <td className="cell-number cell-price">{formatPrice(quote.price, quote.currency)}</td>
                     <td className="cell-number cell-signed">
                       <ChangeText value={quote.change} currency={quote.currency} />
                     </td>
-                    <td className="cell-number cell-signed">{formatPct(quote.change_pct)}</td>
-                    <td className="cell-number">
-                      {formatMarketCap(quote.market_cap, quote.currency)}
+                    <td className="cell-number cell-signed">
+                      <span className="pct">{formatPct(quote.change_pct)}</span>
                     </td>
+                    <td className="cell-number">{formatMarketCap(quote.market_cap, quote.currency)}</td>
                     <td className="cell-number">{formatVolume(quote.volume)}</td>
                   </tr>
                 )
@@ -178,6 +180,6 @@ export function StockTable({ market }: StockTableProps) {
           </table>
         </div>
       )}
-    </Card>
+    </Panel>
   )
 }

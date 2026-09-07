@@ -104,7 +104,7 @@ describe('ArticleAnalysis', () => {
     await flushAutoRun()
 
     expect(screen.getByText('잘못된 접근')).toBeTruthy()
-    expect(screen.getByRole('link', { name: '대시보드로 이동' }).getAttribute('href')).toBe('/')
+    expect(screen.getByRole('link', { name: '시장 화면으로 이동' }).getAttribute('href')).toBe('/')
     // 훅 자체가 불리지 않아야 한다 — 빈 url로 유료 엔드포인트를 두드리는 경로가 아예 없어야 한다.
     // The hook must not even run: no path may exist that hits the paid endpoint with an empty url.
     expect(vi.mocked(useArticleAIStream)).not.toHaveBeenCalled()

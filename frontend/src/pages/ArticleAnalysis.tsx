@@ -29,8 +29,8 @@ import remarkGfm from 'remark-gfm'
 import { useArticleAIStream } from '../api/aiStream.ts'
 import type { Language } from '../api/types.ts'
 import { AsOfBadge } from '../components/common/AsOfBadge.tsx'
-import { Card } from '../components/common/Card.tsx'
 import { ErrorCard } from '../components/common/ErrorCard.tsx'
+import { Panel } from '../components/common/Panel.tsx'
 import { Spinner } from '../components/common/Spinner.tsx'
 import { aiErrorMessage, aiPhaseLabel } from '../lib/aiMessages.ts'
 
@@ -64,14 +64,14 @@ export default function ArticleAnalysis() {
   if (url === '') {
     return (
       <div className="article">
-        <Card title="잘못된 접근">
+        <Panel eyebrow="ARTICLE" title="잘못된 접근">
           <p className="empty">
-            분석할 기사 주소가 없습니다. 대시보드의 뉴스 목록에서 기사를 고르면 분석이 시작됩니다.
+            분석할 기사 주소가 없습니다. 뉴스 와이어에서 기사를 고르면 분석이 시작됩니다.
           </p>
           <p className="notice-back">
-            <Link to="/">대시보드로 이동</Link>
+            <Link to="/">시장 화면으로 이동</Link>
           </p>
-        </Card>
+        </Panel>
       </div>
     )
   }
@@ -170,7 +170,7 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
         </a>
       </header>
 
-      <Card title="AI 분석" action={<AsOfBadge asOf={asOf} />}>
+      <Panel eyebrow="AI RESEARCH" title="기사 분석" action={<AsOfBadge asOf={asOf} />}>
         {pending ? (
           /*
            * 지금 어느 단계인지는 **서버가 말해 준다** (`phase` 이벤트). 예전에는 기사 수집과 Claude 호출이
@@ -205,7 +205,7 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
             <Markdown remarkPlugins={[remarkGfm]}>{body}</Markdown>
           </div>
         )}
-      </Card>
+      </Panel>
     </div>
   )
 }

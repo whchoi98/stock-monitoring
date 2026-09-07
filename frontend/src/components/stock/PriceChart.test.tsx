@@ -87,6 +87,34 @@ describe('PriceChart', () => {
     expect(screen.getByRole('button', { name: '1M' }).getAttribute('aria-pressed')).toBe('false')
   })
 
+  /*
+   * 지표 토글 — MA5·MA20·VOL은 켜진 채, BOLL은 꺼진 채 시작한다. 토글은 시리즈의 `visible`만 바꾸므로(캔버스가 없어도
+   * 상태는 돈다) 여기서는 눌림 상태의 계약만 못박는다.
+   * The indicator toggles start with MA5, MA20 and VOL on and BOLL off. A toggle only flips a series' `visible`, so
+   * (with no canvas) only the pressed-state contract is pinned here.
+   */
+  it('지표 토글 4개를 BOLL만 꺼진 상태로 렌더하고 누르면 뒤집는다 / renders the four indicator toggles with only BOLL off, and flips on click', () => {
+    renderChart()
+
+    const toggles = screen.getByRole('group', { name: '지표 선택' })
+    expect(Array.from(toggles.querySelectorAll('button')).map((b) => b.textContent)).toEqual([
+      'MA5',
+      'MA20',
+      'BOLL',
+      'VOL',
+    ])
+    expect(screen.getByRole('button', { name: 'MA5' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'BOLL' }).getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(screen.getByRole('button', { name: 'BOLL' }))
+    expect(screen.getByRole('button', { name: 'BOLL' }).getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'VOL' }))
+    expect(screen.getByRole('button', { name: 'VOL' }).getAttribute('aria-pressed')).toBe('false')
+    // 기간은 그대로다 — 두 그룹은 독립이다 / The period is untouched; the two groups are independent
+    expect(screen.getByRole('button', { name: '1M' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
   it('로딩 중에는 스피너만 보인다 / shows only a spinner while loading', () => {
     vi.mocked(useChart).mockReturnValue(hookResult({ isLoading: true }))
     const { container } = renderChart()

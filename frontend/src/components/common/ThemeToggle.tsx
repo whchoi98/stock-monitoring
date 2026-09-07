@@ -56,6 +56,7 @@ export function ThemeToggle() {
       aria-label={next === 'light' ? '라이트 모드로 전환' : '다크 모드로 전환'}
       onClick={() => setTheme(next)}
     >
+      <span aria-hidden="true">{next === 'light' ? '☀' : '☾'}</span>
       {next === 'light' ? '라이트' : '다크'}
     </button>
   )

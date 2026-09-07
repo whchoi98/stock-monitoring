@@ -167,6 +167,28 @@ describe('OrderBook', () => {
     expect(rows()[10]!.classList.contains('up')).toBe(true)
   })
 
+  it('매도·매수 블록 사이에 현재가 구분행을 두고 행 수에는 넣지 않는다 / puts a last-price divider between the blocks without counting it as a level', () => {
+    const { container, rows } = renderOrderBook()
+
+    const mid = container.querySelector('.orderbook-mid')!
+    expect(mid.textContent).toContain('현재가')
+    expect(mid.textContent).toContain('262,500')
+    expect(mid.classList.contains('orderbook-row')).toBe(false)
+    // 구분행은 마지막 매도 행과 첫 매수 행 사이에 있다 / The divider sits between the last ask and the first bid
+    expect(mid.previousElementSibling).toBe(rows('ask').at(-1))
+    expect(mid.nextElementSibling).toBe(rows('bid')[0])
+  })
+
+  it('매도·매수 잔량 합계와 매수 비중 막대를 렌더한다 / renders the ask and bid totals with the bid-share bar', () => {
+    const { container } = renderOrderBook()
+
+    // 매도 1,670 · 매수 1,855 (픽스처 합) / The fixture sums
+    expect(screen.getByText('매도잔량 1.7K').classList.contains('down')).toBe(true)
+    expect(screen.getByText('매수잔량 1.9K').classList.contains('up')).toBe(true)
+    const fill = container.querySelector<HTMLElement>('.ob-ratio-fill')!
+    expect(Number.parseFloat(fill.style.width)).toBeCloseTo((1855 / 3525) * 100, 5)
+  })
+
   it('KR 종목 가격은 소수점 없이 천 단위로 표기한다 / formats KR prices with no decimals', () => {
     const { rows } = renderOrderBook()
 

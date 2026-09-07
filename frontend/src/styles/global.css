@@ -1,18 +1,22 @@
 /*
- * 전역 스타일 — Pretendard는 CDN 대신 npm 패키지(@fontsource)로 번들해 오프라인/CSP에 안전.
- * @import는 반드시 다른 규칙보다 먼저 와야 한다.
- * Global styles; Pretendard is bundled from npm (@fontsource), not a CDN, for offline/CSP safety.
- * @import rules must precede all other rules.
- */
-/*
- * @fontsource/pretendard는 subset 분할(unicode-range)이 없어 굵기당 파일이 ~770KB다.
- * 따라서 본문(400)과 강조(700) 두 굵기만 로드한다. 추가 굵기가 필요하면 여기서 한 줄 추가.
- * Each weight is a ~770KB file (no unicode-range subsets), so only 400/700 are loaded.
+ * 전역 스타일 — 터미널 워크스페이스 (ADR-001).
+ * 서체는 CDN 대신 npm 패키지(@fontsource)로 번들해 오프라인/CSP에 안전하다. @import는 다른 규칙보다 먼저 온다.
+ * Global styles for the terminal workspace (ADR-001). Fonts are bundled from npm (@fontsource), not a CDN,
+ * for offline/CSP safety. @import rules must precede all other rules.
+ *
+ * Pretendard는 subset 분할이 없어 굵기당 ~770KB라 본문(400)·강조(700)만 싣는다. JetBrains Mono는 숫자·심볼·시각
+ * 전용이므로 라틴 서브셋(400/700)만 싣는다 — 한글 옆의 숫자가 고정폭으로 정렬되는 것이 터미널 밀도의 핵심이다.
+ * Pretendard ships no subsets (~770KB per weight), so only 400/700 are loaded. JetBrains Mono serves numbers,
+ * symbols and clocks only, so only its latin subset (400/700) is loaded — tabular numerals next to Korean text
+ * are what make the terminal density readable.
  */
 @import '@fontsource/pretendard/400.css';
 @import '@fontsource/pretendard/700.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-700.css';
 @import './tokens.css';
 
+/* ── 리셋 / Reset ── */
 *,
 *::before,
 *::after {
@@ -25,11 +29,20 @@ body {
   padding: 0;
 }
 
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: Pretendard, 'Noto Sans KR', sans-serif;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
+  /* 표·스트립의 숫자가 열을 맞추도록 본문에서도 타뷸러 숫자를 켠다 / Tabular numerals everywhere so columns line up */
+  font-variant-numeric: tabular-nums;
 }
 
 a {
@@ -37,205 +50,655 @@ a {
   text-decoration: none;
 }
 
-/* 카드 컨테이너 / Card container */
-.card {
-  background: var(--card);
-  border-radius: var(--radius);
-  padding: 16px;
+button {
+  font-family: inherit;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 고정폭 숫자·심볼 / Monospaced numerals and symbols */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* 대문자 소형 라벨 — 패널 eyebrow·표 머리·통계 라벨의 공통 목소리 / The small uppercase label shared by eyebrows, table heads and stat labels */
+.eyebrow {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 /*
  * ── 앱 셸 / App shell ──
- * F1이 `.card`를 여기에 둔 선례를 따라 공통 컴포넌트(F3)의 클래스도 이 파일에 모은다.
- * 색은 예외 없이 tokens.css의 변수만 쓴다.
- * Following F1's precedent of keeping `.card` here, the shared components' (F3) classes live in this
- * file too. Colours come from tokens.css variables, without exception.
+ * 세로 flex: 상단 sticky 블록(커맨드 바 + 마켓 스트립) → 워크스페이스 → 하단 sticky 상태 바.
+ * A vertical flex column: the top sticky block (command bar plus market strip), the workspace, the bottom status bar.
  */
-.app {
+.terminal {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
 }
 
-/* 헤더+티커를 함께 상단에 고정하는 래퍼 — 개별 sticky 대신 한 블록이라 높이 계산이 필요 없다.
-   RouteError 셸은 .app-nav를 단독으로 쓰므로 그 헤더는 정적이 된다 (에러 화면 — 무해).
-   The wrapper pinning nav+ticker together; one block needs no height math. The RouteError shell
-   uses a bare .app-nav, whose header therefore goes static (an error screen — harmless). */
-.app-top {
+.term-top {
   position: sticky;
   top: 0;
-  z-index: 10;
-}
-
-/*
- * 상단 sticky 블록을 비켜 가야 하는 요소들의 오프셋 — 매직 넘버를 흩뿌리지 않도록 한 곳에서 정한다.
- * 116px은 브라우저 실측으로 확정한 값이다 (이 변수를 쓰는 곳은 모두 901px 이상). 산술로 유도하지 말고,
- * 상단 블록 구성이 바뀌면 다시 실측해 갱신한다.
- * `.app-top`만 z-index를 가지므로 오프셋이 얕으면 상대가 티커 밑으로 파고든다.
- * The offset for anything that must clear the top sticky block, defined once so the number is not scattered.
- * 116px is settled by browser measurement (every user of this variable is above 901px) — do not re-derive it
- * arithmetically; re-measure it whenever the top block's makeup changes.
- * Only `.app-top` carries a z-index, so too shallow an offset tucks its neighbour under the ticker.
- */
-:root {
-  --app-top-clearance: 116px;
-}
-
-.app-nav {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  padding: 12px 20px;
+  z-index: 20;
   background: var(--bg);
-  border-bottom: 1px solid var(--card);
-  /*
-   * 한 줄에 다 못 들어가면 항목 단위로 줄을 넘긴다 — 라벨이 글자 단위로 쪼개지는 것보다 낫다
-   * (아래 nowrap과 한 쌍이다). 390px는 좁힌 여백으로 한 줄에 들어가고, 그보다 좁으면 이 규칙이 받는다.
-   * When the row cannot fit, whole items wrap instead of labels breaking mid-word — this pairs with the
-   * nowrap below. 390px fits on one line thanks to the tightened spacing; anything narrower lands here.
-   */
-  flex-wrap: wrap;
+  border-bottom: 1px solid var(--border);
 }
 
-.app-brand {
-  color: var(--text-strong);
-  font-weight: 700;
-  /*
-   * 브랜드는 쪼개지 않는다 — 390px에서 "stock-/monitoring" 두 줄로 갈라졌다.
-   * The brand never breaks: at 390px it split into "stock-/monitoring" across two lines.
-   */
-  white-space: nowrap;
-}
-
-.app-links {
-  display: flex;
-  gap: 16px;
-}
-
-.app-links a {
-  color: var(--text);
-  /* 링크 라벨도 쪼개지 않는다 — 390px에서 "대시보/드", "기사 분/석"이 되었다 / Nor do the link labels: 390px gave "대시보/드" and "기사 분/석" */
-  white-space: nowrap;
-}
-
-/* react-router의 NavLink가 현재 경로에 붙이는 클래스 / The class react-router's NavLink adds on the active route */
-.app-links a.active {
-  color: var(--text-strong);
-  font-weight: 700;
-}
-
-/*
- * 좁은 화면에서는 여백·간격을 좁혀 네비를 한 줄에 담는다 — 기본 여백·간격(좌우 20px + 20px)으로는 한 줄에
- * 416px이 필요해 390px에서 26px 넘쳤고, 라벨이 전부 두 줄로 갈라졌다 (여기서 좁히면 380px — 390px에 들어간다).
- * 링크에 세로 패딩을 주어 탭 영역을 토글과 같은 높이로 맞춘다. 토글이 이미 줄 높이를 정하므로 바는 커지지 않는다.
- * On a narrow screen tighter padding and gaps keep the nav on one line: with the default spacing (20px side
- * padding plus 20px gaps) one line needs 416px, overflowing 390px by 26px and splitting every label across two
- * lines; the values here bring it to 380px, which fits.
- * The links take vertical padding so their tap target matches the toggle's height; the toggle already sets the
- * row height, so the bar does not grow.
- */
-@media (max-width: 560px) {
-  .app-nav {
-    gap: 12px;
-    padding: 12px;
-  }
-
-  .app-links {
-    gap: 12px;
-  }
-
-  .app-links a {
-    padding: 6px 0;
-  }
-}
-
-.app-main {
-  max-width: 1280px;
+.term-main {
+  flex: 1;
+  width: 100%;
+  max-width: 1920px;
   margin: 0 auto;
-  padding: 20px;
+  padding: var(--ws-gap);
+  /* 그리드 자식이 넓은 표를 밀어내지 않게 / Keep a wide table from stretching the grid */
+  min-width: 0;
 }
 
-/* ── 카드 머리 / Card header ── */
-.card-head {
+/* ── 커맨드 바 / Command bar ── */
+.topbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-  /*
-   * 좁은 화면에서 제목과 액션(탭·뱃지)이 한 줄에 못 들어가면 액션을 아래 줄로 내린다 —
-   * 제목이 글자 단위로 쪼개지는 것(한글은 어디서나 줄바꿈된다)보다 낫다.
-   * When the title and the action (tabs, badges) cannot share a line, the action drops to the next one,
-   * which beats breaking the title mid-word — Korean wraps between any two characters.
-   */
+  gap: 8px 16px;
+  min-height: 44px;
+  padding: 0 12px;
+  /* 좁은 화면에서는 검색이 둘째 줄로 내려간다 / On a narrow screen the search drops to a second line */
   flex-wrap: wrap;
 }
 
-.card-title {
-  margin: 0;
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--text-strong);
-  font-size: 15px;
-  font-weight: 700;
-  /* 제목은 줄이지 않는다 (위 wrap이 동작하는 전제) / The title never shrinks, which is what makes the wrap above happen */
-  flex-shrink: 0;
+  white-space: nowrap;
 }
 
-.card-action {
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.brand-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.brand-tag {
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.topbar-nav {
+  display: flex;
+  align-self: stretch;
+}
+
+.topbar-nav a {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.topbar-nav a:hover {
+  color: var(--text-strong);
+}
+
+/* react-router의 NavLink가 현재 경로에 붙이는 클래스 / The class NavLink adds on the active route */
+.topbar-nav a.active {
+  border-bottom-color: var(--accent);
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.topbar-right {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* 기간 탭 4개 + 뱃지가 좁은 화면에서 제목을 밀어내지 않게 접힌다 / Four period tabs plus a badge wrap instead of shoving the title */
+  margin-left: auto;
+}
+
+/* ── 종목 검색 (콤보박스) / Symbol search (combobox) ── */
+.search {
+  position: relative;
+  flex: 1 1 260px;
+  max-width: 380px;
+  min-width: 180px;
+}
+
+.search-input {
+  width: 100%;
+  height: 28px;
+  padding: 0 44px 0 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.search-input::placeholder {
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.search-icon {
+  position: absolute;
+  top: 50%;
+  left: 10px;
+  transform: translateY(-50%);
+  color: var(--text-dim);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.search-kbd {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  padding: 1px 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+.search-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  overflow-y: auto;
+  max-height: 360px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.search-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.search-option {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.search-option[aria-selected='true'],
+.search-option:hover {
+  background: var(--accent-soft);
+}
+
+.search-symbol {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.search-name {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-market {
+  color: var(--text-dim);
+}
+
+.search-empty {
+  margin: 0;
+  padding: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* ── 마켓 스트립 / Market strip ── */
+.market-strip {
+  display: flex;
+  align-items: stretch;
+  height: 40px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+/* 지수는 고정 셀 — 항상 보인다. 크롤에 자리를 남기도록 70%까지만 차지하고 넘치면 셀 단위로 가로 스크롤한다.
+   Indices are fixed, always-visible cells; they take at most 70% so the crawl keeps room, scrolling horizontally past that. */
+.strip-indices {
+  display: flex;
+  flex: 0 1 auto;
+  overflow-x: auto;
+  max-width: 70%;
+  scrollbar-width: none;
+}
+
+.strip-indices::-webkit-scrollbar {
+  display: none;
+}
+
+.strip-cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 0 14px;
+  border-right: 1px solid var(--border);
+  white-space: nowrap;
+  line-height: 40px;
+}
+
+.strip-name {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.strip-value {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.strip-change {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/*
+ * 경제지표는 크롤한다 — 같은 목록 두 벌을 이어 붙인 트랙을 -50%까지 밀면 사본의 첫 항목이 원본의 첫 항목 자리에
+ * 정확히 도달하므로 끊김 없이 순환한다 (MarketStrip이 사본을 aria-hidden으로 렌더한다). 양끝은 배경색으로 페이드.
+ * The indicators crawl: the track holds two copies, so sliding it to -50% lands the copy's first item exactly where
+ * the original's was — a loop with no gap (MarketStrip renders the copy aria-hidden). Both edges fade into the bar.
+ */
+.strip-crawl {
+  flex: 1 1 160px;
+  overflow: hidden;
+  min-width: 160px;
+  mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
+
+/* 중간 폭에서는 지수 셀을 조여 다섯 개가 모두 보이게 한다 / At medium widths the index cells tighten so all five stay visible */
+@media (max-width: 1279px) {
+  .strip-indices {
+    max-width: none;
+  }
+
+  .strip-indices .strip-cell {
+    gap: 6px;
+    padding: 0 9px;
+  }
+
+  .strip-indices .strip-value {
+    font-size: 11px;
+  }
+
+  .strip-indices .strip-change {
+    font-size: 10px;
+  }
+}
+
+/* 좁은 화면에서는 두 줄로 — 지수 한 줄, 크롤 한 줄 / On a narrow screen two lines: indices, then the crawl */
+@media (max-width: 899px) {
+  .market-strip {
+    flex-wrap: wrap;
+    height: auto;
+  }
+
+  .strip-indices {
+    flex: 1 0 100%;
+    max-width: none;
+  }
+
+  .strip-crawl {
+    border-top: 1px solid var(--border);
+  }
+
+  .strip-cell {
+    line-height: 32px;
+  }
+
+  .strip-asof {
+    border-top: 1px solid var(--border);
+  }
+}
+
+.strip-track {
+  display: flex;
+  width: max-content;
+  height: 100%;
+  animation: strip-scroll 60s linear infinite;
+}
+
+.strip-crawl:hover .strip-track {
+  animation-play-state: paused;
+}
+
+.strip-group {
+  display: flex;
+}
+
+.strip-group .strip-cell {
+  border-right: 0;
+}
+
+@keyframes strip-scroll {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* 우측 기준 시각 칩 / The right-side as-of chip */
+.strip-asof {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0 12px;
+  border-left: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* ── 하단 상태 바 / Bottom status bar ── */
+.statusbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px 14px;
+  min-height: var(--term-status-h);
+  padding: 0 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  flex-wrap: wrap;
+}
+
+.statusbar strong {
+  color: var(--text);
+  font-weight: 400;
+}
+
+.statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-left: auto;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+}
+
+.status-open .status-dot {
+  border-color: var(--ok);
+  background: var(--ok);
+  box-shadow: 0 0 0 3px rgb(47 179 122 / 18%);
+}
+
+.status-closed .status-dot {
+  border-color: var(--text-dim);
+  background: var(--text-dim);
+}
+
+.status-open {
+  color: var(--text);
+}
+
+.clock {
+  color: var(--text);
+}
+
+/* ── 패널 / Panel ── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.panel-head {
+  display: flex;
+  /*
+   * 높이가 제한된 패널(레일·뉴스 열) 안에서도 머리는 줄어들지 않는다 — 줄어들면 줄바꿈된 액션이 첫 행 위로 흘러넘친다.
+   * Inside a height-capped panel (rail, news column) the head never shrinks; if it did, wrapped actions would spill
+   * over the first row.
+   */
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  /* 제목과 액션이 한 줄에 못 들어가면 액션이 아래 줄로 — 제목이 글자 단위로 쪼개지는 것보다 낫다 / Actions wrap under the title rather than the title breaking mid-word */
+  flex-wrap: wrap;
+}
+
+.panel-eyebrow {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.panel-title {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.panel-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
 
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  padding: 10px;
+}
+
+/* 표·목록은 패널 가장자리까지 / Tables and lists run to the panel's edge */
+.panel-body-flush {
+  padding: 0;
+}
+
+/* flush 본문 안에서 여백이 필요한 조각(스피너·빈 문구) / A padded piece inside a flush body (spinner, empty wording) */
+.panel-pad {
+  padding: 10px;
+}
+
+/* flush 본문 안의 에러 카드는 패널 테두리를 겹치지 않는다 / An error card inside a flush body draws no second border */
+.panel-body-flush > .error-card {
+  border-width: 0 0 0 3px;
+  border-radius: 0;
+}
+
 /* ── 버튼 / Buttons ── */
+.btn,
+.retry-button,
 .theme-toggle,
-.retry-button {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: 8px;
+.ai-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-raised);
   color: var(--text);
-  font: inherit;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
 }
 
-/* 네비(--bg 배경) 위에서는 카드색이 대비를 만든다 / On the nav (a --bg surface) the card colour provides contrast */
-.theme-toggle {
-  background: var(--card);
-  /* 라벨을 쪼개지 않는다 — 390px에서 "라이/트"가 되었다 / The label never breaks: 390px gave "라이/트" */
-  white-space: nowrap;
-  /*
-   * 네비 오른쪽 끝으로 밀어낸다 — `.app-links`의 margin-right가 아니라 토글 자신의 auto 여백으로
-   * 미는 이유: 375px 이하에서 토글이 둘째 줄로 넘어갈 때도 그 줄에서 오른쪽에 붙는다
-   * (링크 쪽 여백이면 첫 줄만 밀려 둘째 줄의 토글이 왼쪽에 홀로 남았다). 둘 다 auto면 여유가 나뉘므로 한쪽만 둔다.
-   * Pushed to the nav's right end by the toggle's own auto margin rather than by a margin-right on
-   * `.app-links`: this way it also sits right when it wraps to a second line below 375px (a margin on the
-   * links only pushed the first line, leaving the wrapped toggle alone on the left). Only one side may carry
-   * an auto margin — two would split the free space.
-   */
-  margin-left: auto;
-}
-
-/* 카드 안에서는 페이지 배경색이 대비를 만든다 / Inside a card the page background provides contrast */
-.retry-button {
-  background: var(--bg);
-}
-
+.btn:hover,
+.retry-button:hover,
 .theme-toggle:hover,
-.retry-button:hover {
+.ai-button:hover {
+  border-color: var(--accent);
   color: var(--text-strong);
 }
 
-/* ── 뱃지 (시뮬레이션 / 기준 시각) — 신뢰 신호이므로 보이되 튀지 않게 / Badges: trust signals, visible but subdued ── */
+.ai-button {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+}
+
+.ai-button:disabled,
+.btn:disabled {
+  border-color: var(--border);
+  background: var(--panel-raised);
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* ── 탭 (세그먼트 토글) / Tabs (segmented toggles) ── */
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 18px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text-strong);
+}
+
+.tab-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* 지표 토글의 시리즈 색 점 — 색은 토큰을 가리키는 CSS 변수로만 들어온다 / The series-colour dot on an indicator toggle; the colour arrives as a token variable */
+.tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dot, currentColor);
+  opacity: 0.9;
+}
+
+/* ── 뱃지 (시뮬레이션 / 기준 시각 / 개수) — 신뢰 신호이므로 보이되 튀지 않게 / Badges: trust signals, visible but subdued ── */
 .badge {
   display: inline-block;
-  padding: 2px 8px;
-  border: 1px solid var(--card);
-  border-radius: 999px;
-  background: var(--bg);
-  color: var(--text);
-  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
   line-height: 1.6;
   white-space: nowrap;
+}
+
+.badge-accent {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ── 위젯 에러 / Widget error ── */
@@ -243,18 +706,26 @@ a {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--up);
+  border-radius: var(--radius);
+  background: var(--panel);
 }
 
 .error-message {
   margin: 0;
+  color: var(--text-strong);
+  font-size: 12px;
 }
 
 /* ── 스피너 / Spinner ── */
 .spinner {
-  width: 20px;
-  height: 20px;
-  border: 2px solid var(--bg);
+  width: 16px;
+  height: 16px;
+  margin: 6px 0;
+  border: 2px solid var(--border);
   border-top-color: var(--accent);
   border-radius: 50%;
   animation: spinner-rotate 0.8s linear infinite;
@@ -269,98 +740,407 @@ a {
 /* ── 빈 상태 문구 / Empty-state wording ── */
 .empty {
   margin: 0;
-  font-size: 13px;
+  padding: 6px 0;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* 안내 카드의 홈 링크 (잘못된 접근 / 404 / 에러 경계) / The home link on a notice card */
+.notice-back {
+  margin: 12px 0 0;
+  font-size: 12px;
+}
+
+.notice {
+  max-width: 560px;
+  margin: 40px auto;
 }
 
 /*
- * ── 대시보드 레이아웃 / Dashboard layout ──
- * 데스크톱은 본문 + 320px 뉴스 사이드바, 모바일은 1열 스택 (스펙 6.2 / 6.3).
- * Desktop is content plus a 320px news sidebar; mobile stacks into one column (spec 6.2 / 6.3).
+ * ── 워크스페이스 그리드 / Workspace grids ──
+ * 시장: 3열(펄스 · 섹터 · 뉴스) + 시세 표가 두 칸. 뉴스는 자기 열에서 sticky로 서서 내부 스크롤한다.
+ * Market: three columns (pulse, sectors, news) with the quote table spanning two; the news column sticks and scrolls inside.
  */
-.dashboard {
+.ws {
   display: grid;
-  grid-template-columns: 1fr 320px;
-  gap: 16px;
+  gap: var(--ws-gap);
   align-items: start;
 }
 
-.dashboard-main,
-.dashboard-quotes {
+.ws > * {
+  min-width: 0;
+}
+
+.ws-market {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 340px;
+  grid-template-areas:
+    'pulse sectors news'
+    'quotes quotes news';
+}
+
+.area-pulse {
+  grid-area: pulse;
+}
+
+.area-sectors {
+  grid-area: sectors;
+}
+
+.area-quotes {
+  grid-area: quotes;
+}
+
+.area-news {
+  grid-area: news;
+  position: sticky;
+  top: calc(var(--term-top-h) + var(--ws-gap));
+  display: flex;
+  max-height: calc(100vh - var(--term-top-h) - var(--term-status-h) - var(--ws-gap) * 2);
+}
+
+.area-news > .panel {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 첫 행의 두 패널은 행 높이에 맞춰 늘어난다 — 격자가 맞아야 터미널로 읽힌다 / The first row's panels stretch to the row so the grid reads as a grid */
+.area-pulse > .panel,
+.area-sectors > .panel {
+  height: 100%;
+}
+
+@media (max-width: 1199px) {
+  .ws-market {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      'pulse sectors'
+      'quotes quotes'
+      'news news';
+  }
+
+  .area-news {
+    position: static;
+    max-height: none;
+  }
+
+  .area-news .news-list {
+    max-height: 480px;
+  }
+}
+
+@media (max-width: 899px) {
+  .ws-market {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'pulse'
+      'sectors'
+      'quotes'
+      'news';
+  }
+}
+
+/*
+ * 종목: 워치리스트 레일 240px · 중앙 · 우측 320px. 세 열은 각각 세로 flex라 패널 높이가 서로를 구속하지 않는다.
+ * Stock: a 240px watchlist rail, the centre, a 320px side column; each column is its own vertical flex so panel
+ * heights never constrain each other.
+ */
+.ws-stock {
+  grid-template-columns: 240px minmax(0, 1fr) 320px;
+}
+
+.ws-rail,
+.ws-center,
+.ws-side {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  /* 그리드 자식은 기본 min-width auto라서 넓은 표가 열을 밀어낸다 / A grid child defaults to min-width auto, which a wide table would stretch */
+  gap: var(--ws-gap);
   min-width: 0;
 }
 
-.dashboard-duo {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  align-items: start;
-}
-
-/* 사이드바는 스크롤해도 따라온다 — 상단 sticky 블록(헤더+티커)을 비켜 갈 만큼 내려 붙인다.
-   The sidebar follows the scroll, pinned far enough down to clear the top sticky block (nav plus ticker). */
-.dashboard-side {
+.ws-rail {
   position: sticky;
-  top: var(--app-top-clearance);
-  min-width: 0;
+  top: calc(var(--term-top-h) + var(--ws-gap));
+  max-height: calc(100vh - var(--term-top-h) - var(--term-status-h) - var(--ws-gap) * 2);
 }
 
-@media (max-width: 900px) {
-  .dashboard,
-  .dashboard-duo {
-    grid-template-columns: 1fr;
+.ws-rail > .panel {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 중앙 열 안에서 나란히 앉는 두 패널 (핵심 지표 · 기간수익률) / Two panels side by side inside the centre column */
+.duo {
+  display: grid;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+  gap: var(--ws-gap);
+  align-items: stretch;
+}
+
+@media (max-width: 1279px) {
+  .ws-stock {
+    grid-template-columns: minmax(0, 1fr) 320px;
   }
 
-  .dashboard-side {
-    position: static;
+  /* 레일은 접는다 — 종목 전환은 검색과 시장 화면이 대신한다 / The rail folds away; search and the market screen take over symbol switching */
+  .ws-rail {
+    display: none;
   }
 }
 
-/* ── 섹션 머리 (카드 밖 제목 + 뱃지) / Section header: a title outside any card ── */
-.section-head {
+@media (max-width: 899px) {
+  .ws-stock {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .duo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ── 워치리스트 레일 / Watchlist rail ── */
+.wl-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.wl-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.wl-row:hover {
+  background: var(--panel-raised);
+}
+
+.wl-selected,
+.wl-selected:hover {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.wl-symbol {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.wl-price {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+.wl-name {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wl-pct {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+}
+
+/* ── 종목 헤더 (QUOTE HEADER) / Quote header ── */
+.qh-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px 24px;
+}
+
+.qh-symbol-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.qh-symbol {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.qh-name {
+  margin: 2px 0 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.qh-quote {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 12px;
+}
+
+/* 현재가는 화면에서 가장 큰 숫자다 / The price is the largest number on the page */
+.qh-price {
+  margin: 0;
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.qh-change {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+.qh-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 1px;
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--border);
+  overflow: hidden;
+}
+
+.qh-gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+/* ── 통계 셀 (핵심 지표 · 기간수익률 · 헤더 통계) / Stat cells ── */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--border);
+  overflow: hidden;
+}
+
+.stat-grid-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.stat-label {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.stat-value {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .stat-grid,
+  .stat-grid-4 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ── 1일 / 52주 범위 게이지 / The 1-day and 52-week range gauges ── */
+.range-gauge {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
-/* ── 지수 카드 / Index cards ── */
-.index-grid {
-  display: grid;
-  /* 5장이 한 줄에 들어가되 좁아지면 자동으로 줄바꿈 / Five per row, wrapping automatically when narrow */
-  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 12px;
+.range-label {
+  flex-shrink: 0;
+  width: 34px;
+  color: var(--text-dim);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 
-.index-name {
-  margin: 0 0 6px;
-  font-size: 13px;
-}
-
-.index-value {
-  margin: 0 0 4px;
+.range-low,
+.range-high {
+  flex-shrink: 0;
   color: var(--text-strong);
-  font-size: 20px;
-  font-weight: 700;
 }
 
-/* ── 시장 요약 / Market summary ── */
+.range-track {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+/* 현재가 표식 — left가 0%/100%일 때도 트랙 안에 남도록 자기 폭의 절반만큼 되돌린다 / A half-width pull-back keeps the marker inside the track at 0% and 100% */
+.range-marker {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translate(-50%, -50%);
+}
+
+.range-empty {
+  color: var(--text-dim);
+}
+
+/* ── 시장 펄스 / Market pulse ── */
 .breadth {
   display: flex;
-  gap: 16px;
-  font-size: 13px;
+  align-items: baseline;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
   font-weight: 700;
+}
+
+.breadth-total {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-weight: 400;
 }
 
 .breadth-bar {
   overflow: hidden;
-  height: 6px;
-  margin: 8px 0 16px;
-  border-radius: 999px;
+  height: 5px;
+  margin: 8px 0 12px;
+  border-radius: 2px;
   /* 색은 .up/.down 클래스가 정하고 여기서 currentColor로 칠한다 / .up/.down set the colour; currentColor paints it */
   background: currentColor;
 }
@@ -373,13 +1153,12 @@ a {
 
 .leader-lists {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 12px;
 }
 
 .leader-label {
-  margin: 0 0 6px;
-  font-size: 12px;
+  margin: 0 0 4px;
 }
 
 .leader-items {
@@ -393,22 +1172,36 @@ a {
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
-  padding: 3px 0;
-  font-size: 13px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
 }
 
-.leader-name {
+.leader-item:last-child {
+  border-bottom: 0;
+}
+
+/* 상위 종목은 심볼로 — 종목명은 title에 / Leaders read by symbol; the name lives in the title attribute */
+.leader-symbol {
   overflow: hidden;
   color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.leader-metric {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 /* ── 섹터 등락 / Sector bars ── */
 .sector-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -416,10 +1209,10 @@ a {
 
 .sector-row {
   display: grid;
-  grid-template-columns: 92px 1fr 64px 52px;
+  grid-template-columns: minmax(72px, 112px) minmax(0, 1fr) 62px 44px;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .sector-name {
@@ -431,103 +1224,107 @@ a {
 
 .sector-track {
   overflow: hidden;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--bg);
+  height: 6px;
+  border-radius: 2px;
+  background: var(--panel-raised);
 }
 
 .sector-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: 2px;
   background: currentColor;
 }
 
 .sector-value {
-  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
   font-weight: 700;
+  text-align: right;
 }
 
 .sector-count {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
   text-align: right;
-  font-size: 12px;
 }
 
-/* ── 시장 탭 / Market tabs ── */
-.tabs {
-  display: flex;
-  gap: 6px;
-}
-
-.tab {
-  padding: 6px 16px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--card);
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
-}
-
-.tab:hover {
-  color: var(--text-strong);
-}
-
-.tab-active {
-  background: var(--accent);
-  color: var(--text-strong);
-  font-weight: 700;
-}
-
-/* ── 시세 표 / Quote table ── */
+/* ── 시세 표 (QUOTE MONITOR) / Quote table ── */
 .table-scroll {
-  overflow-x: auto;
+  overflow: auto;
+}
+
+/* 50행은 패널 안에서 스크롤한다 — 머리 행은 sticky로 남는다 / Fifty rows scroll inside the panel; the head stays sticky */
+.quotes-scroll {
+  max-height: 560px;
 }
 
 .stock-table {
   width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 12px;
 }
 
 .stock-table th {
-  padding: 0 8px 8px;
-  text-align: left;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 400;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .stock-table td {
-  padding: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
   /*
-   * 행에 붙은 .up/.down 클래스는 색을 상속시키므로 셀에서 본문색으로 되돌린다 —
-   * 등락 셀만 아래 규칙으로 다시 물들인다 (행 전체가 빨강/파랑이 되는 것을 막는다).
-   * A row's .up/.down class would tint every cell, so cells reset to the body colour and only the
-   * change cells are re-tinted below; this keeps whole rows from turning red or blue.
+   * 행에 붙은 .up/.down 클래스는 색을 상속시키므로 셀에서 본문색으로 되돌린다 — 등락 셀만 아래 규칙으로 다시
+   * 물들인다 (행 전체가 빨강/파랑이 되는 것을 막는다).
+   * A row's .up/.down class would tint every cell, so cells reset to the body colour and only the change cells are
+   * re-tinted below.
    */
   color: var(--text);
   white-space: nowrap;
 }
 
 .stock-table tbody tr {
-  border-top: 1px solid var(--bg);
   cursor: pointer;
 }
 
 .stock-table tbody tr:hover,
 .stock-table tbody tr:focus-visible {
-  background: var(--bg);
+  background: var(--panel-raised);
   outline: none;
 }
 
 .cell-number {
+  font-family: var(--font-mono);
   text-align: right;
 }
 
-.stock-table td.cell-symbol,
-.stock-table td.cell-price,
-.stock-table td.cell-name {
+.stock-table th.cell-number {
+  text-align: right;
+}
+
+.stock-table td.cell-symbol {
   color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.stock-table td.cell-price {
+  color: var(--text-strong);
+  font-weight: 700;
 }
 
 .stock-table tbody tr.up td.cell-signed {
@@ -538,6 +1335,23 @@ a {
   color: var(--down);
 }
 
+/* 등락률은 배지로 — 방향색의 연한 배경 위에 / The change percentage as a chip on a tint of its direction colour */
+.pct {
+  display: inline-block;
+  min-width: 64px;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  text-align: right;
+}
+
+tr.up .pct {
+  background: var(--up-soft);
+}
+
+tr.down .pct {
+  background: var(--down-soft);
+}
+
 /* 정렬 헤더는 버튼이다 (키보드 접근) / A sortable header is a button, for keyboard access */
 .th-sort {
   padding: 0;
@@ -545,6 +1359,8 @@ a {
   background: none;
   color: inherit;
   font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
   cursor: pointer;
 }
 
@@ -552,163 +1368,127 @@ a {
   color: var(--text-strong);
 }
 
+/* ── 뉴스 와이어 / News wire ── */
+.news-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.news-item {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+
+.news-item:hover {
+  background: var(--panel-raised);
+}
+
+.news-time {
+  padding-top: 1px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.news-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.news-title {
+  color: var(--text-strong);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.news-meta {
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+/* ── 가격 차트 (PRICE ACTION) / Price chart ── */
+.chart-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 12px;
+  margin-bottom: 8px;
+}
+
 /*
- * ── 가격 차트 / Price chart ──
- * lightweight-charts는 컨테이너의 박스를 읽어 캔버스를 만들므로 높이는 CSS가 정해야 한다
- * (폭은 ResizeObserver가 따라간다). 색은 canvas라 CSS가 닿지 않는다 — PriceChart가 토큰을 읽어 넘긴다.
- * lightweight-charts sizes its canvas from the container's box, so CSS must give it a height (a
- * ResizeObserver follows the width). Colours are out of CSS's reach on a canvas: PriceChart reads the
- * tokens and passes them in.
+ * OHLC 레전드 — 크로스헤어가 가리키는(없으면 마지막) 캔들의 값. 값 폭이 흔들려도 줄이 뛰지 않게 고정폭·한 줄.
+ * The OHLC legend for the hovered (else the last) candle; monospaced on one line so the row never jumps.
+ */
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  min-height: 18px;
+  margin-bottom: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.legend-item {
+  display: inline-flex;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.legend-key {
+  color: var(--text-dim);
+}
+
+.legend-value {
+  color: var(--text-strong);
+}
+
+/* 등락 값은 방향색 — 단일 `.up`보다 특정성이 높은 위 규칙을 넘어야 한다 / The change takes its direction colour, outranking the rule above */
+.legend-value.up {
+  color: var(--up);
+}
+
+.legend-value.down {
+  color: var(--down);
+}
+
+/*
+ * lightweight-charts는 컨테이너의 박스를 읽어 캔버스를 만들므로 높이는 CSS가 정해야 한다 (폭은 ResizeObserver가
+ * 따라간다). 색은 canvas라 CSS가 닿지 않는다 — PriceChart가 토큰을 읽어 넘긴다.
+ * lightweight-charts sizes its canvas from the container's box, so CSS must give it a height; colours are out of
+ * CSS's reach on a canvas, so PriceChart reads the tokens and passes them in.
  */
 .price-chart {
   width: 100%;
-  height: 360px;
+  height: 380px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 899px) {
   .price-chart {
     height: 280px;
   }
 }
 
-/*
- * ── 종목 상세 / Stock detail ──
- * 헤더(카드 밖) + 위젯 그리드 2열, 차트만 두 칸. 모바일은 1열 스택 (스펙 6.2 ② / 6.3).
- * A header outside any card plus a two-column widget grid where only the chart spans both; mobile stacks
- * into one column (spec 6.2 ② / 6.3).
- */
-.detail {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+/* ── 호가 (ORDER BOOK) / Order book ── */
+.orderbook-wrap {
+  padding: 6px 0 10px;
 }
 
-.detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  /* 카드가 행 높이에 맞춰 늘어나지 않게 한다 / Keep cards from stretching to the row's height */
-  align-items: start;
-}
-
-/* 두 칸을 차지하는 위젯 (차트) / A widget spanning both columns (the chart) */
-.detail-wide {
-  grid-column: 1 / -1;
-  min-width: 0;
-}
-
-@media (max-width: 900px) {
-  .detail-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .detail-wide {
-    grid-column: auto;
-  }
-}
-
-/* ── 종목 헤더 / Stock header ── */
-.detail-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 16px 24px;
-  padding: 4px 4px 0;
-}
-
-.detail-name {
-  margin: 0;
-  color: var(--text-strong);
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.detail-meta {
-  margin: 4px 0 0;
-  font-size: 13px;
-}
-
-.detail-quote {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 8px 12px;
-}
-
-/* 현재가는 화면에서 가장 큰 숫자다 (스펙: 28px bold) / The price is the largest number on the page (spec: 28px bold) */
-.detail-price {
-  margin: 0;
-  color: var(--text-strong);
-  font-size: 28px;
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.detail-change {
-  margin: 0;
-  font-size: 14px;
-}
-
-/* ── 1일 / 52주 범위 게이지 / The 1-day and 52-week range gauges ── */
-.detail-gauges {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  /* 좁아지면 헤더 폭을 다 쓰되 넓은 화면에서는 오른쪽에 붙는다 / Full width when narrow, right-aligned when wide */
-  flex: 1 1 320px;
-  max-width: 420px;
-}
-
-.range-gauge {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.range-label {
-  flex-shrink: 0;
-  width: 32px;
-}
-
-.range-low,
-.range-high {
-  flex-shrink: 0;
-  color: var(--text-strong);
-}
-
-.range-track {
-  position: relative;
-  height: 4px;
-  flex: 1;
-  border-radius: 999px;
-  background: var(--card);
-}
-
-/*
- * 현재가 표식 — `left`가 0%/100%일 때도 트랙 안에 남도록 자기 폭의 절반만큼 되돌린다.
- * The price marker; a half-width pull-back keeps it inside the track even at 0% and 100%.
- */
-.range-marker {
-  position: absolute;
-  top: 50%;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  transform: translate(-50%, -50%);
-}
-
-.range-empty {
-  color: var(--text);
-}
-
-/* ── 호가 / Order book ── */
 .orderbook {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1px;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -716,37 +1496,39 @@ a {
 
 .orderbook-row {
   display: grid;
-  grid-template-columns: 84px 1fr 68px;
+  grid-template-columns: 84px minmax(0, 1fr) 64px;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  padding: 0 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
 }
 
-/* 가격은 그 행의 방향색을 상속한다 (행에 붙은 .up/.down) / The price inherits the row's direction colour (its .up/.down class) */
+/* 가격은 그 행의 방향색을 상속한다 (행에 붙은 .up/.down) / The price inherits the row's direction colour */
 .orderbook-price {
-  text-align: right;
   font-weight: 700;
+  text-align: right;
 }
 
 .orderbook-track {
   overflow: hidden;
   height: 12px;
-  border-radius: 4px;
-  background: var(--bg);
+  border-radius: 2px;
 }
 
 /*
- * 막대는 양쪽 모두 왼쪽에서 자란다 — 시작점이 같아야 매도·매수 잔량의 길이를 눈으로 바로 비교할 수 있다
- * (막대의 존재 이유다). 어느 쪽인지는 색과 두 블록 사이의 경계선이 이미 말해 준다.
- * Both sides' bars grow from the left: a shared origin is what lets ask and bid depth be compared at a
- * glance, which is the whole point of a bar. Which side a row belongs to is already said by its colour and
- * by the rule between the two blocks.
+ * 막대는 양쪽 모두 왼쪽에서 자란다 — 시작점이 같아야 매도·매수 잔량을 눈으로 바로 비교할 수 있다. 어느 쪽인지는
+ * 색과 두 블록 사이의 현재가 행이 이미 말해 준다.
+ * Both sides' bars grow from the left: a shared origin is what lets ask and bid depth be compared at a glance;
+ * the colour and the last-price row between the blocks already say which side a row is.
  */
 .orderbook-fill {
   display: block;
   height: 100%;
+  border-radius: 2px;
   background: currentColor;
-  opacity: 0.35;
+  opacity: 0.3;
 }
 
 .orderbook-qty {
@@ -754,34 +1536,84 @@ a {
   text-align: right;
 }
 
-/*
- * 매도 블록과 매수 블록 사이에 경계를 둔다 (체결가 위치). 인접 형제 선택자를 쓰므로 한쪽만 온 호가에는
- * 경계가 생기지 않는다 — `:first-of-type`은 클래스가 아니라 요소 종류를 보므로 여기서는 쓸 수 없다.
- * A rule between the ask and bid blocks marks the last price. The adjacent-sibling selector means one-sided
- * data draws no rule; `:first-of-type` could not be used, as it looks at the element type, not the class.
- */
-.orderbook-row-ask + .orderbook-row-bid {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--bg);
+/* 매도 블록과 매수 블록 사이의 현재가 행 / The last-price row between the ask and bid blocks */
+.orderbook-mid {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 3px 0;
+  padding: 3px 10px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-raised);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
-/* ── 투자자 동향 / Investor flows ── */
+.orderbook-mid-label {
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.orderbook-mid-price {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 잔량 합계 — 두 합계와 매수 비중 막대 / Totals: both sums and the bid-share bar */
+.orderbook-totals {
+  margin-top: 8px;
+  padding: 8px 10px 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ob-total-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.ob-total-row .up,
+.ob-total-row .down {
+  font-weight: 700;
+}
+
+.ob-ratio {
+  display: flex;
+  overflow: hidden;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--down-soft);
+}
+
+.ob-ratio-fill {
+  display: block;
+  height: 100%;
+  background: var(--up);
+  opacity: 0.7;
+}
+
+/* ── 투자자 동향 (INVESTOR FLOW) / Investor flows ── */
 .investor-bars {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin: 0 0 16px;
+  gap: 6px;
+  margin: 0 0 12px;
   padding: 0;
   list-style: none;
 }
 
 .investor-bar {
   display: grid;
-  grid-template-columns: 52px 1fr 72px;
+  grid-template-columns: 44px minmax(0, 1fr) 72px;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .investor-name {
@@ -790,56 +1622,61 @@ a {
 
 .investor-track {
   overflow: hidden;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--bg);
+  height: 6px;
+  border-radius: 2px;
+  background: var(--panel-raised);
 }
 
 .investor-fill {
   display: block;
   height: 100%;
-  border-radius: 999px;
+  border-radius: 2px;
   background: currentColor;
 }
 
 .investor-value {
-  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 11px;
   font-weight: 700;
+  text-align: right;
 }
 
 .investor-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .investor-caption {
   margin-bottom: 6px;
-  color: var(--text);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
   text-align: left;
-  font-size: 12px;
+  text-transform: uppercase;
 }
 
 .investor-table th {
-  padding: 0 8px 6px;
-  text-align: left;
+  padding: 0 6px 5px;
+  color: var(--text-dim);
+  font-size: 10px;
   font-weight: 400;
+  letter-spacing: 0.06em;
+  text-align: left;
+  text-transform: uppercase;
   white-space: nowrap;
 }
 
 .investor-table td {
-  padding: 5px 8px;
-  border-top: 1px solid var(--bg);
+  padding: 4px 6px;
+  border-top: 1px solid var(--border);
   color: var(--text);
   white-space: nowrap;
 }
 
-/*
- * 순매수 셀만 방향색을 낸다. `.up`/`.down`(단일 클래스)은 위 `.investor-table td`보다 특정성이 낮아
- * 지므로 여기서 다시 못박는다 — F4가 `.stock-table`에 쓴 방식과 같다.
- * Only the net-flow cells take a direction colour. A bare `.up`/`.down` is less specific than
- * `.investor-table td` above, so it is restated here, the same way F4 does for `.stock-table`.
- */
+/* 순매수 셀만 방향색을 낸다 — 단일 클래스보다 특정성이 높은 위 규칙을 여기서 다시 못박는다 / Only the net-flow cells take a direction colour; restated to beat the cell rule above */
 .investor-table td.up {
   color: var(--up);
 }
@@ -848,101 +1685,23 @@ a {
   color: var(--down);
 }
 
-/*
- * ── 핵심 지표 6장 / The six fundamentals ──
- * 열 수를 명시한다 (auto-fit 금지): 이 그리드가 앉는 칸의 폭은 뷰포트에 따라 크게 달라지고
- * (데스크톱 반폭 → 900px 이하 전폭), auto-fit이면 넓은 칸에서 5열이 되어 6장이 5+1로 쪼개진다.
- * The column count is explicit, not auto-fit: the cell this grid sits in changes width sharply with the
- * viewport (half-width on desktop, full width below 900px), and auto-fit turns the wide case into five
- * columns, splitting the six cards into an ugly 5+1.
- */
-.fundamental-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.fundamental-label {
-  margin: 0 0 6px;
-  font-size: 12px;
-}
-
-.fundamental-value {
-  margin: 0;
-  color: var(--text-strong);
-  font-size: 17px;
-  font-weight: 700;
-}
-
-/* ── 기간수익률 / Period returns ── */
-.returns-row {
-  display: grid;
-  /* 4기간이 한 줄 (`.fundamental-grid`와 같은 이유로 열 수를 명시한다) / The four windows on one line; explicit for the same reason as `.fundamental-grid` */
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.returns-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.returns-label {
-  font-size: 12px;
-}
-
-.returns-value {
-  font-size: 16px;
-  font-weight: 700;
-}
-
-/*
- * 아주 좁은 화면에서는 6장/4기간을 2열로 접는다 — 3~4열에 "▲+272.26%"나 "평균 거래량"이 들어가지 않는다.
- * On a very narrow screen the six cards and the four windows fold to two columns: "▲+272.26%" and
- * "평균 거래량" do not fit in three or four.
- */
-@media (max-width: 560px) {
-  .fundamental-grid,
-  .returns-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-/* ── AI 분석 / AI analysis ── */
-.ai-button {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: 8px;
-  background: var(--accent);
-  color: var(--text-strong);
-  font: inherit;
-  font-weight: 700;
-  cursor: pointer;
-}
-
-.ai-button:disabled {
-  background: var(--bg);
-  color: var(--text);
-  cursor: default;
-}
-
+/* ── AI 리서치 / AI research ── */
 .ai-pending {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+}
+
+.ai-pending .empty {
+  padding: 0;
 }
 
 /*
  * 마크다운 본문 — 모델 출력이라 어떤 요소가 올지 모른다. 기본 여백만 정돈하고 색은 토큰으로 고정한다.
- * The markdown body; being model output, the element mix is unknown. Only the default spacing is tidied and
- * the colours are pinned to tokens.
+ * The markdown body; being model output, the element mix is unknown. Only the spacing is tidied and colours are tokens.
  */
 .markdown {
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1.65;
 }
 
@@ -966,36 +1725,45 @@ a {
 .markdown h2,
 .markdown h3,
 .markdown h4 {
-  margin: 20px 0 8px;
-  font-size: 15px;
+  margin: 18px 0 6px;
+  font-size: 13px;
+}
+
+.markdown h2::before,
+.markdown h3::before {
+  content: '▍';
+  margin-right: 4px;
+  color: var(--accent);
 }
 
 .markdown p,
 .markdown ul,
 .markdown ol {
-  margin: 0 0 12px;
+  margin: 0 0 10px;
 }
 
 .markdown ul,
 .markdown ol {
-  padding-left: 20px;
+  padding-left: 18px;
 }
 
 .markdown li {
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .markdown code {
   padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--bg);
-  font-size: 13px;
+  border-radius: 3px;
+  background: var(--panel-raised);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 .markdown pre {
   overflow-x: auto;
-  padding: 12px;
-  border-radius: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
   background: var(--bg);
 }
 
@@ -1004,73 +1772,65 @@ a {
   background: none;
 }
 
-/*
- * 표 — remark-gfm이 붙은 뒤부터 실제로 렌더된다 (그 전에는 파이프 줄이 문단이었다). 칸이 좁으면 숫자
- * 열이 붙어 읽히므로 격자를 그리고, 머리 행만 배경으로 눌러 준다. 색은 토큰만 쓴다.
- * Tables only render now that remark-gfm is wired in (the pipe lines used to be a paragraph). Narrow cells run
- * numbers together, so the grid is drawn and the header row alone is shaded. Colours come from tokens only.
- */
 .markdown table {
   width: 100%;
   margin: 8px 0 12px;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /*
- * `overflow-wrap: anywhere`가 없으면 끊을 수 없는 셀 내용(URL, `1,234,567,890원` 같은 긴 숫자열)이 표의
- * 최소 너비를 밀어올려 390px 화면에서 **페이지 전체가 가로로 밀린다** (실측: docScrollWidth 508 / 420 > 390).
- * 이 속성은 최소 내용 너비 계산에까지 적용되므로 표가 카드 안에 갇힌다 — 모델 출력이라 셀 내용을 통제할 수 없는
- * 자리에서 필요한 방어선이다.
- * Without `overflow-wrap: anywhere` an unbreakable cell (a URL, a long digit run like `1,234,567,890원`) raises
- * the table's minimum width and **pushes the whole page sideways** at 390px (measured: docScrollWidth 508 / 420
- * against a 390 viewport). The property applies to min-content sizing too, so the table stays inside the card -
- * the guard rail this spot needs, since the cells are model output and cannot be constrained upstream.
+ * `overflow-wrap: anywhere`가 없으면 끊을 수 없는 셀 내용(URL, 긴 숫자열)이 표의 최소 너비를 밀어올려 390px 화면에서
+ * 페이지 전체가 가로로 밀린다. 이 속성은 최소 내용 너비 계산에까지 적용되므로 표가 패널 안에 갇힌다 — 모델 출력이라
+ * 셀 내용을 통제할 수 없는 자리에서 필요한 방어선이다.
+ * Without `overflow-wrap: anywhere` an unbreakable cell (a URL, a long digit run) raises the table's minimum width
+ * and pushes the whole page sideways at 390px. The property applies to min-content sizing too, so the table stays
+ * inside the panel — the guard rail this spot needs, since the cells are model output.
  */
 .markdown th,
 .markdown td {
-  padding: 6px 10px;
-  border: 1px solid var(--bg);
+  padding: 5px 8px;
+  border: 1px solid var(--border);
   overflow-wrap: anywhere;
   text-align: left;
 }
 
 .markdown th {
-  background: var(--bg);
+  background: var(--panel-raised);
   color: var(--text-strong);
+  font-size: 11px;
 }
 
 .markdown blockquote {
-  margin: 0 0 12px;
-  padding-left: 12px;
-  border-left: 2px solid var(--bg);
+  margin: 0 0 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--accent);
+  color: var(--text);
 }
 
-/*
- * ── 기사 AI 분석 화면 / Article AI analysis screen ──
- * 읽는 화면이라 폭을 제한한다 — 1280px 전폭으로 늘어난 본문은 한 줄이 너무 길어 눈이 되돌아오지 못한다.
- * A reading screen, so the column is capped: at the shell's full 1280px a line runs too long to track back.
- */
+/* ── 기사 AI 분석 화면 / Article AI analysis screen ── */
+/* 읽는 화면이라 폭을 제한한다 — 전폭으로 늘어난 본문은 한 줄이 너무 길다 / A reading screen, so the column is capped */
 .article {
-  max-width: 860px;
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--ws-gap);
+  max-width: 860px;
+  margin: 0 auto;
 }
 
 .article-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 6px 2px;
 }
 
 .article-title {
   margin: 0;
   color: var(--text-strong);
-  font-size: 20px;
+  font-size: 17px;
   font-weight: 700;
   line-height: 1.4;
   /* 긴 URL이 제목 자리에 올 수 있다 (title 파라미터가 없을 때) / A long URL can stand in for the title */
@@ -1078,183 +1838,20 @@ a {
 }
 
 .article-source {
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-/*
- * 진행 표시는 AIPanel과 같은 한 줄(스피너 + 단계 문구)이므로 `.ai-pending`을 그대로 쓴다 — 두 단계를
- * 나열하던 세 줄 블록(`.article-steps`)은 서버가 단계를 알려주게 되면서 사라졌다.
- * Progress is the same single line as AIPanel's (spinner plus phase wording), so `.ai-pending` serves as is;
- * the three-line block that listed both stages (`.article-steps`) went away once the server began naming the
- * stage itself.
- */
-
-/* 안내 카드의 홈 링크 (잘못된 접근 / 404 / 에러 경계) / The home link on a notice card (bad entry, 404, error boundary) */
-.notice-back {
-  margin: 12px 0 0;
-  font-size: 13px;
-}
-
-/* ── 뉴스 피드 / News feed ── */
-.news-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  /* 사이드바가 화면보다 길어지지 않게 목록 안에서만 스크롤 — 상단 블록 몫은 오프셋 변수를 그대로 쓰고,
-     더한 116px는 목록 밖 크롬(main·카드 여백) 몫으로 실측으로 확정했다. 레이아웃이 바뀌면 다시 실측한다.
-     Scroll inside the list so the sidebar never outgrows the viewport: the top block's share reuses the offset
-     variable, and the added 116px for the chrome outside the list (the main and card padding) is settled by
-     measurement — re-measure it if the layout changes. */
-  max-height: calc(100vh - var(--app-top-clearance) - 116px);
-  overflow-y: auto;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.news-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px;
-  border-radius: 8px;
-  color: var(--text);
-}
-
-.news-item:hover {
-  background: var(--bg);
-}
-
-.news-title {
-  color: var(--text-strong);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.news-meta {
+  font-family: var(--font-mono);
   font-size: 11px;
-}
-
-/*
- * 상세 페이지의 종목 뉴스는 사이드바가 아니라 그리드 칸 안에 있으므로 뷰포트 기준 높이 제한을 쓰지 않는다
- * (최대 8건이라 목록이 길어지지 않는다).
- * The detail page's news sits in a grid cell rather than the sidebar, so the viewport-relative cap does not
- * apply (at most eight items, so the list never grows long).
- */
-.news-list-inline {
-  max-height: none;
-}
-
-@media (max-width: 900px) {
-  .news-list {
-    max-height: none;
-  }
-}
-
-/* ── 상단 sticky 블록 안의 경제지표 티커 바 / The economic-indicator ticker inside the top sticky block ── */
-.ticker-bar {
-  display: flex;
-  align-items: center;
-  overflow: hidden;
-  background: var(--card);
-  /*
-   * 스크롤 시 카드(--card)가 이 바 밑을 지나가는데, 그때 두 --card 면이 맞붙어 경계가 사라진다 —
-   * 페이지색 1px 선이 그 경계다 (뷰포트 확대로 다크·라이트 모두 확인). 반대로 아래가 페이지(--bg)일 때는
-   * 이 선이 배경에 묻히지만 --card 바와 --bg 페이지의 면 전환이 이미 경계를 그리므로 문제가 없다.
-   * `.app-nav`처럼 --card로 두면 정작 필요한 카드 위에서 보이지 않으므로 --bg가 맞다.
-   * As the page scrolls, cards (--card) pass under this bar, and there two --card surfaces would meet with no
-   * edge; the 1px page-coloured line is that edge (confirmed zoomed in, both themes). When the page (--bg) is
-   * what sits below instead, the line disappears into it — harmless, because the --card bar against the --bg
-   * page already draws the boundary. Mirroring `.app-nav`'s --card would vanish over cards, the case that
-   * needs it, so --bg is the right choice here.
-   */
-  border-bottom: 1px solid var(--bg);
-}
-
-/* 마키가 순환하는 영역 — 우측 시각 칩을 침범하지 않도록 칩과 flex로 나눈다.
-   세로 여백은 바가 아니라 이 둘이 나눠 갖는다 (칩의 구분선을 바 높이로 늘리기 위해 — 아래 참조).
-   The marquee viewport; flex keeps the crawl out of the right-side clock chip. The vertical padding lives on
-   these two children rather than on the bar, which is what lets the chip's divider span the bar (see below). */
-.ticker-viewport {
-  flex: 1;
-  overflow: hidden;
-  padding: 10px 0;
-}
-
-/* 우측 고정 업데이트 시각 칩 / The fixed right-side as-of clock chip */
-.ticker-clock {
-  flex: none;
-  /*
-   * 구분선이 바 높이 전체를 지나게 한다 — 바가 세로 패딩을 갖고 있던 동안 이 1px 선은 칩 글자 줄만큼
-   * (≈14px, 바는 36px) 짧은 토막이라 마키가 잘린 자리의 얼룩처럼 보였다. 칩이 스스로 늘어나 여백을
-   * 품으면 선이 크롤과 칩을 나누는 칸막이로 읽힌다.
-   * The divider spans the bar's full height: while the bar owned the vertical padding this 1px line was only
-   * as tall as the chip's line box (≈14px against a 36px bar) and read as a smudge where the marquee gets
-   * clipped. With the chip stretching and owning its padding, the line reads as the partition it is.
-   */
-  align-self: stretch;
-  display: flex;
-  align-items: center;
-  padding: 10px 14px;
-  font-size: 12px;
-  color: var(--text);
-  white-space: nowrap;
-  border-left: 1px solid var(--bg);
-}
-
-/*
- * 같은 목록 두 벌을 이어 붙인 트랙을 -50%까지 밀면 사본의 첫 항목이 원본의 첫 항목 자리에
- * 정확히 도달하므로 끊김 없이 순환한다 (TickerBar.tsx가 사본을 렌더한다).
- * The track holds two copies of the list, so sliding it to -50% lands the copy's first item exactly
- * where the original's was — a loop with no gap (TickerBar.tsx renders the copy).
- */
-.ticker-track {
-  display: flex;
-  width: max-content;
-  animation: ticker-scroll 40s linear infinite;
-}
-
-.ticker-group {
-  display: flex;
-}
-
-.ticker-item {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 0 18px;
-  font-size: 13px;
   white-space: nowrap;
 }
 
-.ticker-name {
-  color: var(--text);
-}
-
-.ticker-value {
-  color: var(--text-strong);
-  font-weight: 700;
-}
-
-@keyframes ticker-scroll {
-  from {
-    transform: translateX(0);
-  }
-
-  to {
-    transform: translateX(-50%);
-  }
-}
-
-/* 모션 최소화 설정에서는 자동 스크롤을 멈추고 손으로 넘기게 한다 / With reduced motion, stop the crawl and allow manual scrolling */
+/* ── 모션 최소화 / Reduced motion ── */
 @media (prefers-reduced-motion: reduce) {
-  .ticker-track {
+  .strip-track {
     animation: none;
   }
 
-  .ticker-viewport {
+  .strip-crawl {
     overflow-x: auto;
+    mask-image: none;
   }
 
   .spinner {

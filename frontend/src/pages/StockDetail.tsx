@@ -1,30 +1,24 @@
 /**
- * 종목 상세 `/stocks/:symbol` — 스펙 6.2 ②의 배치: Toss형 헤더 + 위젯 카드 그리드.
- * The stock detail page at `/stocks/:symbol`, laid out per spec 6.2 ②: a Toss-style header plus a grid of
- * widget cards.
+ * 종목 워크스페이스 `/stocks/:symbol` — 워치리스트 레일 · 중앙(헤더 → 차트 → AI 리서치 → 핵심지표/기간수익률 → 뉴스) ·
+ * 우측(호가 → 수급). 1280px 미만에서는 레일이 접히고, 900px 미만에서는 1열로 쌓인다.
+ * The stock workspace: a watchlist rail, the centre (header, chart, AI research, fundamentals/returns, news) and the
+ * side column (order book, investor flow). The rail folds below 1280px; below 900px everything stacks.
  *
- * 그리드는 2열이고 차트만 두 칸을 차지한다 (캔들은 폭이 있어야 읽힌다). 나머지는 호가 · 투자자 동향 ·
- * 핵심 지표 6장 · 기간수익률 · 종목 뉴스 · AI 분석이 각각 한 칸이다. 모바일에서는 1열로 쌓인다.
- * The grid is two columns wide and only the chart spans both (candles need width to read). The order book,
- * the investor panel, the six fundamentals, the period returns, the news and the AI panel each take one
- * cell. On mobile it stacks into a single column.
+ * **각 위젯이 자기 데이터를 가져간다.** 상세를 쓰는 넷(헤더 · 핵심 지표 · 기간수익률 · 이 페이지)은 쿼리 키
+ * `['stock', symbol]`을 공유하므로 요청은 한 번만 나가고, 한 위젯의 실패가 다른 위젯을 끌어내리지 않는다.
+ * **Every widget fetches its own data.** The four detail consumers share the `['stock', symbol]` key, so one request
+ * goes out and one widget's failure never drags another down.
  *
- * **각 위젯이 자기 데이터를 가져간다** (F4가 대시보드에 세운 관례). 상세를 쓰는 셋(헤더 · 핵심 지표 ·
- * 기간수익률)과 이 페이지는 쿼리 키 `['stock', symbol]`을 공유하므로 요청은 한 번만 나가고, 한 위젯의
- * 실패가 다른 위젯을 끌어내리지 않는다 (스펙 7: 위젯 단위 에러 + 재시도).
- * **Every widget fetches its own data**, the convention F4 set on the dashboard. The three detail-derived
- * widgets (header, fundamentals, returns) and this page share the query key `['stock', symbol]`, so exactly
- * one request goes out, and one widget's failure never drags another down (spec 7: per-widget errors with a
- * retry).
- *
- * 이 페이지가 훅을 부르는 유일한 이유는 **통화**다 — 차트 엔드포인트는 통화를 담지 않으므로 가격축의
- * 소수점 자리를 정하려면 상세의 `currency`를 차트에 넘겨야 한다 (`PriceChart`의 `currency` 프롭).
- * The page's own hook call exists for one reason: the **currency**. The chart endpoint carries none, so the
- * price axis's decimals depend on handing the detail's `currency` down (`PriceChart`'s `currency` prop).
+ * 이 페이지가 훅을 부르는 이유는 둘이다 — 차트 가격축의 **통화**와 워치리스트의 **시장**. 어느 쪽도 심볼 접미사로
+ * 추측하지 않는다 (백엔드의 시장 분류를 프론트에 복제하지 않기 위해).
+ * The page's own hook call serves two things: the chart axis's **currency** and the watchlist's **market**. Neither is
+ * guessed from the symbol suffix.
  */
 import { useParams } from 'react-router-dom'
 
 import { useStock } from '../api/queries.ts'
+import { Panel } from '../components/common/Panel.tsx'
+import { Spinner } from '../components/common/Spinner.tsx'
 import { AIPanel } from '../components/stock/AIPanel.tsx'
 import { FundamentalCards } from '../components/stock/FundamentalCards.tsx'
 import { InvestorPanel } from '../components/stock/InvestorPanel.tsx'
@@ -33,20 +27,13 @@ import { PriceChart } from '../components/stock/PriceChart.tsx'
 import { ReturnsRow } from '../components/stock/ReturnsRow.tsx'
 import { StockHeader } from '../components/stock/StockHeader.tsx'
 import { StockNews } from '../components/stock/StockNews.tsx'
+import { Watchlist } from '../components/stock/Watchlist.tsx'
 
 /**
- * 라우트 파라미터를 확인하고 본문에 넘긴다 / Check the route parameter and hand it to the body.
- *
- * 파라미터는 타입상 optional이다 (`useParams`는 어떤 라우트에서 불릴지 모른다). 실제로는
- * `/stocks/:symbol`에서만 렌더되므로 값이 있지만, 확인은 **훅을 부르기 전에** 끝내야 한다 —
- * 그래야 빈 심볼로 `/api/stocks/`를 두드리는 경로가 아예 생기지 않는다 (F2 훅에는 `enabled`가 없다).
- * 그래서 파라미터 확인과 데이터 소비를 두 컴포넌트로 나눈다.
- * 심볼에 점이 들어가는 것(`005930.KS`)은 react-router가 그대로 넘겨준다.
- * The parameter is optional in the type system (`useParams` cannot know which route calls it). In practice
- * this page only renders under `/stocks/:symbol`, so it is present — but the check has to finish **before any
- * hook runs**, so that no path exists that hits `/api/stocks/` with an empty symbol (the F2 hooks take no
- * `enabled` flag). Hence the split between checking the parameter and consuming the data. A dot inside the
- * symbol (`005930.KS`) passes through react-router untouched.
+ * 라우트 파라미터를 확인하고 본문에 넘긴다 — 확인은 **훅을 부르기 전에** 끝내야 빈 심볼로 `/api/stocks/`를 두드리는
+ * 경로가 생기지 않는다 (훅에는 `enabled`가 없다). 심볼의 점(`005930.KS`)은 react-router가 그대로 넘겨준다.
+ * Check the route parameter before any hook runs, so no path hits `/api/stocks/` with an empty symbol (the hooks take
+ * no `enabled` flag). A dot inside the symbol passes through react-router untouched.
  */
 export default function StockDetail() {
   const { symbol } = useParams<'symbol'>()
@@ -59,38 +46,46 @@ export default function StockDetail() {
 }
 
 function StockDetailBody({ symbol }: { symbol: string }) {
-  // 통화만 쓴다 — 로딩/실패 표시는 각 위젯이 스스로 한다 / Only the currency is read here; each widget shows its own loading and failure state
+  // 통화와 시장만 쓴다 — 로딩/실패 표시는 각 위젯이 스스로 한다 / Only the currency and market are read; each widget shows its own state
   const { data } = useStock(symbol)
 
   return (
-    <div className="detail">
-      <StockHeader symbol={symbol} />
+    <div className="ws ws-stock">
+      <aside className="ws-rail" aria-label="워치리스트">
+        {data === undefined ? (
+          <Panel eyebrow="WATCHLIST">
+            <Spinner />
+          </Panel>
+        ) : (
+          // 시장이 바뀌는 심볼 전환(US→KR)에는 레일을 다시 마운트해 초기 시장을 갱신한다 / A cross-market switch remounts the rail so its initial market follows
+          <Watchlist key={data.market} initialMarket={data.market} selected={symbol} />
+        )}
+      </aside>
 
-      <div className="detail-grid">
-        <div className="detail-wide">
-          <PriceChart symbol={symbol} currency={data?.currency} />
-        </div>
-        <OrderBook symbol={symbol} />
-        <InvestorPanel symbol={symbol} />
+      <div className="ws-center">
+        <StockHeader symbol={symbol} />
+        <PriceChart symbol={symbol} currency={data?.currency} />
         {/*
-          핵심 지표는 한 칸 안에서 6장이 자체 그리드로 접힌다 (`.fundamental-grid`) — 브리프가 두 칸을 준
-          위젯은 차트뿐이고, 그래야 위젯 8칸이 4행 2열로 빈 칸 없이 맞는다.
-          The six fundamentals fold into their own grid inside one cell (`.fundamental-grid`): the brief gives
-          two columns to the chart alone, and that is what makes the eight cells fill four rows with no gap.
-        */}
-        <FundamentalCards symbol={symbol} />
-        <ReturnsRow symbol={symbol} />
-        <StockNews symbol={symbol} />
-        {/*
-          AI 패널만 `key`로 심볼에 묶는다 — 다른 위젯은 react-query가 심볼별 키로 상태를 갈아 주지만, AI는
-          스트리밍 훅의 컴포넌트 상태(누적 텍스트·결과)를 들고 있어서 리마운트 없이는 이전 종목의 분석이 새
-          종목 화면에 남는다(뒤늦게 도착한 final이 새 심볼의 상태로 들어가는 경로도 같다).
-          Only the AI panel is tied to the symbol with a `key`: every other widget gets its state swapped by
-          react-query's per-symbol keys, while the AI panel holds the streaming hook's component state
-          (accumulated text and result), which without a remount would leave the previous symbol's analysis on
-          the new symbol's page — the same defect that lets a late final commit into the new symbol's state.
+          AI 리서치는 차트 바로 아래 넓은 열에 앉는다 — 마크다운(표 포함)은 320px 우측 열에서 읽기 어렵고, 첫 화면 안에
+          들어와야 기능이 발견된다. 이 패널만 `key`로 심볼에 묶는다: 다른 위젯은 react-query가 심볼별 키로 상태를 갈아
+          주지만, AI는 스트리밍 훅의 컴포넌트 상태(누적 텍스트·결과)를 들고 있어서 리마운트 없이는 이전 종목의 분석이 새
+          종목 화면에 남는다.
+          AI research sits right under the chart in the wide column: markdown (tables included) does not read in a 320px
+          side column, and the feature has to land above the fold to be discovered. Only this panel is tied to the symbol
+          with a `key`: every other widget gets its state swapped by react-query's per-symbol keys, while the AI panel
+          holds the streaming hook's component state.
         */}
         <AIPanel key={symbol} symbol={symbol} />
+        <div className="duo">
+          <FundamentalCards symbol={symbol} />
+          <ReturnsRow symbol={symbol} />
+        </div>
+        <StockNews symbol={symbol} />
+      </div>
+
+      <div className="ws-side">
+        <OrderBook symbol={symbol} />
+        <InvestorPanel symbol={symbol} />
       </div>
     </div>
   )

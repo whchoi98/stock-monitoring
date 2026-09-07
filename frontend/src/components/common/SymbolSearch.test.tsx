@@ -1,0 +1,162 @@
+/**
+ * SymbolSearch 테스트 — 포커스 전 무요청, 필터·키보드 선택·이동, 전역 단축키를 고정한다.
+ * SymbolSearch tests, pinning no request before focus, filtering, keyboard selection and navigation, and the
+ * global shortcuts.
+ *
+ * 유니버스 훅은 모킹한다 — 이 컴포넌트의 계약은 "훅에 enabled를 언제 넘기고, 돌려준 시세를 어떻게 고르게 하는가"다.
+ * The universe hook is mocked: the contract here is when `enabled` is handed to the hook and how the returned quotes
+ * are offered for selection.
+ */
+import { fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { useSymbolUniverse } from '../../api/queries.ts'
+import type { Quote } from '../../api/types.ts'
+import { SymbolSearch } from './SymbolSearch.tsx'
+
+vi.mock('../../api/queries.ts', () => ({ useSymbolUniverse: vi.fn() }))
+
+function quote(symbol: string, name: string, market: Quote['market'] = 'us'): Quote {
+  return {
+    symbol,
+    name,
+    price: 1,
+    change: 0,
+    change_pct: 0,
+    volume: 0,
+    market,
+    currency: market === 'kr' ? 'KRW' : 'USD',
+    sector: '',
+    market_cap: null,
+  }
+}
+
+const UNIVERSE = [
+  quote('AAPL', 'Apple'),
+  quote('AMZN', 'Amazon'),
+  quote('005930.KS', 'Samsung Electronics', 'kr'),
+]
+
+function Detail() {
+  const { symbol } = useParams()
+  return <p>상세 {symbol}</p>
+}
+
+function renderSearch() {
+  return render(
+    <MemoryRouter initialEntries={['/']}>
+      <Routes>
+        <Route path="/" element={<SymbolSearch />} />
+        <Route path="/stocks/:symbol" element={<Detail />} />
+      </Routes>
+    </MemoryRouter>,
+  )
+}
+
+const input = () => screen.getByRole('combobox', { name: '종목 검색' }) as HTMLInputElement
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: UNIVERSE, isLoading: false })
+})
+
+describe('SymbolSearch', () => {
+  it('포커스 전에는 유니버스를 요청하지 않는다 / never enables the universe before focus', () => {
+    renderSearch()
+    expect(vi.mocked(useSymbolUniverse)).toHaveBeenLastCalledWith(false)
+
+    fireEvent.focus(input())
+    expect(vi.mocked(useSymbolUniverse)).toHaveBeenLastCalledWith(true)
+  })
+
+  it('입력하면 순위대로 옵션을 보여주고 첫 옵션이 활성이다 / typing lists ranked options with the first active', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'a' } })
+
+    const options = screen.getAllByRole('option')
+    expect(options.map((o) => o.textContent)).toEqual(['AAPLAppleUS', 'AMZNAmazonUS', '005930.KSSamsung ElectronicsKR'])
+    expect(options[0]!.getAttribute('aria-selected')).toBe('true')
+    expect(input().getAttribute('aria-expanded')).toBe('true')
+    expect(input().getAttribute('aria-activedescendant')).toBe(options[0]!.id)
+  })
+
+  it('↓로 내려가고 Enter로 종목 화면에 간다 / ArrowDown moves, Enter opens the stock screen', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'a' } })
+    fireEvent.keyDown(input(), { key: 'ArrowDown' })
+
+    expect(screen.getAllByRole('option')[1]!.getAttribute('aria-selected')).toBe('true')
+
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    expect(screen.getByText('상세 AMZN')).toBeTruthy()
+  })
+
+  it('↑는 맨 위에서 맨 아래로 감싼다 / ArrowUp wraps from the top to the bottom', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'a' } })
+    fireEvent.keyDown(input(), { key: 'ArrowUp' })
+
+    expect(screen.getAllByRole('option')[2]!.getAttribute('aria-selected')).toBe('true')
+  })
+
+  it('옵션 클릭도 이동한다 / clicking an option navigates too', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: '005930' } })
+    fireEvent.click(screen.getByRole('option'))
+
+    expect(screen.getByText('상세 005930.KS')).toBeTruthy()
+  })
+
+  it('Esc는 먼저 입력을 지운다 / Escape clears the query first', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'aap' } })
+    fireEvent.keyDown(input(), { key: 'Escape' })
+
+    expect(input().value).toBe('')
+    expect(screen.queryByRole('listbox')).toBeNull()
+  })
+
+  it('일치가 없으면 빈 상태 문구, 로딩 중이면 로딩 문구 / empty and loading wording', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'zzz' } })
+    expect(screen.getByRole('status').textContent).toBe('일치하는 종목이 없습니다')
+
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [], isLoading: true })
+    fireEvent.change(input(), { target: { value: 'zzzz' } })
+    expect(screen.getByRole('status').textContent).toBe('종목 목록을 불러오는 중…')
+  })
+
+  it('⌘K / Ctrl+K / "/"가 입력에 포커스한다 / ⌘K, Ctrl+K and "/" focus the input', () => {
+    renderSearch()
+    expect(document.activeElement).not.toBe(input())
+
+    fireEvent.keyDown(window, { key: 'k', metaKey: true })
+    expect(document.activeElement).toBe(input())
+
+    input().blur()
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true })
+    expect(document.activeElement).toBe(input())
+
+    input().blur()
+    fireEvent.keyDown(window, { key: '/' })
+    expect(document.activeElement).toBe(input())
+  })
+
+  it('다른 입력에 글을 치는 중에는 "/"를 가로채지 않는다 / "/" is left alone while typing elsewhere', () => {
+    renderSearch()
+    const other = document.createElement('input')
+    document.body.appendChild(other)
+    other.focus()
+
+    fireEvent.keyDown(other, { key: '/' })
+    expect(document.activeElement).toBe(other)
+    other.remove()
+  })
+})

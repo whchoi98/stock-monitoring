@@ -8,6 +8,7 @@
  * defined here; never a hand-rolled setInterval.
  */
 import { useQuery } from '@tanstack/react-query'
+import { useMemo } from 'react'
 
 import { apiGet } from './client.ts'
 import type {
@@ -83,9 +84,47 @@ export function useOverview(): QueryResult<Overview> {
   return useEnvelopeQuery(['overview'], '/api/market/overview', QUOTE_POLL_MS)
 }
 
+/**
+ * 시세 쿼리의 키와 fetch — `useQuotes`와 `useSymbolUniverse`가 공유한다. 키가 같아야 시세 표·워치리스트·
+ * 검색이 한 캐시를 읽고, 요청도 한 번만 나간다.
+ * The quotes query's key and fetch, shared by `useQuotes` and `useSymbolUniverse`: one key means the table, the
+ * watchlist and the search read one cache and one request goes out.
+ */
+function quotesQuery(market: Market) {
+  return {
+    queryKey: ['quotes', market] as const,
+    queryFn: () => apiGet<Quote[]>(`/api/market/quotes?market=${market}`),
+  }
+}
+
 /** 한 시장의 시세 테이블 / One market's quote table */
 export function useQuotes(market: Market): QueryResult<Quote[]> {
-  return useEnvelopeQuery(['quotes', market], `/api/market/quotes?market=${market}`, QUOTE_POLL_MS)
+  const query = useQuery({ ...quotesQuery(market), refetchInterval: QUOTE_POLL_MS })
+  return unwrap(query.data, query.isLoading, query.error)
+}
+
+/** 검색용 종목 유니버스 (US + KR) / The symbol universe for search (US plus KR) */
+export interface SymbolUniverse {
+  quotes: Quote[]
+  isLoading: boolean
+}
+
+/**
+ * 종목 검색이 쓰는 두 시장의 시세 — `enabled`가 false인 동안에는 요청을 내지 않는다.
+ * The two markets' quotes for symbol search; while `enabled` is false no request goes out.
+ *
+ * 폴링 주기를 주지 않는다 — 검색은 신선한 가격이 필요 없다. 같은 키를 관찰하는 시세 표·워치리스트가 있으면
+ * 그쪽의 45초 폴링이 캐시를 갱신하고, 이 훅은 그 값을 그냥 읽는다 (react-query는 관찰자 중 가장 짧은 주기로 돈다).
+ * No polling interval here: search needs no fresh prices. When a table or watchlist observes the same key, its 45s
+ * poll refreshes the cache and this hook simply reads it (react-query polls at the shortest interval among observers).
+ */
+export function useSymbolUniverse(enabled: boolean): SymbolUniverse {
+  const us = useQuery({ ...quotesQuery('us'), enabled })
+  const kr = useQuery({ ...quotesQuery('kr'), enabled })
+  const usData = us.data?.data
+  const krData = kr.data?.data
+  const quotes = useMemo(() => [...(usData ?? []), ...(krData ?? [])], [usData, krData])
+  return { quotes, isLoading: us.isLoading || kr.isLoading }
 }
 
 /** 전체 뉴스 피드 / The whole news feed */

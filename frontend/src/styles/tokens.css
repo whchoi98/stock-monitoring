@@ -1,38 +1,92 @@
 /*
- * 디자인 토큰 (Toss Invest 실측 값) — 테마는 <html data-theme="dark|light">로만 전환한다.
+ * 디자인 토큰 — 터미널 디자인 언어 (ADR-001). 테마는 <html data-theme="dark|light">로만 전환한다.
  * 컴포넌트에서 색상 하드코딩 금지, 항상 이 변수를 사용.
- * Design tokens; theme switches only via <html data-theme="dark|light">.
- * Never hardcode colors in components — always use these variables.
+ * Design tokens for the terminal design language (ADR-001); the theme switches only via
+ * <html data-theme="dark|light">. Never hardcode colours in components — always use these variables.
+ *
+ * 등락색은 한국 관례(상승 빨강 / 하락 파랑)를 유지한다. 액센트는 앰버다: 하락색이 파랑이라 파란 액센트는
+ * "선택됨"과 "하락"을 같은 색축에 놓는다. `--ok`(초록)는 연결·장중 상태 점 전용이며 등락에는 쓰지 않는다.
+ * Price direction keeps the Korean convention (up red / down blue). The accent is amber: with blue as the
+ * down colour, a blue accent would put "selected" and "falling" on one axis. `--ok` (green) marks
+ * connection/open state only and never a price move.
  */
 
 /* 다크(기본) / Dark (default) */
 :root[data-theme='dark'] {
-  --bg: #101013;
-  --card: #17171C;
-  --up: #F5445A;
-  --down: #4391FF;
-  --accent: #3485FA;
-  --text: #C3C3C6;
-  --text-strong: #FFFFFF;
-  --radius: 16px;
+  --bg: #0b0e14;
+  --panel: #11151d;
+  --panel-raised: #171c26;
+  --border: #1e2533;
+  --border-strong: #2b3446;
+  --text: #a6afc0;
+  --text-dim: #6b7587;
+  --text-strong: #f2f5fa;
+  --accent: #f2a93b;
+  --accent-soft: rgb(242 169 59 / 14%);
+  --accent-ink: #14100a;
+  --ok: #2fb37a;
+  --up: #f5445a;
+  --down: #4391ff;
+  --up-soft: rgb(245 68 90 / 14%);
+  --down-soft: rgb(67 145 255 / 14%);
+  /* 차트 보조 시리즈 — 등락색·액센트와 겹치지 않는 축 / Chart overlays on axes that clash with neither price colours nor accent */
+  --chart-ma5: #e8edf5;
+  --chart-ma20: #f2a93b;
+  --chart-band: #9b8cff;
+  /* 거래량 막대는 캔들 방향의 연한 색 — canvas 파서용으로 쉼표 rgba 표기를 쓴다 / Volume bars in a tint of the candle's direction; comma rgba for the canvas parser */
+  --chart-vol-up: rgba(245, 68, 90, 0.35);
+  --chart-vol-down: rgba(67, 145, 255, 0.35);
+  --shadow: 0 8px 24px rgb(0 0 0 / 45%);
   color-scheme: dark;
 }
 
-/* 라이트 / Light */
+/* 라이트 — 종이 위의 터미널: 밀도는 같고 대비만 반전 / Light: the same density, contrast inverted */
 :root[data-theme='light'] {
-  --bg: #F4F5F8;
-  --card: #FBFCFD;
-  --up: #DE2B39;
-  --down: #2272EB;
-  --accent: #3182F6;
-  --text: #4E5968;
-  --text-strong: #191F28;
-  --radius: 16px;
+  --bg: #eef1f6;
+  --panel: #ffffff;
+  --panel-raised: #f4f6fa;
+  --border: #d9dee7;
+  --border-strong: #b9c2d0;
+  --text: #4b5565;
+  --text-dim: #7c8797;
+  --text-strong: #111827;
+  --accent: #b8720a;
+  --accent-soft: rgb(184 114 10 / 12%);
+  --accent-ink: #ffffff;
+  --ok: #1e8e5f;
+  --up: #de2b39;
+  --down: #2272eb;
+  --up-soft: rgb(222 43 57 / 12%);
+  --down-soft: rgb(34 114 235 / 12%);
+  --chart-ma5: #1f2937;
+  --chart-ma20: #b8720a;
+  --chart-band: #6e5bd6;
+  --chart-vol-up: rgba(222, 43, 57, 0.3);
+  --chart-vol-down: rgba(34, 114, 235, 0.3);
+  --shadow: 0 8px 24px rgb(17 24 39 / 12%);
   color-scheme: light;
 }
 
+/* 테마 무관 구조 토큰 / Structural tokens, theme-independent */
+:root {
+  --radius: 6px;
+  --radius-sm: 4px;
+  --font-sans: Pretendard, 'Noto Sans KR', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  /*
+   * 상단 sticky 블록(커맨드 바 44px + 마켓 스트립 40px + 경계 1px)과 하단 상태 바의 높이 — 내부 스크롤 영역이
+   * 뷰포트에 맞춰 최대 높이를 정할 때 쓴다. 실측으로 확정한 값이므로 상단 구성이 바뀌면 다시 측정한다.
+   * The heights of the top sticky block (command bar 44px + market strip 40px + 1px rule) and the bottom
+   * status bar, used by inner scroll areas to cap themselves to the viewport. Settled by measurement — re-measure
+   * whenever the top block changes.
+   */
+  --term-top-h: 85px;
+  --term-status-h: 28px;
+  --ws-gap: 8px;
+}
+
 /* 등락 색 — 한국 관례(상승 빨강/하락 파랑), 보합(정확히 0)은 본문색 */
-/* Korean convention: up red / down blue; flat (exactly 0) uses body color. */
+/* Korean convention: up red / down blue; flat (exactly 0) uses body colour. */
 .up {
   color: var(--up);
 }

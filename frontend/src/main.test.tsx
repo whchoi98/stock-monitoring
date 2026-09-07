@@ -80,10 +80,11 @@ it('index 라우트가 대시보드를 렌더한다 / the index route renders th
    * The router's first navigation is async (the index route's lazy module has to arrive first) and
    * RouterProvider renders nothing until then, so even the first assertion waits via findBy.
    */
-  const navLink = await screen.findByRole('link', { name: '대시보드' })
+  const navLink = await screen.findByRole('link', { name: '시장' })
   expect(navLink.getAttribute('href')).toBe('/')
-  expect(await screen.findByText('주요 지수')).toBeTruthy()
+  // 지수는 셸의 마켓 스트립에, 시세 표는 시장 워크스페이스에 / Indices in the shell's strip, the quote monitor in the workspace
   expect(await screen.findByText('S&P 500')).toBeTruthy()
+  expect(await screen.findByText('시장 요약 · 미국')).toBeTruthy()
   expect(await screen.findByText('미국 시세')).toBeTruthy()
   expect(await screen.findByText('Apple')).toBeTruthy()
 })
