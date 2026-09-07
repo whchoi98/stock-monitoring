@@ -196,13 +196,19 @@ MAX_QUESTION_LEN = 200
 _WHITESPACE_RUN = re.compile(r"\s+")
 
 
+# 꺾쇠는 전각으로 — 프롬프트의 `<question>` 울타리를 사용자 입력이 닫을 수 없게 한다 (리뷰 발견)
+# Angle brackets become full-width so user input can never close the prompt's `<question>` fence (review finding)
+_ANGLE_BRACKETS = str.maketrans({"<": "＜", ">": "＞"})
+
+
 def normalize_question(text: str) -> str:
     """
-    질문 정규화 — 제어문자 제거, 공백 접기, 앞뒤 공백 제거. 캐시 키와 프롬프트가 같은 문자열을 본다.
-    Normalise a question: drop control characters, collapse whitespace, trim. The cache key and the prompt see one string.
+    질문 정규화 — 제어문자 제거, 꺾쇠(`<`/`>`) 전각화, 공백 접기, 앞뒤 공백 제거. 캐시 키와 프롬프트가 같은 문자열을 본다.
+    Normalise a question: drop control characters, full-width the angle brackets, collapse whitespace, trim. The cache key
+    and the prompt see one string.
     """
     printable = "".join(ch for ch in text if ch.isprintable() or ch.isspace())
-    return _WHITESPACE_RUN.sub(" ", printable).strip()
+    return _WHITESPACE_RUN.sub(" ", printable.translate(_ANGLE_BRACKETS)).strip()
 
 
 class StockQuestionRequest(BaseModel):

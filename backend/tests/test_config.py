@@ -30,15 +30,22 @@ def test_names_and_sectors_cover_universe():
 
 
 def test_korean_names_cover_universe():
-    """모든 종목에 한글 종목명이 있고 대표 종목의 표기가 맞는지 검증 / Every stock has a Korean name; spot-check the wording."""
+    """
+    모든 종목에 한글명 후보가 있고, 내보내는 `STOCK_NAMES_KO`에는 한글 음절이 있는 이름만 남는다.
+    Every stock has a Korean-name candidate; the exported `STOCK_NAMES_KO` keeps only names that contain Hangul.
+    """
+    candidates = {**config.US_STOCK_NAMES_KO, **config.KR_STOCK_NAMES_KO}
     for symbol in config.US_STOCKS + config.KR_STOCKS:
-        assert symbol in config.STOCK_NAMES_KO, f"Stock {symbol} missing in STOCK_NAMES_KO"
-        assert config.STOCK_NAMES_KO[symbol].strip(), f"Stock {symbol} has a blank Korean name"
+        assert symbol in candidates, f"Stock {symbol} missing a Korean-name candidate"
+        assert candidates[symbol].strip(), f"Stock {symbol} has a blank Korean name"
     assert config.STOCK_NAMES_KO["005930.KS"] == "삼성전자"
     assert config.STOCK_NAMES_KO["247540.KQ"] == "에코프로비엠"
     assert config.STOCK_NAMES_KO["AAPL"] == "애플"
-    # 관용적 한글 표기가 없는 종목은 영문 표기를 그대로 둔다 / Names without a customary Korean form keep the Latin one
-    assert config.STOCK_NAMES_KO["030200.KS"] == "KT"
+    # 라틴 폴백(KT, LG, KLA…)은 영문명과 중복이라 내보내지 않는다 — 검색은 영문명으로 이미 맞는다
+    # Latin fallbacks (KT, LG, KLA…) would duplicate the Latin name and are not exported; search already matches by name
+    for symbol in ("030200.KS", "003550.KS", "KLAC", "AMD"):
+        assert symbol not in config.STOCK_NAMES_KO, f"{symbol} has no Hangul and must not be exported"
+    assert all(any("\uac00" <= ch <= "\ud7a3" for ch in name) for name in config.STOCK_NAMES_KO.values())
 
 
 def test_constants_present():

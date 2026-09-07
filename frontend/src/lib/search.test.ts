@@ -33,6 +33,7 @@ const UNIVERSE: Quote[] = [
   quote('207940.KS', 'Samsung Biologics', 'kr', '삼성바이오로직스'),
   quote('035420.KS', 'NAVER', 'kr', '네이버'),
   quote('000660.KS', 'SK Hynix', 'kr', 'SK하이닉스'),
+  quote('LLY', 'Eli Lilly', 'us', '일라이 릴리'),
 ]
 
 describe('searchSymbols', () => {
@@ -93,6 +94,21 @@ describe('searchSymbols', () => {
     expect(searchSymbols(UNIVERSE, 'ㅅㅅ').map((q) => q.symbol)).toEqual(['005930.KS', '006400.KS', '207940.KS'])
     // 'ㅎㅇㄴㅅ'는 SK하이닉스의 초성열 안에 있다 (접두는 아니다) / 'ㅎㅇㄴㅅ' sits inside SK하이닉스's initials, not at the start
     expect(searchSymbols(UNIVERSE, 'ㅎㅇㄴㅅ').map((q) => q.symbol)).toEqual(['000660.KS'])
+  })
+
+  it('공백이 든 한글명도 초성·부분 음절로 찾는다 (리뷰 발견) / Korean names with spaces match by initials and partial syllables (review finding)', () => {
+    expect(searchSymbols(UNIVERSE, 'ㅁㅌㅍㄹㅍㅅ').map((q) => q.symbol)).toEqual(['META'])
+    expect(searchSymbols(UNIVERSE, 'ㅁㅌ ㅍㄹㅍㅅ').map((q) => q.symbol)).toEqual(['META'])
+    expect(searchSymbols(UNIVERSE, '메타플').map((q) => q.symbol)).toEqual(['META'])
+    expect(searchSymbols(UNIVERSE, 'ㅇㄹㅇㄹㄹ').map((q) => q.symbol)).toEqual(['LLY'])
+    expect(searchSymbols(UNIVERSE, '릴리').map((q) => q.symbol)).toEqual(['LLY'])
+  })
+
+  it('IME 조합 중인 혼합 질의도 결과를 유지한다 / a mid-composition mixed query keeps its results', () => {
+    // '삼성'을 치는 동안 입력값은 삼 → 삼ㅅ → 삼서 → 삼성으로 바뀐다 / Typing 삼성 passes through 삼, 삼ㅅ, 삼서, 삼성
+    expect(searchSymbols(UNIVERSE, '삼ㅅ').map((q) => q.symbol)).toEqual(['005930.KS', '006400.KS', '207940.KS'])
+    expect(searchSymbols(UNIVERSE, '삼성ㅈ').map((q) => q.symbol)).toEqual(['005930.KS'])
+    expect(searchSymbols(UNIVERSE, 'skㅎ').map((q) => q.symbol)).toEqual(['000660.KS'])
   })
 
   it('한글 종목명이 없는 종목은 영문으로만 맞는다 / a quote without a Korean name matches by Latin name only', () => {

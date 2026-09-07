@@ -15,7 +15,7 @@ Stock monitoring SPA laid out as a terminal workspace (ADR-001), served by the F
 ```bash
 cd frontend
 npm run dev            # dev 서버 (백엔드는 make run으로 :8000)
-npx vitest run         # 테스트 292개 (colocated *.test.tsx / *.test.ts)
+npx vitest run         # 테스트 301개 (colocated *.test.tsx / *.test.ts)
 npx oxlint             # 린트
 npx tsc -b             # 타입 체크 (build:deploy는 tsc를 생략한다)
 npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 배포 산출물)

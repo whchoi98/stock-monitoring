@@ -173,3 +173,9 @@ def test_symbol_is_normalized_to_the_universe_form(client, state, services):
 
     assert services.calls["fetch_detail"] == 1
     assert list(state.cache.l1.store) == [f"detail:{US_SYMBOL}"]
+
+
+def test_detail_carries_the_korean_name(client):
+    """상세 응답에 한글 종목명이 실린다 — 검색·헤더가 이 필드를 읽는다 / The detail carries the Korean name the search and header read."""
+    body = client.get("/api/stocks/AAPL").json()
+    assert body["data"]["name_ko"] == "애플"

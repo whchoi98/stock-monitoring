@@ -93,6 +93,18 @@ describe('ema / macd', () => {
     expect(out.macd).toHaveLength(50)
   })
 
+  it('시그널·히스토그램은 34개부터, 33개에서는 없다 (패널 안내 임계값) / signal and histogram appear at 34 candles, not 33 (the pane notice threshold)', () => {
+    const rising = (n: number) => Array.from({ length: n }, (_, i) => 100 + i)
+    const short = macd(rising(33))
+    expect(short.signal.every((v) => v === null)).toBe(true)
+    expect(short.histogram.every((v) => v === null)).toBe(true)
+    const enough = macd(rising(34))
+    expect(enough.signal.filter((v) => v !== null)).toHaveLength(1)
+    expect(enough.histogram.filter((v) => v !== null)).toHaveLength(1)
+    // MACD 선 자체는 26개부터 / The MACD line itself starts at 26
+    expect(macd(rising(26)).macd.filter((v) => v !== null)).toHaveLength(1)
+  })
+
   it('EMA 씨앗은 앞 period개의 단순 평균이다 / the EMA seed is the simple mean of the first period values', () => {
     const out = ema([1, 2, 3, 4], 3)
     expect(out).toEqual([null, null, 2, expect.closeTo(3, 10)])

@@ -240,5 +240,20 @@ describe('AIPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: '다시 시도' }))
 
     expect(analyze).toHaveBeenCalledTimes(1)
+    expect(analyze).toHaveBeenCalledWith()
+  })
+
+  it('질문 뒤의 재시도는 같은 질문을 다시 보낸다 / a retry after a question re-sends that question', () => {
+    renderPanel()
+    fireEvent.click(screen.getByRole('button', { name: '가장 큰 리스크는 무엇인가요?' }))
+    expect(analyze).toHaveBeenLastCalledWith({ question: '가장 큰 리스크는 무엇인가요?' })
+
+    // 같은 마운트에서 실패가 도착한다 / The failure lands on the same mount
+    vi.mocked(useStockAIStream).mockReturnValue(stream({ error: new ApiError(500, 'ai_failed') }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'AI 질문' }), { target: { value: 'x' } })
+    fireEvent.click(screen.getByRole('button', { name: '다시 시도' }))
+
+    expect(analyze).toHaveBeenCalledTimes(2)
+    expect(analyze).toHaveBeenLastCalledWith({ question: '가장 큰 리스크는 무엇인가요?' })
   })
 })

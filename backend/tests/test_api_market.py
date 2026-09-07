@@ -277,3 +277,10 @@ def test_upstream_failure_is_503_and_marks_source_degraded(client, services, sta
     assert response.status_code == 503
     assert state.source_status["yahoo"] == "degraded"
     assert client.get("/api/health").json()["sources"]["yahoo"] == "degraded"
+
+
+def test_quotes_carry_the_korean_name_field(client):
+    """시세 행마다 `name_ko` 필드가 실린다 (유니버스 밖이면 null) / Every quote row carries `name_ko` (null outside the universe)."""
+    rows = client.get("/api/market/quotes", params={"market": "us"}).json()["data"]
+    assert rows
+    assert all("name_ko" in row for row in rows)

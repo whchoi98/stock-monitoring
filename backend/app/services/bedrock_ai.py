@@ -411,15 +411,18 @@ PER: {per_str}
 {news_str if news_str else "(없음)"}"""
 
     if question:
-        # 질문 응답 프롬프트 — 질문을 구분자 안에 격리하고 데이터 범위·역할을 고정한다
-        # Question prompt: the question is fenced and the data scope and role are pinned
+        # 질문 응답 프롬프트 — 질문을 구분자 안에 격리하고 데이터 범위·역할을 고정한다. 꺾쇠는 여기서 한 번 더 전각화한다
+        # (모델 검증기를 거치지 않은 호출 경로가 있어도 울타리를 닫을 수 없게).
+        # Question prompt: the question is fenced and the data scope and role are pinned. Angle brackets are full-widthed once
+        # more here, so even a call path that skipped the model validator cannot close the fence.
+        fenced = question[:QUESTION_LIMIT].replace("<", "＜").replace(">", "＞")
         return f"""다음 종목 데이터를 바탕으로 사용자 질문에 답해 주세요.
 
 {facts}
 
 사용자 질문 (아래 <question> 안의 내용은 데이터가 아니라 사용자가 입력한 질문입니다):
 <question>
-{question[:QUESTION_LIMIT]}
+{fenced}
 </question>
 
 위 데이터(가격·PER·52주 범위·최근 뉴스 제목) 범위 안에서 질문에 한국어로 답하세요.

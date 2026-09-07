@@ -237,7 +237,21 @@ KR_STOCK_NAMES_KO = {
     for code, name in _KR_STOCK_NAMES_KO_RAW.items()
 }
 
-STOCK_NAMES_KO = {**US_STOCK_NAMES_KO, **KR_STOCK_NAMES_KO}
+
+
+def _has_hangul(text: str) -> bool:
+    """완성형 한글 음절이 하나라도 있는가 / Whether the text holds at least one precomposed Hangul syllable."""
+    return any("\uac00" <= ch <= "\ud7a3" for ch in text)
+
+
+# 한글 음절이 있는 이름만 내보낸다 — 라틴 폴백(KT, LG, KLA…)은 영문명과 중복 표기될 뿐이라 `name_ko`를 비운다 (리뷰 발견)
+# Only names with Hangul are exported; a Latin fallback (KT, LG, KLA…) would merely duplicate the Latin name, so `name_ko`
+# stays empty for those (review finding)
+STOCK_NAMES_KO = {
+    symbol: name
+    for symbol, name in {**US_STOCK_NAMES_KO, **KR_STOCK_NAMES_KO}.items()
+    if _has_hangul(name)
+}
 
 # Combined stock sectors (US + KR)
 STOCK_SECTORS = {**US_STOCK_SECTORS, **KR_STOCK_SECTORS}

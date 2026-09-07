@@ -121,9 +121,15 @@ const PRICE_AXIS_WIDTH = 80
 
 const RSI_PERIOD = 14
 
-/** 보조 패널이 값을 하나라도 갖기 위한 최소 캔들 수 — 모자라면 패널 위에 안내를 띄운다 / Minimum candles for a sub-pane to hold a value; below that a notice overlays the pane */
+/**
+ * 보조 패널이 완전한 값을 갖기 위한 최소 캔들 수 — 모자라면 패널 위에 안내를 띄운다. RSI는 첫 값이 index 14(15개), MACD는
+ * 시그널·히스토그램의 첫 값이 index 25+8=33(34개)이다 (`indicators.test.ts`가 고정한다).
+ * Minimum candles for a sub-pane to hold complete values; below that a notice overlays the pane. RSI's first value is at
+ * index 14 (15 candles); MACD's signal and histogram first appear at index 25+8=33 (34 candles), as pinned by
+ * `indicators.test.ts`.
+ */
 const RSI_MIN_CANDLES = RSI_PERIOD + 1
-const MACD_MIN_CANDLES = 26 + 9
+const MACD_MIN_CANDLES = 26 + 9 - 1
 
 /** 차트에 넘길 스타일 값 — 전부 CSS 토큰에서 읽는다 / The style values handed to the chart, all read from CSS tokens */
 interface ChartStyles {
