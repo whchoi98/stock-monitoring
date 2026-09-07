@@ -6,16 +6,16 @@ Stock monitoring SPA laid out as a terminal workspace (ADR-001), served by the F
 
 ## 구조 / Key Files
 - `src/api/` — `client.ts`(fetch 래퍼), `queries.ts`(**서버 데이터는 @tanstack/react-query 훅으로만**; `useSymbolUniverse(enabled)`는 검색용 두 시장 시세, 키 공유·enabled 게이트), `aiStream.ts`+`lib/sse.ts`(**유일한 예외**: 두 AI 엔드포인트는 SSE `phase`→`delta`*→`final`이라 fetch 직접 사용), `types.ts`(백엔드 `app/models.py` 응답 형태와 일치 유지).
-- `src/components/common/` — `Panel`(모든 위젯의 껍데기: eyebrow·제목·액션·`flush`), `Stat`, `MarketStrip`(지수 셀 + 지표 크롤), `SymbolSearch`(⌘K 콤보박스), `StatusBar`/`MarketStatus`/`Clock`, `MarketTabs`, `NewsList`(뉴스 행 공용), `ChangeText`, `ThemeToggle`, 배지, `ErrorCard`, `Spinner`.
-- `src/components/market/` — `MarketPulse`, `SectorBars`, `StockTable`(QUOTE MONITOR), `NewsFeed`. `src/components/stock/` — `Watchlist`, `StockHeader`, `PriceChart`, `OrderBook`, `InvestorPanel`, `FundamentalCards`, `ReturnsRow`, `StockNews`, `AIPanel`, `Week52Bar`.
-- `src/components/stock/chartData.ts`, `indicators.ts` — 차트 순수 함수 (변환 / 볼린저·캔들 요약). 직접 단위 테스트 대상.
-- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위), `markets`, `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
+- `src/components/common/` — `Panel`(모든 위젯의 껍데기: eyebrow·제목·액션·`flush`·`id`로 접기), `Stat`, `MarketStrip`(지수 셀 + 지표 크롤), `SymbolSearch`(⌘K 콤보박스), `StatusBar`/`MarketStatus`/`Clock`, `ScopeTabs`(미국/한국/★관심), `StarButton`, `AlertsWatcher`(가격 알림 판정 + 토스트), `NewsList`(뉴스 행 공용), `ChangeText`, `ThemeToggle`, 배지, `ErrorCard`, `Spinner`.
+- `src/components/market/` — `MarketPulse`, `SectorBars`, `MacroPanel`, `StockTable`(QUOTE MONITOR, 스코프·★), `NewsFeed`(언어 탭·키워드 필터). `src/components/stock/` — `Watchlist`, `StockHeader`(★·`AlertForm`), `PriceChart`(1W~5Y, MA/BOLL/VOL/LVL + RSI·MACD 보조 패널, 캔들/표 뷰), `CandleTable`, `OrderBook`, `InvestorPanel`, `FundamentalCards`, `ReturnsRow`, `StockNews`, `AIPanel`, `Week52Bar`.
+- `src/components/stock/chartData.ts`, `indicators.ts` — 차트 순수 함수 (변환 / 볼린저·RSI·EMA·MACD·캔들 요약). 직접 단위 테스트 대상.
+- `src/pages/`, `src/lib/`(`format`, `clock`, `search`(종목 검색 순위), `markets`(`QuoteScope`), `scopedQuotes`, `newsFilter`, `localStore` + `watchlistStore`/`alertsStore`/`panelStore`(브라우저 전용 사용자 상태), `aiMessages`, `articleLink`, `sse`), `src/styles/`(`tokens.css` 디자인 토큰, `global.css`).
 
 ## 명령 / Commands
 ```bash
 cd frontend
 npm run dev            # dev 서버 (백엔드는 make run으로 :8000)
-npx vitest run         # 테스트 225개 (colocated *.test.tsx / *.test.ts)
+npx vitest run         # 테스트 280개 (colocated *.test.tsx / *.test.ts)
 npx oxlint             # 린트
 npx tsc -b             # 타입 체크 (build:deploy는 tsc를 생략한다)
 npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 배포 산출물)
@@ -30,6 +30,8 @@ npm run build:deploy   # vite build --outDir ../backend/static (emptyOutDir — 
 - **한국 관례 색상**: 상승 = 빨강(`--up`), 하락 = 파랑(`--down`). 서구권 관례(green/red)로 바꾸지 않는다. 액센트는 앰버(`--accent`), `--ok`(초록)는 상태 점 전용.
 - **숫자·심볼·시각은 고정폭**(`--font-mono`, JetBrains Mono latin 서브셋), 본문은 Pretendard. AI 응답 렌더링은 react-markdown + `remark-gfm`(표) — 스타일은 `global.css`의 `.markdown`.
 - **컴포넌트 파일은 컴포넌트만 export** (oxlint `react/only-export-components`) — 상수는 `lib/`로 (예: `lib/markets.ts`).
+- **사용자 상태는 localStorage 스토어로만** (`lib/localStore.ts` → `createLocalStore` + `useLocalStore`): 읽기 실패는 fallback, 쓰기 실패는 세션 메모리. 서버 상태가 아니므로 react-query에 넣지 않는다. 관심·알림은 공유 키 `['quotes', market]`(`useSymbolUniverse(enabled)`)만 읽는다 — 새 폴링을 만들지 말 것.
+- **`attributionLogo`는 보조 패널(RSI/MACD)에서도 끄지 않는다** — 라이선스 가드 테스트가 소스를 검사한다.
 
 ## 주의 / Gotchas
 - `build:deploy`는 `../backend/static`을 **비우고** 다시 쓴다 — 백엔드 static에 수동 파일을 두지 말 것.

@@ -90,6 +90,7 @@ export function OrderBook({ symbol }: OrderBookProps) {
 
   return (
     <Panel
+      id="order-book"
       eyebrow="ORDER BOOK"
       title="호가"
       action={

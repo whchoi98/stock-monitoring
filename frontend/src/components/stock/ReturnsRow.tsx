@@ -65,7 +65,7 @@ export function ReturnsRow({ symbol }: ReturnsRowProps) {
   const returns = data?.returns ?? null
 
   return (
-    <Panel eyebrow="RETURNS" title="기간수익률" action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="returns" eyebrow="RETURNS" title="기간수익률" action={<AsOfBadge asOf={asOf} />}>
       {isLoading || data === undefined ? (
         <Spinner />
       ) : (

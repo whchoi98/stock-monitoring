@@ -2,12 +2,31 @@
  * StatusBar 테스트 — 폴링 문구가 상수에서 오는 것과 기준 시각 칩의 유무를 못박는다.
  * StatusBar tests, pinning that the polling wording comes from the constants and when the as-of chip shows.
  */
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { beforeEach, describe, expect, it } from 'vitest'
 
+import { addAlert, alertsStore } from '../../lib/alertsStore.ts'
+import { panelStore, togglePanel } from '../../lib/panelStore.ts'
 import { StatusBar } from './StatusBar.tsx'
 
+beforeEach(() => {
+  localStorage.clear()
+  alertsStore.reload()
+  panelStore.reload()
+})
+
 describe('StatusBar', () => {
+  it('대기 알림 수를 보이고, 접힌 패널이 있으면 초기화 버튼이 전부 펼친다 / shows pending alerts; the reset button expands collapsed panels', () => {
+    addAlert('AAPL', 330, 320)
+    togglePanel('order-book')
+    render(<StatusBar marketOpen={true} />)
+
+    expect(screen.getByText('알림 1')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '레이아웃 초기화' }))
+    expect(panelStore.get()).toEqual({})
+    expect(screen.queryByRole('button', { name: '레이아웃 초기화' })).toBeNull()
+  })
+
   it('출처·폴링 주기·시뮬레이션 안내·시계를 렌더한다 / renders source, cadence, simulation notice and clock', () => {
     render(<StatusBar marketOpen={true} />)
     expect(screen.getByText('Yahoo Finance')).toBeTruthy()

@@ -58,7 +58,7 @@ const input = () => screen.getByRole('combobox', { name: '종목 검색' }) as H
 
 beforeEach(() => {
   vi.clearAllMocks()
-  vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: UNIVERSE, isLoading: false })
+  vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: UNIVERSE, isLoading: false, error: null })
 })
 
 describe('SymbolSearch', () => {
@@ -128,7 +128,7 @@ describe('SymbolSearch', () => {
     fireEvent.change(input(), { target: { value: 'zzz' } })
     expect(screen.getByRole('status').textContent).toBe('일치하는 종목이 없습니다')
 
-    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [], isLoading: true })
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [], isLoading: true, error: null })
     fireEvent.change(input(), { target: { value: 'zzzz' } })
     expect(screen.getByRole('status').textContent).toBe('종목 목록을 불러오는 중…')
   })

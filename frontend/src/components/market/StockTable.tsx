@@ -1,26 +1,30 @@
 /**
- * 시세 표 (QUOTE MONITOR) — 한 시장의 종목을 컬럼 정렬 가능한 밀집 표로, 행을 누르면 종목 화면으로.
- * The quote monitor: one market's stocks as a dense, column-sortable table whose rows open the stock screen.
+ * 시세 표 (QUOTE MONITOR) — 한 스코프(미국 / 한국 / ★관심)의 종목을 컬럼 정렬 가능한 밀집 표로, 행을 누르면 종목 화면으로.
+ * The quote monitor: one scope's stocks (US / KR / ★watch) as a dense, column-sortable table whose rows open the stock
+ * screen.
  *
- * 정렬은 로컬 state다 (서버 재조회 없음). 초기 상태는 "정렬 없음" — 백엔드가 준 순서를 그대로 보여준다.
- * 시장 토글은 패널 머리에 앉는다 — 시장 화면이 `onMarketChange`를 넘길 때만 렌더된다 (표 자체는 시장을 소유하지 않는다).
- * Sorting is local state with no refetch; the initial state is "unsorted". The market toggle sits in the panel head
- * and renders only when the market screen passes `onMarketChange` (the table itself owns no market).
+ * 정렬은 로컬 state다 (서버 재조회 없음). 초기 상태는 "정렬 없음" — 백엔드가 준 순서(관심 스코프는 저장 순서)를 그대로 보여준다.
+ * 스코프 토글은 패널 머리에 앉는다 — 시장 화면이 `onScopeChange`를 넘길 때만 렌더된다 (표 자체는 스코프를 소유하지 않는다).
+ * 첫 열의 ★는 관심 종목 토글이며 행 이동과 분리된다.
+ * Sorting is local state with no refetch; the initial state is "unsorted" (the watch scope keeps stored order). The scope
+ * toggle sits in the panel head and renders only when the market screen passes `onScopeChange`. The first column's ★
+ * toggles the watchlist, separately from row navigation.
  */
 import { useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
-import { useQuotes } from '../../api/queries.ts'
-import type { Market, Quote } from '../../api/types.ts'
+import type { Quote } from '../../api/types.ts'
 import { changeClass, formatMarketCap, formatPct, formatPrice, formatVolume } from '../../lib/format.ts'
+import { MARKET_LABEL, type QuoteScope } from '../../lib/markets.ts'
+import { useScopedQuotes } from '../../lib/scopedQuotes.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { ChangeText } from '../common/ChangeText.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
-import { MARKET_LABEL } from '../../lib/markets.ts'
-import { MarketTabs } from '../common/MarketTabs.tsx'
 import { Panel } from '../common/Panel.tsx'
+import { ScopeTabs } from '../common/ScopeTabs.tsx'
 import { Spinner } from '../common/Spinner.tsx'
+import { StarButton } from '../common/StarButton.tsx'
 
 /** 문자로 정렬하는 컬럼 / Columns sorted as text */
 type TextKey = 'symbol' | 'name'
@@ -58,31 +62,35 @@ function compare(a: Quote, b: Quote, column: Column): number {
   return (a[column.key] ?? Number.NEGATIVE_INFINITY) - (b[column.key] ?? Number.NEGATIVE_INFINITY)
 }
 
-export interface StockTableProps {
-  /** 표시할 시장 / The market to show */
-  market: Market
-  /** 시장 토글 — 넘기면 패널 머리에 토글이 생긴다 / The market toggle; passing it puts the toggle in the panel head */
-  onMarketChange?: (market: Market) => void
+function titleOf(scope: QuoteScope): string {
+  return scope === 'watch' ? '관심 종목' : `${MARKET_LABEL[scope]} 시세`
 }
 
-export function StockTable({ market, onMarketChange }: StockTableProps) {
-  const { data, asOf, isLoading, error } = useQuotes(market)
+export interface StockTableProps {
+  /** 표시할 스코프 / The scope to show */
+  scope: QuoteScope
+  /** 스코프 토글 — 넘기면 패널 머리에 토글이 생긴다 / The scope toggle; passing it puts the toggle in the panel head */
+  onScopeChange?: (scope: QuoteScope) => void
+}
+
+export function StockTable({ scope, onScopeChange }: StockTableProps) {
+  const { quotes, asOf, isLoading, error, retryKeys } = useScopedQuotes(scope)
   const [sort, setSort] = useState<Sort | null>(null)
   const navigate = useNavigate()
   const queryClient = useQueryClient()
 
-  // 재시도는 이 위젯의 쿼리 키만 무효화한다 — 키는 `api/queries.ts`의 `['quotes', market]`과 같아야 한다 / The retry invalidates just this key
+  // 재시도는 이 스코프의 시세 키만 무효화한다 (관심 스코프는 두 시장) / The retry invalidates this scope's keys (both markets for the watch scope)
   const retry = () => {
-    void queryClient.invalidateQueries({ queryKey: ['quotes', market] })
+    for (const queryKey of retryKeys) void queryClient.invalidateQueries({ queryKey })
   }
 
   const rows = useMemo(() => {
-    if (data === undefined) return []
-    if (sort === null) return data
+    if (quotes === undefined) return []
+    if (sort === null) return quotes
     const factor = sort.dir === 'asc' ? 1 : -1
     // 원본 배열은 쿼리 캐시의 것이므로 복사해서 정렬한다 / The array belongs to the query cache, so sort a copy
-    return [...data].sort((a, b) => factor * compare(a, b, sort.column))
-  }, [data, sort])
+    return [...quotes].sort((a, b) => factor * compare(a, b, sort.column))
+  }, [quotes, sort])
 
   /** 같은 컬럼을 다시 누르면 방향만 뒤집는다 / Clicking the same column again only flips the direction */
   const toggle = (column: Column) => {
@@ -95,16 +103,17 @@ export function StockTable({ market, onMarketChange }: StockTableProps) {
   }
 
   if (error !== null) {
-    return <ErrorCard onRetry={retry} message={`${MARKET_LABEL[market]} 시세를 불러오지 못했습니다`} />
+    return <ErrorCard onRetry={retry} message={`${titleOf(scope)}를 불러오지 못했습니다`} />
   }
 
   return (
     <Panel
+      id="quote-monitor"
       eyebrow="QUOTE MONITOR"
-      title={`${MARKET_LABEL[market]} 시세`}
+      title={titleOf(scope)}
       action={
         <>
-          {onMarketChange !== undefined && <MarketTabs value={market} onChange={onMarketChange} />}
+          {onScopeChange !== undefined && <ScopeTabs value={scope} onChange={onScopeChange} />}
           {rows.length > 0 && <span className="badge">{rows.length}종목</span>}
           <AsOfBadge asOf={asOf} />
         </>
@@ -116,12 +125,17 @@ export function StockTable({ market, onMarketChange }: StockTableProps) {
           <Spinner />
         </div>
       ) : rows.length === 0 ? (
-        <p className="empty panel-pad">표시할 종목이 없습니다</p>
+        <p className="empty panel-pad">
+          {scope === 'watch' ? '☆를 눌러 관심 종목을 추가하세요' : '표시할 종목이 없습니다'}
+        </p>
       ) : (
         <div className="table-scroll quotes-scroll">
           <table className="stock-table">
             <thead>
               <tr>
+                <th scope="col" className="cell-star">
+                  <span className="sr-only">관심</span>
+                </th>
                 {COLUMNS.map((column) => (
                   <th
                     key={column.key}
@@ -162,6 +176,9 @@ export function StockTable({ market, onMarketChange }: StockTableProps) {
                       }
                     }}
                   >
+                    <td className="cell-star">
+                      <StarButton symbol={quote.symbol} />
+                    </td>
                     <td className="cell-symbol">{quote.symbol}</td>
                     <td className="cell-name">{quote.name}</td>
                     <td className="cell-number cell-price">{formatPrice(quote.price, quote.currency)}</td>

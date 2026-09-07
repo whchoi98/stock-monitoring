@@ -16,7 +16,7 @@ There is no traditional database: the data layer is a two-tier cache over Yahoo 
 | `DynamoCache` (L2) | `backend/app/cache/dynamo.py` | Sync boto3 via `asyncio.to_thread`; item schema `pk(S) / data(S, JSON) / ttl(N, epoch) / asOf(S)`; every failure degrades to a cache miss |
 | `TieredCache` | `backend/app/cache/tiered.py` | Lookup order L1 → L2 → fetch → L2-stale; per-key lock so concurrent cold callers trigger one upstream fetch |
 | Cache keys | `backend/app/api/deps.py` | Key builders (`quotes:{market}`, `detail:{symbol}`, `chart:{symbol}:{period}`, `news:{symbol}`, `overview`, `news:feed`) + `PREWARMED_KEYS` |
-| TTL table | `backend/app/core/config.py` | `CHART_TTL` (10m–24h per period), `FUNDAMENTALS_TTL` 12h, `AI_TTL` 6h, `L2_TTL` 24h, refresh intervals 45s/120s/600s |
+| TTL table | `backend/app/core/config.py` | `CHART_TTL` (`1w` 10m · `1m` 1h · `3m`/`6m` 6h · `1y`/`5y` 24h), `FUNDAMENTALS_TTL` 12h, `AI_TTL` 6h, `L2_TTL` 24h, refresh intervals 45s/120s/600s |
 | Scheduler | `backend/app/core/scheduler.py` | Re-writes pre-warmed keys each cycle (quotes/overview/news, market caps every 10m); *is* the freshness of those keys |
 | DynamoDB table | `infra/stacks/stock_monitoring_stack.py` (§2) | `stock-monitoring-cache`, PAY_PER_REQUEST, TTL attribute `ttl`, `RemovalPolicy.DESTROY` (pure cache) |
 
@@ -55,7 +55,7 @@ There is no traditional database: the data layer is a two-tier cache over Yahoo 
 | `DynamoCache` (L2) | `backend/app/cache/dynamo.py` | 동기 boto3를 `asyncio.to_thread`로 래핑. 항목 스키마 `pk(S) / data(S, JSON) / ttl(N, epoch) / asOf(S)`. 모든 실패는 캐시 미스로 강등 |
 | `TieredCache` | `backend/app/cache/tiered.py` | 조회 순서 L1 → L2 → fetch → L2-stale. 키별 락으로 같은 콜드 키의 동시 호출은 업스트림 조회 1회만 |
 | 캐시 키 | `backend/app/api/deps.py` | 키 빌더(`quotes:{market}`, `detail:{symbol}`, `chart:{symbol}:{period}`, `news:{symbol}`, `overview`, `news:feed`) + `PREWARMED_KEYS` |
-| TTL 표 | `backend/app/core/config.py` | `CHART_TTL`(기간별 10분–24시간), `FUNDAMENTALS_TTL` 12h, `AI_TTL` 6h, `L2_TTL` 24h, 갱신 주기 45s/120s/600s |
+| TTL 표 | `backend/app/core/config.py` | `CHART_TTL`(`1w` 10분 · `1m` 1시간 · `3m`/`6m` 6시간 · `1y`/`5y` 24시간), `FUNDAMENTALS_TTL` 12h, `AI_TTL` 6h, `L2_TTL` 24h, 갱신 주기 45s/120s/600s |
 | 스케줄러 | `backend/app/core/scheduler.py` | 선제 갱신 키를 매 사이클 재기록 (quotes/overview/news, 시총은 10분마다). 이 루프가 곧 해당 키의 신선도 |
 | DynamoDB 테이블 | `infra/stacks/stock_monitoring_stack.py` (§2) | `stock-monitoring-cache`, PAY_PER_REQUEST, TTL 속성 `ttl`, `RemovalPolicy.DESTROY` (순수 캐시) |
 

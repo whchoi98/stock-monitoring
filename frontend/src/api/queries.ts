@@ -13,13 +13,13 @@ import { useMemo } from 'react'
 import { apiGet } from './client.ts'
 import type {
   ChartData,
+  ChartPeriod,
   Envelope,
   InvestorsData,
   Market,
   NewsItem,
   OrderBookData,
   Overview,
-  Period,
   Quote,
   StockDetail,
 } from './types.ts'
@@ -107,6 +107,8 @@ export function useQuotes(market: Market): QueryResult<Quote[]> {
 export interface SymbolUniverse {
   quotes: Quote[]
   isLoading: boolean
+  /** 두 시장 중 먼저 실패한 쪽의 오류 / The first market's error, if either failed */
+  error: Error | null
 }
 
 /**
@@ -124,7 +126,7 @@ export function useSymbolUniverse(enabled: boolean): SymbolUniverse {
   const usData = us.data?.data
   const krData = kr.data?.data
   const quotes = useMemo(() => [...(usData ?? []), ...(krData ?? [])], [usData, krData])
-  return { quotes, isLoading: us.isLoading || kr.isLoading }
+  return { quotes, isLoading: us.isLoading || kr.isLoading, error: us.error ?? kr.error }
 }
 
 /** 전체 뉴스 피드 / The whole news feed */
@@ -142,7 +144,7 @@ export function useStock(symbol: string): QueryResult<StockDetail> {
 }
 
 /** 종목 차트 (OHLCV + MA + 크로스) / A stock's chart (OHLCV, MAs and crosses) */
-export function useChart(symbol: string, period: Period): QueryResult<ChartData> {
+export function useChart(symbol: string, period: ChartPeriod): QueryResult<ChartData> {
   return useEnvelopeQuery(
     ['chart', symbol, period],
     `/api/stocks/${path(symbol)}/chart?period=${period}`,

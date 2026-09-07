@@ -79,7 +79,7 @@ export function MarketPulse({ market }: MarketPulseProps) {
   const breadth = summary === undefined ? 0 : summary.advancing + summary.declining
 
   return (
-    <Panel eyebrow="MARKET PULSE" title={`시장 요약 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="market-pulse" eyebrow="MARKET PULSE" title={`시장 요약 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
       {isLoading ? (
         <Spinner />
       ) : summary === undefined ? (

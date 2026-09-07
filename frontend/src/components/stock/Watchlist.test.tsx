@@ -1,7 +1,7 @@
 /**
- * Watchlist 테스트 — 현재 종목 강조, 행 클릭 이동, 시장 토글, 로딩/실패 분기를 고정한다.
- * Watchlist tests, pinning the current-symbol highlight, row navigation, the market toggle and the loading/failure
- * branches.
+ * Watchlist 테스트 — 현재 종목 강조, 행 클릭 이동, 스코프 토글(관심 포함), ★, 로딩/실패 분기를 고정한다.
+ * Watchlist tests, pinning the current-symbol highlight, row navigation, the scope toggle (watch included), ★, and the
+ * loading/failure branches.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen } from '@testing-library/react'
@@ -9,11 +9,12 @@ import { MemoryRouter, Route, Routes, useParams } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { QueryResult } from '../../api/queries.ts'
-import { useQuotes } from '../../api/queries.ts'
+import { useQuotes, useSymbolUniverse } from '../../api/queries.ts'
 import type { Quote } from '../../api/types.ts'
+import { watchlistStore } from '../../lib/watchlistStore.ts'
 import { Watchlist } from './Watchlist.tsx'
 
-vi.mock('../../api/queries.ts', () => ({ useQuotes: vi.fn() }))
+vi.mock('../../api/queries.ts', () => ({ useQuotes: vi.fn(), useSymbolUniverse: vi.fn() }))
 
 const AAPL: Quote = {
   symbol: 'AAPL',
@@ -62,24 +63,28 @@ function renderWatchlist(selected = 'AAPL') {
     </QueryClientProvider>,
   )
   const rows = () => Array.from(view.container.querySelectorAll<HTMLAnchorElement>('a.wl-row'))
-  return { ...view, queryClient, rows }
+  const items = () => Array.from(view.container.querySelectorAll<HTMLLIElement>('li.wl-item'))
+  return { ...view, queryClient, rows, items }
 }
 
 beforeEach(() => {
+  localStorage.clear()
+  watchlistStore.reload()
   vi.mocked(useQuotes).mockReturnValue(hookResult({ data: [AAPL, MSFT, FLAT] }))
+  vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [], isLoading: false, error: null })
 })
 
 describe('Watchlist', () => {
   it('종목마다 행을 렌더하고 현재 종목을 강조한다 / renders one row per quote and highlights the current symbol', () => {
-    const { rows } = renderWatchlist()
+    const { rows, items } = renderWatchlist()
 
     expect(rows()).toHaveLength(3)
     expect(vi.mocked(useQuotes)).toHaveBeenCalledWith('us')
-    const [apple, microsoft] = rows()
+    const [apple, microsoft] = items()
     expect(apple!.classList.contains('wl-selected')).toBe(true)
-    expect(apple!.getAttribute('aria-current')).toBe('page')
+    expect(rows()[0]!.getAttribute('aria-current')).toBe('page')
     expect(microsoft!.classList.contains('wl-selected')).toBe(false)
-    expect(microsoft!.getAttribute('aria-current')).toBeNull()
+    expect(rows()[1]!.getAttribute('aria-current')).toBeNull()
   })
 
   it('가격·등락률을 방향색으로 낸다 (보합은 대시) / renders price and change in direction colours, flat as a dash', () => {
@@ -100,6 +105,15 @@ describe('Watchlist', () => {
     expect(rows()[1]!.getAttribute('href')).toBe('/stocks/MSFT')
   })
 
+  it('★는 관심 종목을 저장하고 이동하지 않는다 / ★ stores the symbol without navigating', () => {
+    renderWatchlist()
+
+    fireEvent.click(screen.getByRole('button', { name: 'MSFT 관심 추가' }))
+
+    expect(watchlistStore.get()).toEqual(['MSFT'])
+    expect(screen.getByText('상세 AAPL')).toBeTruthy()
+  })
+
   it('시장 토글이 다른 시장의 시세를 요청한다 / the market toggle requests the other market', () => {
     renderWatchlist()
 
@@ -107,6 +121,17 @@ describe('Watchlist', () => {
 
     expect(vi.mocked(useQuotes)).toHaveBeenLastCalledWith('kr')
     expect(screen.getByRole('button', { name: '한국' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('관심 스코프는 유니버스를 켜고 저장된 심볼만 보여준다 / the watch scope enables the universe and shows only stored symbols', () => {
+    watchlistStore.set(['KO'])
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [AAPL, MSFT, FLAT], isLoading: false, error: null })
+    const { rows } = renderWatchlist()
+
+    fireEvent.click(screen.getByRole('button', { name: '관심' }))
+
+    expect(vi.mocked(useSymbolUniverse)).toHaveBeenLastCalledWith(true)
+    expect(rows().map((row) => row.querySelector('.wl-symbol')?.textContent)).toEqual(['KO'])
   })
 
   it('로딩 중에는 스피너만 보인다 / shows only a spinner while loading', () => {

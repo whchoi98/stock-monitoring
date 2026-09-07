@@ -14,10 +14,11 @@ The visual layer is a **terminal design language** (ADR-001, 2026-09-06), refere
 |---|---|---|
 | Design tokens | `frontend/src/styles/tokens.css` | Per-theme palette (`--bg`, `--panel`, `--panel-raised`, `--border`, `--border-strong`, `--text`, `--text-dim`, `--text-strong`, `--accent`, `--accent-soft`, `--accent-ink`, `--ok`, `--up`, `--down`, `--up-soft`, `--down-soft`, chart series `--chart-*`), structural tokens (`--radius`, `--font-sans`, `--font-mono`, `--term-top-h`, `--term-status-h`, `--ws-gap`), and the `.up`/`.down`/`.flat` classes |
 | Global styles | `frontend/src/styles/global.css` | Shell (`.terminal/.term-top/.term-main`), command bar, market strip, status bar, `Panel`, buttons/tabs/badges, workspace grids (`.ws-market`, `.ws-stock`), watchlist rail, quote header, stat cells, tables, news wire, chart toolbar/legend, order book, investor flow, markdown, responsive breakpoints (1279 / 1199 / 899 / 560 px), reduced motion |
-| Panel | `frontend/src/components/common/Panel.tsx` | The widget shell: eyebrow (uppercase mono label) + Korean title + right-side actions; `flush` drops the body padding for tables/lists |
+| Panel | `frontend/src/components/common/Panel.tsx` | The widget shell: eyebrow (uppercase mono label) + Korean title + right-side actions; `flush` drops the body padding for tables/lists; an `id` adds the ▾/▸ collapse toggle (state in localStorage, reset from the status bar) |
 | Stat | `frontend/src/components/common/Stat.tsx` | Label-over-value cell used by the quote header, fundamentals and period returns |
 | MarketStrip | `frontend/src/components/common/MarketStrip.tsx` | Indices as fixed cells + indicators as an aria-hidden-duplicated crawl + as-of chip |
-| StatusBar / MarketStatus / Clock | `frontend/src/components/common/` | Bottom bar: open/closed/unknown dot (`--ok` is state-only, never a price colour), source, polling cadence from the constants, simulation notice, as-of, KST clock |
+| StatusBar / MarketStatus / Clock | `frontend/src/components/common/` | Bottom bar: open/closed/unknown dot (`--ok` is state-only, never a price colour), source, polling cadence from the constants, simulation notice, pending-alert count, layout reset, as-of, KST clock |
+| StarButton / AlertsWatcher | `frontend/src/components/common/` | The ★ watchlist toggle (amber when on) and the fixed bottom-right toast stack for fired price alerts (`role=status`, accent left rule) |
 | ThemeToggle | `frontend/src/components/common/ThemeToggle.tsx` | Flips `data-theme` on `<html>` (dark is the default) |
 | ChangeText | `frontend/src/components/common/ChangeText.tsx` | The single place that maps a change *amount* to `.up`/`.down`/`.flat`; percentage-only cells compose `arrow` + `changeClass` + `formatPct` directly |
 | Status badges | `AsOfBadge.tsx`, `SimulatedBadge.tsx` | Data freshness (`asOf`) and the mandatory "simulated data" label |
@@ -58,10 +59,11 @@ The visual layer is a **terminal design language** (ADR-001, 2026-09-06), refere
 |---|---|---|
 | 디자인 토큰 | `frontend/src/styles/tokens.css` | 테마별 팔레트(`--bg`, `--panel`, `--panel-raised`, `--border`, `--border-strong`, `--text`, `--text-dim`, `--text-strong`, `--accent`, `--accent-soft`, `--accent-ink`, `--ok`, `--up`, `--down`, `--up-soft`, `--down-soft`, 차트 시리즈 `--chart-*`), 구조 토큰(`--radius`, `--font-sans`, `--font-mono`, `--term-top-h`, `--term-status-h`, `--ws-gap`), `.up`/`.down`/`.flat` 클래스 |
 | 전역 스타일 | `frontend/src/styles/global.css` | 셸(`.terminal/.term-top/.term-main`), 커맨드 바, 마켓 스트립, 상태 바, `Panel`, 버튼/탭/뱃지, 워크스페이스 그리드(`.ws-market`, `.ws-stock`), 워치리스트 레일, 종목 헤더, 통계 셀, 표, 뉴스 와이어, 차트 툴바/레전드, 호가, 수급, 마크다운, 반응형(1279 / 1199 / 899 / 560 px), 모션 최소화 |
-| Panel | `frontend/src/components/common/Panel.tsx` | 위젯 껍데기: eyebrow(대문자 고정폭 라벨) + 한국어 제목 + 우측 액션. `flush`는 표·목록용으로 본문 패딩 제거 |
+| Panel | `frontend/src/components/common/Panel.tsx` | 위젯 껍데기: eyebrow(대문자 고정폭 라벨) + 한국어 제목 + 우측 액션. `flush`는 표·목록용으로 본문 패딩 제거. `id`가 있으면 ▾/▸ 접기 토글(localStorage, 상태 바에서 초기화) |
 | Stat | `frontend/src/components/common/Stat.tsx` | 라벨 위·값 아래 셀 — 종목 헤더·핵심 지표·기간수익률 공용 |
 | MarketStrip | `frontend/src/components/common/MarketStrip.tsx` | 지수 고정 셀 + 지표 크롤(aria-hidden 사본 1벌) + 기준 시각 칩 |
-| StatusBar / MarketStatus / Clock | `frontend/src/components/common/` | 하단 바: 장중/장마감/확인 중 점(`--ok`는 상태 전용, 등락색 아님), 출처, 상수에서 읽은 폴링 주기, 시뮬레이션 안내, 기준 시각, KST 시계 |
+| StatusBar / MarketStatus / Clock | `frontend/src/components/common/` | 하단 바: 장중/장마감/확인 중 점(`--ok`는 상태 전용, 등락색 아님), 출처, 상수에서 읽은 폴링 주기, 시뮬레이션 안내, 대기 알림 수, 레이아웃 초기화, 기준 시각, KST 시계 |
+| StarButton / AlertsWatcher | `frontend/src/components/common/` | ★ 관심 종목 토글(켜지면 앰버)과 발동한 가격 알림의 우하단 토스트 스택(`role=status`, 액센트 왼쪽 선) |
 | ThemeToggle | `frontend/src/components/common/ThemeToggle.tsx` | `<html>`의 `data-theme` 전환 (기본은 다크) |
 | ChangeText | `frontend/src/components/common/ChangeText.tsx` | 등락 *금액*을 `.up`/`.down`/`.flat`으로 매핑하는 유일한 지점. 퍼센트만 있는 셀은 `arrow` + `changeClass` + `formatPct`를 직접 조합 |
 | 상태 배지 | `AsOfBadge.tsx`, `SimulatedBadge.tsx` | 데이터 신선도(`asOf`)와 의무적인 "시뮬레이션" 표시 |

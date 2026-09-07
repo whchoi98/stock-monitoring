@@ -5,7 +5,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { Candle } from '../../api/types.ts'
-import { bollingerBands, summarizeCandle } from './indicators.ts'
+import { bollingerBands, ema, macd, rsi, summarizeCandle } from './indicators.ts'
 
 describe('bollingerBands', () => {
   it('표본이 창보다 짧으면 전부 null / all null when shorter than the window', () => {
@@ -37,6 +37,71 @@ describe('bollingerBands', () => {
     // 마지막 창 [1,1,1]은 100을 포함하지 않는다 / The last window [1,1,1] no longer sees the 100
     expect(bands.middle[5]).toBeCloseTo(1, 10)
     expect(bands.upper[5]).toBeCloseTo(1, 10)
+  })
+})
+
+describe('rsi', () => {
+  it('앞 period개는 null, 길이는 입력과 같다 / the first period entries are null and the length matches', () => {
+    const out = rsi([1, 2, 3, 4, 5, 6], 3)
+    expect(out).toHaveLength(6)
+    expect(out.slice(0, 3)).toEqual([null, null, null])
+    expect(out.slice(3).every((v) => v !== null)).toBe(true)
+  })
+
+  it('표본이 period 이하면 전부 null / all null when the sample is not longer than the period', () => {
+    expect(rsi([1, 2, 3], 3)).toEqual([null, null, null])
+  })
+
+  it('계속 오르면 100, 계속 내리면 0, 보합이면 50 / all-up is 100, all-down 0, flat 50', () => {
+    expect(rsi([1, 2, 3, 4, 5], 3).at(-1)).toBe(100)
+    expect(rsi([5, 4, 3, 2, 1], 3).at(-1)).toBe(0)
+    expect(rsi([3, 3, 3, 3, 3], 3).at(-1)).toBe(50)
+  })
+
+  it('알려진 값 — [1,2,3,2,3], period 3 / a known case', () => {
+    // 첫 RSI: 이익 평균 2/3, 손실 평균 1/3 → RS 2 → 66.67. 다음: 이익 (2/3·2+1)/3, 손실 (1/3·2)/3 → RS 3.5 → 77.78
+    // First RSI: avg gain 2/3, avg loss 1/3 → RS 2 → 66.67. Next: gain (2/3·2+1)/3, loss (1/3·2)/3 → RS 3.5 → 77.78
+    const out = rsi([1, 2, 3, 2, 3], 3)
+    expect(out[3]).toBeCloseTo(66.6667, 3)
+    expect(out[4]).toBeCloseTo(77.7778, 3)
+  })
+
+  it('항상 0~100 안에 있다 / always within 0..100', () => {
+    const noisy = Array.from({ length: 60 }, (_, i) => 100 + Math.sin(i / 3) * 10 + (i % 7))
+    for (const v of rsi(noisy)) if (v !== null) expect(v >= 0 && v <= 100).toBe(true)
+  })
+})
+
+describe('ema / macd', () => {
+  it('상수열의 EMA는 그 값, MACD는 0이다 / a constant series gives the constant EMA and a zero MACD', () => {
+    const flat = new Array<number>(40).fill(10)
+    expect(ema(flat, 5).slice(4).every((v) => v === 10)).toBe(true)
+    const out = macd(flat)
+    expect(out.macd.slice(25).every((v) => v === 0)).toBe(true)
+    expect(out.signal.slice(33).every((v) => v === 0)).toBe(true)
+    expect(out.histogram.slice(33).every((v) => v === 0)).toBe(true)
+  })
+
+  it('워밍업 — MACD는 slow−1, 시그널은 slow−1+signal−1 앞이 null / warm-up nulls', () => {
+    const values = Array.from({ length: 50 }, (_, i) => i + 1)
+    const out = macd(values, 12, 26, 9)
+    expect(out.macd.slice(0, 25).every((v) => v === null)).toBe(true)
+    expect(out.macd[25]).not.toBeNull()
+    expect(out.signal.slice(0, 33).every((v) => v === null)).toBe(true)
+    expect(out.signal[33]).not.toBeNull()
+    expect(out.histogram[33]).not.toBeNull()
+    expect(out.macd).toHaveLength(50)
+  })
+
+  it('EMA 씨앗은 앞 period개의 단순 평균이다 / the EMA seed is the simple mean of the first period values', () => {
+    const out = ema([1, 2, 3, 4], 3)
+    expect(out).toEqual([null, null, 2, expect.closeTo(3, 10)])
+  })
+
+  it('상승 추세에서는 MACD가 양수다 / an uptrend yields a positive MACD', () => {
+    const rising = Array.from({ length: 60 }, (_, i) => 100 * 1.01 ** i)
+    const out = macd(rising)
+    expect(out.macd.at(-1)!).toBeGreaterThan(0)
   })
 })
 

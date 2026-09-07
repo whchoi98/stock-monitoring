@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/stocks", tags=["stocks"])
 # 다른 값은 FastAPI가 422로 거절하므로 `fetch_chart`의 ValueError까지 도달하지 않는다.
 # Chart periods, kept identical to the CHART_TTL keys (a test asserts the match). Any other value is
 # rejected by FastAPI with 422, so `fetch_chart`'s ValueError is never reached from here.
-Period = Literal["1w", "1m", "3m", "1y"]
+Period = Literal["1w", "1m", "3m", "6m", "1y", "5y"]
 DEFAULT_PERIOD = "1m"
 
 # 수급: 일봉 차트에서 최근 10일을 쓴다 / Investor flows: the last 10 rows of the daily chart

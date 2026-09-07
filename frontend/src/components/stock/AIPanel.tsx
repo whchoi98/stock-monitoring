@@ -46,6 +46,7 @@ export function AIPanel({ symbol }: AIPanelProps) {
 
   return (
     <Panel
+      id="ai-research"
       eyebrow="AI RESEARCH"
       title="AI 분석"
       action={

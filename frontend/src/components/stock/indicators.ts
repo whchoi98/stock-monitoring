@@ -57,6 +57,111 @@ export function bollingerBands(values: number[], window = 20, k = 2): Bands {
   return { upper, middle, lower }
 }
 
+/**
+ * RSI (기본 14) — Wilder 평활. 첫 값은 앞 `period`개 변동의 단순 평균, 이후 `(이전×(n−1) + 현재)/n`.
+ * 손실 평균이 0이면 100, 이익·손실이 모두 0(완전 보합)이면 50으로 둔다.
+ * RSI (default 14) with Wilder smoothing: the first value averages the first `period` changes, then
+ * `(previous×(n−1) + current)/n`. A zero average loss yields 100; zero on both sides (a flat series) yields 50.
+ *
+ * 앞 `period`개는 null이다 (변동이 `period`개 쌓여야 첫 값이 나온다).
+ * The first `period` entries are null: the first value needs `period` changes.
+ */
+export function rsi(values: number[], period = 14): (number | null)[] {
+  const out: (number | null)[] = new Array<number | null>(values.length).fill(null)
+  if (values.length <= period) return out
+
+  let avgGain = 0
+  let avgLoss = 0
+  for (let i = 1; i <= period; i += 1) {
+    const change = values[i]! - values[i - 1]!
+    if (change > 0) avgGain += change
+    else avgLoss -= change
+  }
+  avgGain /= period
+  avgLoss /= period
+
+  const toRsi = (gain: number, loss: number): number => {
+    if (loss === 0) return gain === 0 ? 50 : 100
+    const rs = gain / loss
+    return 100 - 100 / (1 + rs)
+  }
+
+  out[period] = toRsi(avgGain, avgLoss)
+  for (let i = period + 1; i < values.length; i += 1) {
+    const change = values[i]! - values[i - 1]!
+    const gain = change > 0 ? change : 0
+    const loss = change < 0 ? -change : 0
+    avgGain = (avgGain * (period - 1) + gain) / period
+    avgLoss = (avgLoss * (period - 1) + loss) / period
+    out[i] = toRsi(avgGain, avgLoss)
+  }
+  return out
+}
+
+/**
+ * 지수이동평균 — 앞 `period`개의 단순 평균으로 씨앗을 삼고 `k = 2/(period+1)`로 잇는다. 워밍업 구간은 null.
+ * An exponential moving average seeded with the simple mean of the first `period` values, then `k = 2/(period+1)`; null
+ * during warm-up.
+ */
+export function ema(values: (number | null)[], period: number): (number | null)[] {
+  const out: (number | null)[] = new Array<number | null>(values.length).fill(null)
+  const k = 2 / (period + 1)
+  // 첫 유효 구간(null이 아닌 값이 `period`개 연속)을 찾아 씨앗을 만든다 / Seed on the first run of `period` non-null values
+  let count = 0
+  let sum = 0
+  let prev: number | null = null
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i]
+    if (value === null || value === undefined) {
+      if (prev === null) {
+        count = 0
+        sum = 0
+      }
+      continue
+    }
+    if (prev === null) {
+      count += 1
+      sum += value
+      if (count === period) {
+        prev = sum / period
+        out[i] = prev
+      }
+      continue
+    }
+    prev = value * k + prev * (1 - k)
+    out[i] = prev
+  }
+  return out
+}
+
+/** MACD 세 줄 / The three MACD series */
+export interface Macd {
+  macd: (number | null)[]
+  signal: (number | null)[]
+  histogram: (number | null)[]
+}
+
+/**
+ * MACD (12, 26, 9) — `EMA(fast) − EMA(slow)`, 시그널은 그 EMA(signal), 히스토그램은 차이. 워밍업 구간은 null.
+ * MACD (12, 26, 9): `EMA(fast) − EMA(slow)`, the signal is its EMA(signal), the histogram the difference; null while
+ * warming up.
+ */
+export function macd(values: number[], fast = 12, slow = 26, signalPeriod = 9): Macd {
+  const emaFast = ema(values, fast)
+  const emaSlow = ema(values, slow)
+  const line = values.map((_, i) => {
+    const f = emaFast[i]
+    const s = emaSlow[i]
+    return f === null || f === undefined || s === null || s === undefined ? null : f - s
+  })
+  const signal = ema(line, signalPeriod)
+  const histogram = line.map((m, i) => {
+    const s = signal[i]
+    return m === null || s === null || s === undefined ? null : m - s
+  })
+  return { macd: line, signal, histogram }
+}
+
 /** 레전드가 보여주는 캔들 한 개의 요약 / One candle's summary as the legend shows it */
 export interface CandleSummary {
   time: string

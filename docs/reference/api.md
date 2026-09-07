@@ -25,7 +25,7 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 ### 3. Key Decisions
 - **One envelope everywhere**: `{"asOf", "marketOpen", "data"}`. `asOf` is the cached value's timestamp (after a price overlay it becomes the quote's timestamp — the price is the headline datum).
 - **Symbols are validated before any cache key exists**: `resolve_symbol` normalizes case and suffixes (`.KS`/`.KQ`) and 404s outside the universe, keeping cache/lock maps finite.
-- **Enum-typed query params**: chart `period` is a `Literal` kept identical to the `CHART_TTL` keys (a test asserts the match); FastAPI rejects anything else with 422.
+- **Enum-typed query params**: chart `period` is a `Literal` (`1w 1m 3m 6m 1y 5y`; `1w` is hourly bars, `5y` weekly, the rest daily) kept identical to the `CHART_TTL` keys (a test asserts the match); FastAPI rejects anything else with 422.
 - **Fixed error strings only** (`app_not_ready`, `rate_limited`, `ai_unavailable`, `ai_failed`, `article_unavailable`): exception text may carry an AWS account/ARN/model id and goes to server logs only.
 - **Simulated data is always labeled**: `/orderbook` and `/investors` are derived (seeded from the live price / daily candles) and always return `"simulated": true`.
 - **No silent failures**: every failure path logs single-line JSON and flips the source status that `/api/health` reports.
@@ -73,7 +73,7 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 ### 3. 주요 결정
 - **envelope 단일 규약**: `{"asOf", "marketOpen", "data"}`. `asOf`는 캐시된 값의 시각 (가격 오버레이 후에는 시세의 시각 — 가격이 응답의 대표 데이터).
 - **캐시 키 생성 전에 심볼 검증**: `resolve_symbol`이 대소문자·접미사(`.KS`/`.KQ`)를 정규화하고 유니버스 밖은 404 — 캐시/락 맵의 유한성 보장.
-- **쿼리 파라미터는 enum 타입**: 차트 `period`는 `CHART_TTL` 키와 동일한 `Literal`(테스트가 일치를 검증). 다른 값은 FastAPI가 422로 거절.
+- **쿼리 파라미터는 enum 타입**: 차트 `period`는 `CHART_TTL` 키와 동일한 `Literal`(`1w 1m 3m 6m 1y 5y` — `1w`는 시간봉, `5y`는 주봉, 나머지는 일봉. 테스트가 일치를 검증). 다른 값은 FastAPI가 422로 거절.
 - **오류 본문은 고정 문구만** (`app_not_ready`, `rate_limited`, `ai_unavailable`, `ai_failed`, `article_unavailable`): 예외 문자열에는 AWS 계정/ARN/모델 ID가 섞일 수 있어 서버 로그에만 남긴다.
 - **시뮬레이션 데이터는 항상 표시**: `/orderbook`·`/investors`는 파생 데이터(현재가 시드 / 일봉 기반)이며 항상 `"simulated": true`를 반환.
 - **조용한 실패 금지**: 모든 실패 경로는 단일 라인 JSON 로그 + `/api/health`가 보고하는 소스 상태 반영.

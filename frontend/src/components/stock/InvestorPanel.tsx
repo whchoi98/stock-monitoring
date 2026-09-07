@@ -54,6 +54,7 @@ export function InvestorPanel({ symbol }: InvestorPanelProps) {
 
   return (
     <Panel
+      id="investor-flow"
       eyebrow="INVESTOR FLOW"
       title="투자자 동향"
       action={

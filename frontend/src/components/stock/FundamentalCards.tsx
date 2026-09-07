@@ -69,7 +69,7 @@ export function FundamentalCards({ symbol }: FundamentalCardsProps) {
   if (error !== null) return <ErrorCard onRetry={retry} message="핵심 지표를 불러오지 못했습니다" />
 
   return (
-    <Panel eyebrow="FUNDAMENTALS" title="핵심 지표" action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="fundamentals" eyebrow="FUNDAMENTALS" title="핵심 지표" action={<AsOfBadge asOf={asOf} />}>
       {isLoading || data === undefined ? (
         <Spinner />
       ) : (

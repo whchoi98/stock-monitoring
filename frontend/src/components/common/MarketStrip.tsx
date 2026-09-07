@@ -10,7 +10,7 @@
  */
 import type { IndexQuote, Indicator } from '../../api/types.ts'
 import { formatClock } from '../../lib/clock.ts'
-import { arrow, changeClass, formatPct, formatPrice } from '../../lib/format.ts'
+import { arrow, changeClass, formatIndicatorValue, formatPct, formatPrice } from '../../lib/format.ts'
 
 export interface MarketStripProps {
   /** 주요 지수 — 로딩/실패 중에는 빈 배열 / The indices; empty while loading or after a failure */
@@ -22,15 +22,6 @@ export interface MarketStripProps {
    * The envelope's `asOf` ISO string for the right-side as-of chip; absent or unparseable drops only the chip.
    */
   asOf?: string
-}
-
-/**
- * 지표 값 + 단위 — 백엔드 `unit`은 `"$" | "W" | "%" | ""`이고 `$`만 접두사다.
- * The value with its unit; the backend's `unit` is `"$" | "W" | "%" | ""` and only `$` is a prefix.
- */
-function formatIndicatorValue(indicator: Indicator): string {
-  const value = formatPrice(indicator.value, 'USD')
-  return indicator.unit === '$' ? `$${value}` : `${value}${indicator.unit}`
 }
 
 /** 등락률 셀 — 화살표 + 부호付 퍼센트, 보합은 대시 / The change cell: arrow plus signed percentage; flat is a dash */

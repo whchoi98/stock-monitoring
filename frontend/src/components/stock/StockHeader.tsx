@@ -19,7 +19,9 @@ import { ErrorCard } from '../common/ErrorCard.tsx'
 import { MARKET_LABEL } from '../../lib/markets.ts'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
+import { StarButton } from '../common/StarButton.tsx'
 import { Stat } from '../common/Stat.tsx'
+import { AlertForm } from './AlertForm.tsx'
 import { Week52Bar } from './Week52Bar.tsx'
 
 /**
@@ -64,6 +66,7 @@ export function StockHeader({ symbol }: StockHeaderProps) {
         <div className="qh-identity">
           <div className="qh-symbol-row">
             <span className="qh-symbol">{data.symbol}</span>
+            <StarButton symbol={data.symbol} />
             <span className="badge badge-accent">{data.market.toUpperCase()}</span>
             <span className="badge">{MARKET_LABEL[data.market]}</span>
             {data.sector !== '' && <span className="badge">{data.sector}</span>}
@@ -78,6 +81,7 @@ export function StockHeader({ symbol }: StockHeaderProps) {
             어제보다 <ChangeText value={data.change} pct={data.change_pct} currency={data.currency} />
           </p>
           <AsOfBadge asOf={asOf} />
+          <AlertForm symbol={data.symbol} price={data.price} currency={data.currency} />
         </div>
       </div>
 

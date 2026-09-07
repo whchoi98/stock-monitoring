@@ -11,6 +11,7 @@
 import { Link, NavLink, Outlet, useRouteError } from 'react-router-dom'
 
 import { useOverview } from './api/queries.ts'
+import { AlertsWatcher } from './components/common/AlertsWatcher.tsx'
 import { MarketStrip } from './components/common/MarketStrip.tsx'
 import { Panel } from './components/common/Panel.tsx'
 import { StatusBar } from './components/common/StatusBar.tsx'
@@ -71,6 +72,8 @@ export default function App() {
       </main>
 
       <StatusBar marketOpen={marketOpen} asOf={asOf} />
+      {/* 가격 알림은 어느 화면에서든 울려야 하므로 셸에 산다 / Price alerts must fire on any screen, so the watcher lives in the shell */}
+      <AlertsWatcher />
     </div>
   )
 }

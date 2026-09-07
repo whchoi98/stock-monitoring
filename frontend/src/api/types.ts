@@ -12,8 +12,14 @@ import type { Currency } from '../lib/format.ts'
 /** 시장 코드 — 백엔드는 항상 소문자로 내보낸다 / Market code; the backend always emits lower case */
 export type Market = 'us' | 'kr'
 
-/** 차트/기간수익률 기간 / Chart and period-return windows */
+/** 기간수익률 기간 (백엔드 `returns` 키) / Period-return windows (the backend's `returns` keys) */
 export type Period = '1w' | '1m' | '3m' | '1y'
+
+/**
+ * 차트 기간 — 기간수익률의 네 창에 6개월·5년(주봉)을 더한 것. 백엔드 `CHART_TTL` 키와 같다.
+ * Chart windows: the four return windows plus six months and five years (weekly bars); identical to the backend's `CHART_TTL` keys.
+ */
+export type ChartPeriod = Period | '6m' | '5y'
 
 /** 뉴스·AI 요청 언어 / Language of a news item and of an AI request */
 export type Language = 'ko' | 'en'
@@ -110,7 +116,7 @@ export interface CrossSignal {
  */
 export interface ChartData {
   symbol: string
-  period: Period
+  period: ChartPeriod
   candles: Candle[]
   ma5: (number | null)[]
   ma20: (number | null)[]

@@ -9,7 +9,7 @@
  * fixed alone.
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -110,6 +110,27 @@ describe('NewsFeed', () => {
     expect(new URL(href, 'http://h').searchParams.get('url')).toBe(DIRECT.link)
     expect(link.getAttribute('target')).toBeNull()
     expect(link.querySelector('.news-meta')?.textContent).not.toContain('원문 보기')
+  })
+
+  it('언어 탭과 키워드로 거르고 건수 뱃지를 갱신한다 / filters by language tab and keyword, updating the count badge', () => {
+    const { container } = renderNewsFeed()
+    const titles = () => Array.from(container.querySelectorAll('.news-title')).map((el) => el.textContent)
+
+    expect(titles()).toHaveLength(3)
+    expect(screen.getByText('3건')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: 'English' }))
+    expect(titles()).toEqual([DIRECT.title])
+    expect(screen.getByText('1/3건')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '전체' }))
+    fireEvent.change(screen.getByRole('searchbox', { name: '뉴스 검색' }), { target: { value: '코스피' } })
+    expect(titles()).toEqual([WRAPPED.title])
+
+    fireEvent.change(screen.getByRole('searchbox', { name: '뉴스 검색' }), { target: { value: 'zzz' } })
+    expect(titles()).toHaveLength(0)
+    expect(screen.getByText('조건에 맞는 뉴스가 없습니다')).toBeTruthy()
+    expect(screen.getByText('0/3건')).toBeTruthy()
   })
 
   it('빈 링크는 새 탭으로 열지 않는다 (href="" = 현재 페이지 복제) / never opens an empty link in a new tab', () => {

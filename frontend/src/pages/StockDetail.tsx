@@ -14,6 +14,7 @@
  * The page's own hook call serves two things: the chart axis's **currency** and the watchlist's **market**. Neither is
  * guessed from the symbol suffix.
  */
+import { useMemo } from 'react'
 import { useParams } from 'react-router-dom'
 
 import { useStock } from '../api/queries.ts'
@@ -49,6 +50,17 @@ function StockDetailBody({ symbol }: { symbol: string }) {
   // 통화와 시장만 쓴다 — 로딩/실패 표시는 각 위젯이 스스로 한다 / Only the currency and market are read; each widget shows its own state
   const { data } = useStock(symbol)
 
+  // 차트 기준선 — 전일종가·52주 고/저. 세 숫자가 같으면 같은 객체를 넘겨 차트가 선을 다시 그리지 않게 한다.
+  // Chart levels: previous close and 52-week high/low, memoised so the chart redraws its lines only when a number changes.
+  const hasDetail = data !== undefined
+  const prevClose = data?.prev_close
+  const week52High = data?.week52_high
+  const week52Low = data?.week52_low
+  const levels = useMemo(
+    () => (hasDetail ? { prevClose, week52High, week52Low } : undefined),
+    [hasDetail, prevClose, week52High, week52Low],
+  )
+
   return (
     <div className="ws ws-stock">
       <aside className="ws-rail" aria-label="워치리스트">
@@ -64,7 +76,7 @@ function StockDetailBody({ symbol }: { symbol: string }) {
 
       <div className="ws-center">
         <StockHeader symbol={symbol} />
-        <PriceChart symbol={symbol} currency={data?.currency} />
+        <PriceChart symbol={symbol} currency={data?.currency} levels={levels} />
         {/*
           AI 리서치는 차트 바로 아래 넓은 열에 앉는다 — 마크다운(표 포함)은 320px 우측 열에서 읽기 어렵고, 첫 화면 안에
           들어와야 기능이 발견된다. 이 패널만 `key`로 심볼에 묶는다: 다른 위젯은 react-query가 심볼별 키로 상태를 갈아

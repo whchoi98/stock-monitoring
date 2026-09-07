@@ -37,7 +37,7 @@ export function SectorBars({ market }: SectorBarsProps) {
   const peak = Math.max(...sectors.map((row) => Math.abs(row.avg_change_pct)), 0)
 
   return (
-    <Panel eyebrow="SECTOR HEAT" title={`섹터 등락 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="sector-heat" eyebrow="SECTOR HEAT" title={`섹터 등락 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
       {isLoading ? (
         <Spinner />
       ) : sectors.length === 0 ? (

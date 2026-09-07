@@ -156,7 +156,14 @@ def test_find_crosses_empty_inputs():
 
 def test_fetch_chart_period_mapping(monkeypatch):
     """period -> (yf period, interval) 매핑을 그대로 사용 / period maps to the exact yf period/interval pair."""
-    expected = {"1w": ("7d", "1h"), "1m": ("1mo", "1d"), "3m": ("3mo", "1d"), "1y": ("1y", "1d")}
+    expected = {
+        "1w": ("7d", "1h"),
+        "1m": ("1mo", "1d"),
+        "3m": ("3mo", "1d"),
+        "6m": ("6mo", "1d"),
+        "1y": ("1y", "1d"),
+        "5y": ("5y", "1wk"),
+    }
     calls = _patch_ticker(monkeypatch, _history_frame([10.0, 11.0, 12.0]))
 
     for period, (yf_period, interval) in expected.items():
@@ -226,7 +233,18 @@ def test_fetch_chart_rejects_unknown_period(monkeypatch):
 
     monkeypatch.setattr(charts.yf, "Ticker", boom)
     with pytest.raises(ValueError):
-        charts.fetch_chart("AAPL", "5y")
+        charts.fetch_chart("AAPL", "10y")
+
+
+def test_fetch_chart_weekly_interval_uses_date_only_time(monkeypatch):
+    """5y(1wk 간격)는 일봉처럼 YYYY-MM-DD — 주봉은 시각이 없다 / The 5y period (1wk interval) uses YYYY-MM-DD like daily bars."""
+    index = pd.date_range("2026-01-05", periods=3, freq="W-MON")
+    calls = _patch_ticker(monkeypatch, _history_frame([10.0, 11.0, 12.0], index=index))
+
+    out = charts.fetch_chart("AAPL", "5y")
+    assert calls[-1] == {"symbol": "AAPL", "period": "5y", "interval": "1wk"}
+    assert out.period == "5y"
+    assert [c.time for c in out.candles] == ["2026-01-05", "2026-01-12", "2026-01-19"]
 
 
 def test_fetch_chart_skips_nan_close_rows(monkeypatch):

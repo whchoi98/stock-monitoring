@@ -250,7 +250,9 @@ CHART_TTL = {
     "1w": 600,      # 1주: 10분 / 1 week: 10 minutes
     "1m": 3600,     # 1개월: 1시간 / 1 month: 1 hour
     "3m": 21600,    # 3개월: 6시간 / 3 months: 6 hours
+    "6m": 21600,    # 6개월: 6시간 / 6 months: 6 hours
     "1y": 86400,    # 1년: 24시간 / 1 year: 24 hours
+    "5y": 86400,    # 5년(주봉): 24시간 / 5 years (weekly): 24 hours
 }
 
 FUNDAMENTALS_TTL = 43200     # 12시간 / 12 hours

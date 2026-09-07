@@ -35,6 +35,19 @@ const EMPTY_CHART: ChartData = {
   signals: [],
 }
 
+/** 캔들이 있는 응답 — 표 뷰에서만 마운트한다 (캔들 뷰는 canvas를 요구한다) / A response with candles, mounted only in the table view (the candle view needs a canvas) */
+const WITH_CANDLES: ChartData = {
+  symbol: 'AAPL',
+  period: '1m',
+  candles: [
+    { time: '2026-09-01', open: 100, high: 105, low: 99, close: 104, volume: 1_000 },
+    { time: '2026-09-02', open: 104, high: 106, low: 101, close: 102, volume: 900 },
+  ],
+  ma5: [null, null],
+  ma20: [null, null],
+  signals: [],
+}
+
 function hookResult(over: Partial<QueryResult<ChartData>>): QueryResult<ChartData> {
   return {
     data: undefined,
@@ -46,13 +59,13 @@ function hookResult(over: Partial<QueryResult<ChartData>>): QueryResult<ChartDat
   }
 }
 
-function renderChart(symbol = 'AAPL') {
+function renderChart(symbol = 'AAPL', defaultView?: 'candle' | 'table') {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, refetchInterval: false } },
   })
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <PriceChart symbol={symbol} />
+      <PriceChart symbol={symbol} currency="USD" defaultView={defaultView} />
     </QueryClientProvider>,
   )
   return { ...view, queryClient }
@@ -63,7 +76,7 @@ beforeEach(() => {
 })
 
 describe('PriceChart', () => {
-  it('기간 탭 4개를 1M 선택 상태로 렌더한다 / renders the four period tabs with 1M selected', () => {
+  it('기간 탭 6개를 1M 선택 상태로 렌더한다 / renders the six period tabs with 1M selected', () => {
     renderChart()
 
     const tabs = screen.getByRole('group', { name: '기간 선택' })
@@ -71,7 +84,9 @@ describe('PriceChart', () => {
       '1W',
       '1M',
       '3M',
+      '6M',
       '1Y',
+      '5Y',
     ])
     expect(screen.getByRole('button', { name: '1M' }).getAttribute('aria-pressed')).toBe('true')
     expect(vi.mocked(useChart)).toHaveBeenCalledWith('AAPL', '1m')
@@ -85,6 +100,9 @@ describe('PriceChart', () => {
     expect(vi.mocked(useChart)).toHaveBeenLastCalledWith('AAPL', '1y')
     expect(screen.getByRole('button', { name: '1Y' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByRole('button', { name: '1M' }).getAttribute('aria-pressed')).toBe('false')
+
+    fireEvent.click(screen.getByRole('button', { name: '5Y' }))
+    expect(vi.mocked(useChart)).toHaveBeenLastCalledWith('AAPL', '5y')
   })
 
   /*
@@ -93,7 +111,7 @@ describe('PriceChart', () => {
    * The indicator toggles start with MA5, MA20 and VOL on and BOLL off. A toggle only flips a series' `visible`, so
    * (with no canvas) only the pressed-state contract is pinned here.
    */
-  it('지표 토글 4개를 BOLL만 꺼진 상태로 렌더하고 누르면 뒤집는다 / renders the four indicator toggles with only BOLL off, and flips on click', () => {
+  it('지표 토글 7개를 BOLL·RSI·MACD만 꺼진 상태로 렌더하고 누르면 뒤집는다 / renders the seven indicator toggles with BOLL, RSI and MACD off, and flips on click', () => {
     renderChart()
 
     const toggles = screen.getByRole('group', { name: '지표 선택' })
@@ -102,9 +120,15 @@ describe('PriceChart', () => {
       'MA20',
       'BOLL',
       'VOL',
+      'LVL',
+      'RSI',
+      'MACD',
     ])
     expect(screen.getByRole('button', { name: 'MA5' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'LVL' }).getAttribute('aria-pressed')).toBe('true')
     expect(screen.getByRole('button', { name: 'BOLL' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('button', { name: 'RSI' }).getAttribute('aria-pressed')).toBe('false')
+    expect(screen.getByRole('button', { name: 'MACD' }).getAttribute('aria-pressed')).toBe('false')
 
     fireEvent.click(screen.getByRole('button', { name: 'BOLL' }))
     expect(screen.getByRole('button', { name: 'BOLL' }).getAttribute('aria-pressed')).toBe('true')
@@ -113,6 +137,19 @@ describe('PriceChart', () => {
     expect(screen.getByRole('button', { name: 'VOL' }).getAttribute('aria-pressed')).toBe('false')
     // 기간은 그대로다 — 두 그룹은 독립이다 / The period is untouched; the two groups are independent
     expect(screen.getByRole('button', { name: '1M' }).getAttribute('aria-pressed')).toBe('true')
+  })
+
+  it('표 뷰는 캔들을 데이터 표로 보여주고 차트를 만들지 않는다 / the table view lists the candles and builds no chart', () => {
+    vi.mocked(useChart).mockReturnValue(hookResult({ data: WITH_CANDLES }))
+    const { container } = renderChart('AAPL', 'table')
+
+    expect(screen.getByRole('button', { name: '표' }).getAttribute('aria-pressed')).toBe('true')
+    expect(container.querySelector('.price-chart')).toBeNull()
+    const rows = Array.from(container.querySelectorAll('.candle-table tbody tr'))
+    expect(rows).toHaveLength(2)
+    // 최신순 / Newest first
+    expect(rows[0]!.querySelector('.cell-time')?.textContent).toBe('2026-09-02')
+    expect(screen.getByText('▼-1.92%')).toBeTruthy()
   })
 
   it('로딩 중에는 스피너만 보인다 / shows only a spinner while loading', () => {

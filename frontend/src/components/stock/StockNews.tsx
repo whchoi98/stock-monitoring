@@ -32,7 +32,7 @@ export function StockNews({ symbol }: StockNewsProps) {
   const items = data ?? []
 
   return (
-    <Panel eyebrow="NEWS WIRE" title="종목 뉴스" action={<AsOfBadge asOf={asOf} />} flush>
+    <Panel id="stock-news" eyebrow="NEWS WIRE" title="종목 뉴스" action={<AsOfBadge asOf={asOf} />} flush>
       {isLoading ? (
         <div className="panel-pad">
           <Spinner />

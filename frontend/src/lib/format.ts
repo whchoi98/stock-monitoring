@@ -92,6 +92,16 @@ export function formatPublished(published: string): string | null {
   return Number.isNaN(at) ? null : PUBLISHED_FORMAT.format(at)
 }
 
+/**
+ * 경제지표 값 + 단위 — 백엔드 `unit`은 `"$" | "W" | "%" | ""`이고 `$`만 접두사다. 마켓 스트립과 MACRO 패널이 공유한다.
+ * An indicator's value with its unit; the backend's `unit` is `"$" | "W" | "%" | ""` and only `$` is a prefix. Shared by
+ * the market strip and the macro panel.
+ */
+export function formatIndicatorValue(indicator: { value: number; unit: string }): string {
+  const value = formatPrice(indicator.value, 'USD')
+  return indicator.unit === '$' ? `$${value}` : `${value}${indicator.unit}`
+}
+
 /** 등락 화살표 — 보합(정확히 0)은 "-" / Up/down arrow; exactly 0 is flat "-" */
 export function arrow(change: number): '▲' | '▼' | '-' {
   if (change > 0) return '▲'

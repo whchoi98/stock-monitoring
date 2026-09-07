@@ -31,7 +31,11 @@ PERIOD_MAP = {
     "1w": ("7d", "1h"),
     "1m": ("1mo", "1d"),
     "3m": ("3mo", "1d"),
+    "6m": ("6mo", "1d"),
     "1y": ("1y", "1d"),
+    # 5년은 주봉 — 일봉 5년(≈1,260 캔들)은 응답 크기와 MA5/MA20의 의미가 모두 나빠진다.
+    # Five years is weekly: daily bars over five years (≈1,260 candles) hurt both the payload and what MA5/MA20 mean.
+    "5y": ("5y", "1wk"),
 }
 
 # 분/시간 간격은 시각까지 필요하다 (차트 라이브러리는 두 포맷을 모두 소비)
@@ -167,7 +171,7 @@ def _candles_from_history(hist: Any, interval: str) -> list[Candle]:
     return candles
 
 
-def fetch_chart(symbol: str, period: Literal["1w", "1m", "3m", "1y"]) -> ChartResponse:
+def fetch_chart(symbol: str, period: Literal["1w", "1m", "3m", "6m", "1y", "5y"]) -> ChartResponse:
     """
     종목 차트(캔들 + MA5/MA20 + 크로스 신호) 조회 / Fetch a symbol's chart: candles, MA5/MA20 and cross signals.
 
@@ -176,7 +180,7 @@ def fetch_chart(symbol: str, period: Literal["1w", "1m", "3m", "1y"]) -> ChartRe
 
     Args:
         symbol: yfinance 티커 / yfinance ticker.
-        period: "1w" | "1m" | "3m" | "1y".
+        period: "1w" | "1m" | "3m" | "6m" | "1y" | "5y".
 
     Returns:
         ChartResponse.

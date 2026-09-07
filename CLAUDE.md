@@ -15,12 +15,12 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Backend (`backend/`)
 - Python 3.12, FastAPI + uvicorn (**단일 워커 고정** — L1 캐시·AI 세마포어가 프로세스 단위 / single worker is load-bearing), pydantic v2
 - yfinance (시세/재무), httpx (RSS/기사 조회), boto3 (DynamoDB·Bedrock), defusedxml (RSS 파싱 — 엔티티 확장 DoS 차단)
-- 테스트 / Tests: pytest 363개 (`backend/tests/`)
+- 테스트 / Tests: pytest 364개 (`backend/tests/`)
 
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
 - @tanstack/react-query (서버 상태·폴링), react-router-dom v6, lightweight-charts, react-markdown, @fontsource/pretendard
-- 테스트 / Tests: vitest + @testing-library/react 225개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
+- 테스트 / Tests: vitest + @testing-library/react 280개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
 - UI: 터미널 디자인 언어 (ADR-001) — 패널 그리드 워크스페이스, 마켓 스트립, 워치리스트 레일, 앰버 액센트, JetBrains Mono 숫자 / Terminal design language: panel-grid workspace, market strip, watchlist rail, amber accent, mono numerals
 
 ### Infrastructure (`infra/`)
@@ -42,7 +42,7 @@ frontend/             - React 19 + TS + Vite 8
   src/api/            - client(fetch 래퍼·ApiError), queries(react-query 훅·폴링 상수·useSymbolUniverse), types
   src/components/     - common/(Panel·MarketStrip·SymbolSearch·StatusBar·NewsList…) market/(MarketPulse·StockTable…) stock/(Watchlist·PriceChart·OrderBook·AIPanel…)
   src/pages/          - Dashboard(시장 워크스페이스), StockDetail(종목 워크스페이스), ArticleAnalysis
-  src/lib/            - format, clock, search, markets, aiMessages, articleLink, sse
+  src/lib/            - format, clock, search, markets(QuoteScope), scopedQuotes, newsFilter, localStore(+watchlist/alerts/panel 스토어 — 브라우저 전용), aiMessages, articleLink, sse
   src/styles/         - tokens.css(디자인 토큰 — 색상 하드코딩 금지), global.css
 infra/                - CDK v2 Python (venv: infra/.venv, cdk.json app = .venv/bin/python3 app.py)
   stacks/stock_monitoring_stack.py - 단일 스택 전체 (캐시/시크릿/ECS/ALB/CloudFront/알람)
@@ -57,8 +57,8 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 
 ```bash
 # 테스트 / Tests
-cd backend && .venv/bin/pytest -q          # 백엔드 (363)
-cd frontend && npx vitest run              # 프론트 (225)
+cd backend && .venv/bin/pytest -q          # 백엔드 (364)
+cd frontend && npx vitest run              # 프론트 (280)
 make test                                  # 전체
 
 # 로컬 실행 / Local run
@@ -88,6 +88,8 @@ bash scripts/smoke.sh https://d2wa9w1vbqlndl.cloudfront.net stock-monitoring-alb
   / Korean market convention: up=red, down=blue, flat=body color. Amber accent; green is state-only. Never hardcode colors; use the tokens.
 - **위젯은 `Panel`(eyebrow 대문자 영문 + 한국어 제목 + 액션)로 감싼다** — 데이터 없는 가짜 패널 금지 (ADR-001).
   / Every widget sits in a `Panel`; never add a panel without real data behind it.
+- **사용자 상태(관심 종목 ★·가격 알림·패널 접힘)는 브라우저 localStorage에만** — `frontend/src/lib/localStore.ts` 스토어를 거치고 백엔드는 모른다.
+  / User state (watchlist, price alerts, collapsed panels) lives only in the browser via the localStore helpers; the backend never sees it.
 - **조용한 실패 금지 / No silent failures**: 실패는 단일 라인 JSON 로그 + `source_status` degraded 반영.
 - **오류 본문은 고정 문구만** (`ai_unavailable`, `ai_failed`, `article_unavailable`, `rate_limited` 등) — 예외 문자열/ARN/계정 정보는 서버 로그에만.
 - **워커 1개 고정** (`--workers 1`, `desired_count=1`): L1 캐시와 AI 전역 세마포어가 프로세스 단위 — 스케일아웃 전 반드시 설계 재검토.
