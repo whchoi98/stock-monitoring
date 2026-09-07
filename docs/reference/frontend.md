@@ -7,20 +7,21 @@
 ## English
 
 ### 1. Overview
-A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboard, StockDetail, ArticleAnalysis — share an app shell (top nav / `Outlet` / bottom ticker). All server state flows through TanStack Query hooks that unwrap the backend envelope, the two AI endpoints excepted: they stream SSE and are consumed by `api/aiStream.ts` (§3). Polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
+A React 19 + TypeScript (strict) SPA built with Vite 8, laid out as a **terminal workspace** (ADR-001). Three pages — Dashboard (market workspace), StockDetail (stock workspace with a watchlist rail), ArticleAnalysis — share an app shell: a sticky top block (command bar with brand, nav, ⌘K symbol search and theme toggle; a market strip of index cells and an indicator crawl), the page via `Outlet`, and a sticky bottom status bar (market state, source, polling cadence, as-of, KST clock). All server state flows through TanStack Query hooks that unwrap the backend envelope, the two AI endpoints excepted: they stream SSE and are consumed by `api/aiStream.ts` (§3). Polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
 
 ### 2. Components
 | Component | Path | Purpose |
 |---|---|---|
 | Entry + routes | `frontend/src/main.tsx` | `RouterProvider` and the route table (routes deliberately not in `App.tsx` — oxlint `react/only-export-components` preserves HMR) |
-| App shell | `frontend/src/App.tsx` | Nav / `Outlet` / `TickerBar`, plus `NotFound` (child `*` route) and `RouteError` (shell `errorElement`) so one dead link never sinks the app |
+| App shell | `frontend/src/App.tsx` | Command bar (brand, nav, `SymbolSearch`, `ThemeToggle`) + `MarketStrip` in one sticky block / `Outlet` / `StatusBar`, plus `NotFound` (child `*` route) and `RouteError` (shell `errorElement`) so one dead link never sinks the app |
 | HTTP client | `frontend/src/api/client.ts` | Same-origin `/api/...` paths (no base URL); `ApiError { status, detail }`; network failures propagate unwrapped |
-| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET data only, no AI |
+| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET data only, no AI. `useSymbolUniverse(enabled)` feeds the search from both markets' quotes on the shared `['quotes', market]` keys, gated by `enabled` and without its own polling |
 | AI streaming hooks | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`; the two AI endpoints are SSE, so this file (and only this file) calls fetch directly — see §3 |
 | API types | `frontend/src/api/types.ts` | `Envelope<T>` and every payload type |
 | Pages | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
-| Components | `frontend/src/components/` | `common/` (Card, ChangeText, TickerBar, ThemeToggle, badges), `market/` (StockTable, IndexCards, NewsFeed, SectorBars), `stock/` (PriceChart, OrderBook, AIPanel, FundamentalCards, …) |
-| Utilities | `frontend/src/lib/` | `format.ts` (number/price formatting), `aiMessages.ts` (AI error → user wording + `phase` labels), `articleLink.ts` (news-link fork: analysis screen vs. source in a new tab), `sse.ts` (incremental SSE frame parser) |
+| Components | `frontend/src/components/` | `common/` (Panel, Stat, MarketStrip, SymbolSearch, StatusBar, MarketStatus, Clock, MarketTabs, NewsList, ChangeText, ThemeToggle, badges, ErrorCard, Spinner), `market/` (MarketPulse, SectorBars, StockTable, NewsFeed), `stock/` (Watchlist, StockHeader, PriceChart, OrderBook, InvestorPanel, FundamentalCards, ReturnsRow, StockNews, AIPanel, Week52Bar) |
+| Utilities | `frontend/src/lib/` | `format.ts` (number/price formatting), `clock.ts` (HH:MM / KST HH:MM:SS), `search.ts` (`searchSymbols` ranking: exact symbol > symbol prefix > name prefix > substring; KR codes match without `.KS/.KQ`), `markets.ts` (market labels), `aiMessages.ts` (AI error → user wording + `phase` labels), `articleLink.ts` (news-link fork: analysis screen vs. source in a new tab), `sse.ts` (incremental SSE frame parser) |
+| Chart maths | `frontend/src/components/stock/chartData.ts`, `indicators.ts` | Pure, tested transforms: candles/lines/markers/time keys; `bollingerBands` (20, 2σ, population) and `summarizeCandle` for the OHLC legend |
 | Build config | `frontend/vite.config.ts` | Dev proxy `/api → http://localhost:8000`; vitest jsdom + `globals: true` (testing-library auto-cleanup needs a global `afterEach`) |
 
 ### 3. Key Decisions
@@ -30,7 +31,10 @@ A React 19 + TypeScript (strict) SPA built with Vite 8. Three pages — Dashboar
 - **Polling only via the two exported constants** (45s quotes / 120s news); hand-rolled `setInterval` is forbidden.
 - **UI branches on `ApiError.status`/`detail`** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`); `readDetail` never throws even on HTML error bodies from ALB/CloudFront.
 - **Deploy build goes into the backend**: `npm run build:deploy` outputs to `backend/static`, which FastAPI serves (`make build` wraps this).
-- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 176 tests); lint is oxlint.
+- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 225 tests); lint is oxlint.
+- **Symbol search loads nothing until focused**: `SymbolSearch` calls `useSymbolUniverse(focused)`; `⌘K`/`Ctrl+K`/`/` focus it, ↑↓ select, Enter navigates to `/stocks/:symbol`. It is an ARIA 1.2 combobox (input `combobox`, list `listbox`, `aria-activedescendant`).
+- **The watchlist rail follows the detail's `market`**, never a guess from the symbol suffix; `StockDetail` mounts it only once the detail has arrived and remounts it (`key={market}`) on a cross-market switch.
+- **The chart's indicator toggles flip `visible`**, never recreate a series; the OHLC legend is fed by `subscribeCrosshairMove` through a time→index map and falls back to the last candle off-chart.
 
 #### AI streaming (SSE)
 The two AI endpoints answer with `text/event-stream` instead of the envelope, so `frontend/src/api/aiStream.ts` is the **one** file that calls fetch directly — a deliberate, bounded exception to "server state lives in react-query", which caches a single settled result per key and has nowhere to hold a response that grows. Everything else stays in query hooks.
@@ -66,20 +70,21 @@ The two AI endpoints answer with `text/event-stream` instead of the envelope, so
 ## 한국어
 
 ### 1. 개요
-React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, StockDetail, ArticleAnalysis — 가 앱 셸(상단 네비 / `Outlet` / 하단 티커)을 공유한다. 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거친다 — 단 두 AI 엔드포인트는 예외로, SSE로 흘러오며 `api/aiStream.ts`가 소비한다(§3). 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
+React 19 + TypeScript(strict) SPA, Vite 8 빌드, **터미널 워크스페이스** 레이아웃(ADR-001). 세 페이지 — Dashboard(시장 워크스페이스), StockDetail(워치리스트 레일이 있는 종목 워크스페이스), ArticleAnalysis — 가 앱 셸을 공유한다: 상단 sticky 블록(브랜드·네비·⌘K 종목 검색·테마 토글의 커맨드 바, 지수 셀 + 지표 크롤의 마켓 스트립), `Outlet`의 페이지, 하단 sticky 상태 바(장 상태·출처·폴링 주기·기준 시각·KST 시계). 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거친다 — 단 두 AI 엔드포인트는 예외로, SSE로 흘러오며 `api/aiStream.ts`가 소비한다(§3). 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
 
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
 |---|---|---|
 | 엔트리 + 라우트 | `frontend/src/main.tsx` | `RouterProvider`와 라우트 테이블 (의도적으로 `App.tsx`에 두지 않음 — oxlint `react/only-export-components`가 HMR 보존) |
-| 앱 셸 | `frontend/src/App.tsx` | 네비 / `Outlet` / `TickerBar` + `NotFound`(`*` 자식 라우트)·`RouteError`(셸 `errorElement`) — 죽은 링크 하나가 앱 전체를 내려앉히지 않는다 |
+| 앱 셸 | `frontend/src/App.tsx` | 커맨드 바(브랜드·네비·`SymbolSearch`·`ThemeToggle`) + `MarketStrip`을 한 sticky 블록에 / `Outlet` / `StatusBar` + `NotFound`(`*` 자식 라우트)·`RouteError`(셸 `errorElement`) — 죽은 링크 하나가 앱 전체를 내려앉히지 않는다 |
 | HTTP 클라이언트 | `frontend/src/api/client.ts` | 같은 오리진 `/api/...` 경로(base URL 없음). `ApiError { status, detail }`. 네트워크 실패는 감싸지 않고 전파 |
-| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET 데이터 전용(AI 없음) |
+| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET 데이터 전용(AI 없음). `useSymbolUniverse(enabled)`는 두 시장 시세를 공유 키 `['quotes', market]`로 검색에 공급하며 `enabled` 게이트·자체 폴링 없음 |
 | AI 스트리밍 훅 | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`. 두 AI 엔드포인트가 SSE라 이 파일만 fetch를 직접 쓴다 — §3 참조 |
 | API 타입 | `frontend/src/api/types.ts` | `Envelope<T>`와 모든 페이로드 타입 |
 | 페이지 | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
-| 컴포넌트 | `frontend/src/components/` | `common/`(Card, ChangeText, TickerBar, ThemeToggle, 배지), `market/`(StockTable, IndexCards, NewsFeed, SectorBars), `stock/`(PriceChart, OrderBook, AIPanel, FundamentalCards 등) |
-| 유틸리티 | `frontend/src/lib/` | `format.ts`(숫자/가격 포맷), `aiMessages.ts`(AI 오류 → 사용자 문구 + `phase` 라벨), `articleLink.ts`(뉴스 링크 분기 — 분석 화면 vs 원문 새 탭), `sse.ts`(SSE 프레임 파서) |
+| 컴포넌트 | `frontend/src/components/` | `common/`(Panel, Stat, MarketStrip, SymbolSearch, StatusBar, MarketStatus, Clock, MarketTabs, NewsList, ChangeText, ThemeToggle, 배지, ErrorCard, Spinner), `market/`(MarketPulse, SectorBars, StockTable, NewsFeed), `stock/`(Watchlist, StockHeader, PriceChart, OrderBook, InvestorPanel, FundamentalCards, ReturnsRow, StockNews, AIPanel, Week52Bar) |
+| 유틸리티 | `frontend/src/lib/` | `format.ts`(숫자/가격 포맷), `clock.ts`(HH:MM / KST HH:MM:SS), `search.ts`(`searchSymbols` 순위: 심볼 정확 > 심볼 접두 > 종목명 접두 > 포함. KR 코드는 `.KS/.KQ` 없이도 매칭), `markets.ts`(시장 라벨), `aiMessages.ts`(AI 오류 → 사용자 문구 + `phase` 라벨), `articleLink.ts`(뉴스 링크 분기 — 분석 화면 vs 원문 새 탭), `sse.ts`(SSE 프레임 파서) |
+| 차트 계산 | `frontend/src/components/stock/chartData.ts`, `indicators.ts` | 순수·테스트된 변환: 캔들/라인/마커/시각 키. `bollingerBands`(20, 2σ, 모집단)와 OHLC 레전드용 `summarizeCandle` |
 | 빌드 설정 | `frontend/vite.config.ts` | dev 프록시 `/api → http://localhost:8000`. vitest jsdom + `globals: true` (testing-library 자동 cleanup은 전역 `afterEach` 필요) |
 
 ### 3. 주요 결정
@@ -89,7 +94,10 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드. 세 페이지 — Dashboard, S
 - **폴링은 export된 상수 두 개만** (시세 45초 / 뉴스 120초). 수동 `setInterval` 금지.
 - **화면은 `ApiError.status`/`detail`로 분기** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`). `readDetail`은 ALB/CloudFront의 HTML 오류 본문에서도 절대 throw하지 않는다.
 - **배포 빌드는 백엔드로**: `npm run build:deploy`가 `backend/static`에 출력, FastAPI가 서빙 (`make build`가 래핑).
-- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 176개). 린트는 oxlint.
+- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 225개). 린트는 oxlint.
+- **종목 검색은 포커스 전까지 아무것도 요청하지 않는다**: `SymbolSearch`가 `useSymbolUniverse(focused)`를 부른다. `⌘K`/`Ctrl+K`/`/`로 포커스, ↑↓ 선택, Enter로 `/stocks/:symbol` 이동. ARIA 1.2 콤보박스(입력 `combobox`, 목록 `listbox`, `aria-activedescendant`).
+- **워치리스트 레일은 상세의 `market`을 따른다** — 심볼 접미사로 추측하지 않는다. `StockDetail`은 상세가 도착한 뒤에만 레일을 마운트하고, 시장이 바뀌는 전환에는 `key={market}`으로 다시 마운트한다.
+- **차트 지표 토글은 `visible`만 바꾼다** — 시리즈를 다시 만들지 않는다. OHLC 레전드는 `subscribeCrosshairMove`가 시각→인덱스 맵을 거쳐 채우고, 차트 밖에서는 마지막 캔들로 되돌아간다.
 
 #### AI 스트리밍 (SSE)
 두 AI 엔드포인트는 envelope 대신 `text/event-stream`으로 답한다. 그래서 `frontend/src/api/aiStream.ts`가 fetch를 직접 쓰는 **유일한** 파일이다 — "서버 상태는 react-query로만"의 의도적이고 좁은 예외다(react-query는 키마다 완결된 결과 하나를 캐시하므로 자라나는 응답을 담을 자리가 없다). 그 밖의 서버 상태는 전부 쿼리 훅에 남는다.

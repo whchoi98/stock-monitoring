@@ -44,7 +44,7 @@
 - **backend/app/models.py** -- pydantic models and the response `envelope` (`{"asOf", "marketOpen", "data"}`).
 
 ### Presentation Layer
-- **frontend/** -- React 19 + TypeScript SPA (Vite 8): Dashboard, StockDetail, ArticleAnalysis pages; @tanstack/react-query for data; lightweight-charts for candles; Toss-Invest-style dark theme with Korean color convention (up = red, down = blue), Pretendard font.
+- **frontend/** -- React 19 + TypeScript SPA (Vite 8): Dashboard, StockDetail, ArticleAnalysis pages; @tanstack/react-query for data; lightweight-charts for candles; terminal-style workspace (ADR-001: panel grid, market strip, watchlist rail, amber accent) with the Korean colour convention (up = red, down = blue), Pretendard + JetBrains Mono.
 - **backend/static/** -- the `vite build --outDir ../backend/static` output, served by FastAPI `StaticFiles` with an SPA fallback (non-API GET 404 → `index.html`).
 - **CloudFront distribution** -- viewer entry point: redirect-to-https, API behavior uncached (`CACHING_DISABLED`), `/assets/*` (immutable hashed filenames) long-cached (`CACHING_OPTIMIZED`).
 
@@ -235,7 +235,7 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 - **backend/app/models.py** -- pydantic 모델과 응답 `envelope`(`{"asOf", "marketOpen", "data"}`).
 
 ### Presentation Layer (표현 계층)
-- **frontend/** -- React 19 + TypeScript SPA(Vite 8): Dashboard, StockDetail, ArticleAnalysis 페이지. 데이터는 @tanstack/react-query, 캔들은 lightweight-charts. Toss Invest 참조 다크 테마, 한국 관례 색상(상승=빨강/하락=파랑), Pretendard 폰트.
+- **frontend/** -- React 19 + TypeScript SPA(Vite 8): Dashboard, StockDetail, ArticleAnalysis 페이지. 데이터는 @tanstack/react-query, 캔들은 lightweight-charts. 터미널 스타일 워크스페이스(ADR-001: 패널 그리드·마켓 스트립·워치리스트 레일·앰버 액센트), 한국 관례 색상(상승=빨강/하락=파랑), Pretendard + JetBrains Mono.
 - **backend/static/** -- `vite build --outDir ../backend/static` 산출물. FastAPI `StaticFiles`가 서빙하며 SPA fallback(비-API GET 404 → `index.html`)을 갖는다.
 - **CloudFront 배포** -- 뷰어 진입점: redirect-to-https, API는 미캐시(`CACHING_DISABLED`), `/assets/*`(불변 해시 파일명)는 장기 캐시(`CACHING_OPTIMIZED`).
 
