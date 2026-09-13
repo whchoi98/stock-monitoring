@@ -226,7 +226,7 @@ async def get_overview(state: AppState = Depends(deps.get_state)) -> dict:
 async def get_quotes(market: Market, state: AppState = Depends(deps.get_state)) -> dict:
     """한 시장의 50종목 시세 테이블 / One market's 50-symbol quote table."""
     data, as_of = await cached_quotes(state, market)
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(market), as_of)
 
 
 @router.get("/news")

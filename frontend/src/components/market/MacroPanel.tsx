@@ -11,6 +11,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { useOverview } from '../../api/queries.ts'
 import { changeClass, formatIndicatorValue, formatPct } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -24,7 +25,7 @@ export function MacroPanel() {
     void queryClient.invalidateQueries({ queryKey: ['overview'] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="경제 지표를 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="경제 지표를 불러오지 못했습니다" />
 
   // 원본 배열은 쿼리 캐시의 것이므로 복사해서 정렬한다 / The array belongs to the query cache, so sort a copy
   const rows = [...(data?.indicators ?? [])].sort(
@@ -35,6 +36,7 @@ export function MacroPanel() {
 
   return (
     <Panel id="macro" eyebrow="MACRO" title="경제 지표" action={<AsOfBadge asOf={asOf} />}>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <Spinner />
       ) : rows.length === 0 ? (

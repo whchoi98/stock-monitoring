@@ -19,9 +19,11 @@ export interface StatusBarProps {
   marketOpen: boolean | undefined
   /** envelope의 `asOf` — 기준 시각 칩용 / The envelope's `asOf`, for the as-of chip */
   asOf?: string
+  /** 갱신 실패를 장 상태와 구별한다 / Distinguish a failed refresh from the market session state. */
+  error?: Error | null
 }
 
-export function StatusBar({ marketOpen, asOf }: StatusBarProps) {
+export function StatusBar({ marketOpen, asOf, error }: StatusBarProps) {
   const asOfClock = asOf === undefined ? null : formatClock(asOf)
   const pendingAlerts = useAlerts().filter((alert) => alert.triggeredAt === undefined).length
   const collapsed = useCollapsedCount()
@@ -29,7 +31,8 @@ export function StatusBar({ marketOpen, asOf }: StatusBarProps) {
 
   return (
     <footer className="statusbar">
-      <MarketStatus marketOpen={marketOpen} />
+      <MarketStatus marketOpen={online && error == null ? marketOpen : undefined} />
+      {online && error != null && <span className="status status-offline" role="status">갱신 지연</span>}
       {/* 서비스 워커가 셸을 오프라인에서도 열어 주므로 데이터가 멈춘 이유를 알린다 / The worker opens the shell offline, so say why the data stopped */}
       {!online && (
         <span className="status status-offline" title="네트워크 연결이 끊겼습니다 — 마지막 데이터가 표시됩니다">

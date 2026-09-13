@@ -86,5 +86,5 @@ it('index 라우트가 대시보드를 렌더한다 / the index route renders th
   expect(await screen.findByText('S&P 500')).toBeTruthy()
   expect(await screen.findByText('시장 요약 · 미국')).toBeTruthy()
   expect(await screen.findByText('미국 시세')).toBeTruthy()
-  expect(await screen.findByText('Apple')).toBeTruthy()
+  expect((await screen.findByRole('link', { name: 'Apple' })).getAttribute('href')).toBe('/stocks/AAPL')
 })

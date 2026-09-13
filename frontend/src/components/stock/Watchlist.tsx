@@ -18,6 +18,7 @@ import { arrow, changeClass, formatPct, formatPrice } from '../../lib/format.ts'
 import { type QuoteScope, SCOPE_LABEL } from '../../lib/markets.ts'
 import { useScopedQuotes } from '../../lib/scopedQuotes.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { ScopeTabs } from '../common/ScopeTabs.tsx'
@@ -56,6 +57,7 @@ export function Watchlist({ initialMarket, selected }: WatchlistProps) {
   }, [selected, quotes])
 
   const rows = quotes ?? []
+  const hasRows = rows.length > 0
 
   return (
     <Panel
@@ -70,7 +72,8 @@ export function Watchlist({ initialMarket, selected }: WatchlistProps) {
       }
       flush
     >
-      {error !== null ? (
+      <DataNotice error={hasRows ? error : null} onRetry={retry} />
+      {error !== null && !hasRows ? (
         <ErrorCard onRetry={retry} message={`${SCOPE_LABEL[scope]} 종목을 불러오지 못했습니다`} />
       ) : isLoading ? (
         <div className="panel-pad">
@@ -97,7 +100,7 @@ export function Watchlist({ initialMarket, selected }: WatchlistProps) {
                   <span className="wl-symbol">{quote.symbol}</span>
                   <span className="wl-price">{formatPrice(quote.price, quote.currency)}</span>
                   <span className="wl-name" title={quote.name}>
-                    {quote.name}
+                    {quote.name_ko?.trim() || quote.name}
                   </span>
                   <span className={`wl-pct ${kind}`}>
                     {kind === 'flat' ? arrow(quote.change) : `${arrow(quote.change)}${formatPct(quote.change_pct)}`}

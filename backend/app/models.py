@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 import re
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 
 # ============================================================================
@@ -101,6 +101,10 @@ class ChartResponse(BaseModel):
 
 class StockDetailResponse(BaseModel):
     """종목 상세 정보 응답 / Stock detail information response."""
+    # 조회 중 부분 실패를 라우트에 전달한다 (JSON/캐시에는 포함하지 않음).
+    # Internal fetch failures for route health reporting; never serialized into JSON or the cache.
+    _source_failures: list[str] = PrivateAttr(default_factory=list)
+
     symbol: str
     name: str
     name_ko: Optional[str] = None

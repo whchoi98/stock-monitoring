@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.api import deps
@@ -85,6 +86,30 @@ def test_quotes_rejects_unknown_market_with_422(client):
     """us/kr 외의 market 값과 누락은 422 / Any market other than us/kr, and a missing one, are 422."""
     assert client.get("/api/market/quotes", params={"market": "xx"}).status_code == 422
     assert client.get("/api/market/quotes").status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("instant", "us_open", "kr_open"),
+    [
+        ("2026-09-10T02:00:00+00:00", False, True),
+        ("2026-09-10T14:00:00+00:00", True, False),
+        ("2026-09-13T02:00:00+00:00", False, False),
+    ],
+)
+def test_quotes_report_the_requested_markets_hours(client, market_clock, instant, us_open, kr_open):
+    """시세의 장중 표시는 요청 시장에 한정 / Quote marketOpen describes the requested market."""
+    market_clock(instant)
+
+    for market, expected in (("us", us_open), ("kr", kr_open)):
+        response = client.get("/api/market/quotes", params={"market": market})
+        assert response.status_code == 200
+        assert response.json()["marketOpen"] is expected, market
+
+    # 여러 시장을 포함하는 응답은 기존 OR 규약 유지 / Mixed-market endpoints retain the aggregate flag.
+    for path in ("/api/market/overview", "/api/market/news"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert response.json()["marketOpen"] is (us_open or kr_open)
 
 
 def test_news_returns_feed_items(client):

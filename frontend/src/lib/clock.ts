@@ -8,8 +8,9 @@
  * 2026-08-03, proven in the TickerBar review).
  */
 
-/** 브라우저 로컬 HH:MM / Browser-local HH:MM */
-const LOCAL_HHMM = new Intl.DateTimeFormat('ko-KR', {
+/** 데이터 기준 시각도 상태 바와 같은 KST / Data timestamps share the status bar's KST zone. */
+const KST_HHMM = new Intl.DateTimeFormat('ko-KR', {
+  timeZone: 'Asia/Seoul',
   hour: '2-digit',
   minute: '2-digit',
   hourCycle: 'h23',
@@ -25,12 +26,12 @@ const KST_HHMMSS = new Intl.DateTimeFormat('ko-KR', {
 })
 
 /**
- * ISO → 브라우저 로컬 `HH:MM`. 파싱 불가면 null — 칩/열을 그리지 않는 신호다.
- * ISO to the browser-local `HH:MM`; null when unparseable, meaning "draw nothing".
+ * ISO → 서울 `HH:MM`. 파싱 불가면 null — 칩/열을 그리지 않는 신호다.
+ * ISO to Seoul `HH:MM`; null when unparseable, meaning "draw nothing".
  */
 export function formatClock(iso: string): string | null {
   const at = Date.parse(iso)
-  return Number.isNaN(at) ? null : LOCAL_HHMM.format(at)
+  return Number.isNaN(at) ? null : KST_HHMM.format(at)
 }
 
 /** 에포크 ms → 서울 `HH:MM:SS` / Epoch ms to Seoul `HH:MM:SS` */

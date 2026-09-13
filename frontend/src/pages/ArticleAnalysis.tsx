@@ -33,6 +33,8 @@ import { ErrorCard } from '../components/common/ErrorCard.tsx'
 import { Panel } from '../components/common/Panel.tsx'
 import { Spinner } from '../components/common/Spinner.tsx'
 import { aiErrorMessage, aiPhaseLabel } from '../lib/aiMessages.ts'
+import { isArticleUrl } from '../lib/articleInput.ts'
+import { ArticleStart } from './ArticleStart.tsx'
 
 /** 제목 길이 상한 — 백엔드 `MAX_TITLE_LEN`과 같은 값 / The title cap, the same value as the backend's `MAX_TITLE_LEN` */
 const MAX_TITLE_LEN = 512
@@ -61,20 +63,7 @@ export default function ArticleAnalysis() {
    */
   const language: Language = params.get('language') === 'en' ? 'en' : 'ko'
 
-  if (url === '') {
-    return (
-      <div className="article">
-        <Panel eyebrow="ARTICLE" title="잘못된 접근">
-          <p className="empty">
-            분석할 기사 주소가 없습니다. 뉴스 와이어에서 기사를 고르면 분석이 시작됩니다.
-          </p>
-          <p className="notice-back">
-            <Link to="/">시장 화면으로 이동</Link>
-          </p>
-        </Panel>
-      </div>
-    )
-  }
+  if (!isArticleUrl(url)) return <ArticleStart key={url} initialUrl={url} />
 
   /*
    * 제목이 없으면 url을 제목 자리에 쓴다 — 백엔드가 `title`을 1자 이상 요구하고(422), 없는 제목을
@@ -162,6 +151,7 @@ function ArticleAnalysisBody({ url, title, language }: ArticleAnalysisBodyProps)
 
   return (
     <div className="article">
+      <Link className="article-back" to="/articles">← 다른 기사 분석하기</Link>
       <header className="article-head">
         <h1 className="article-title">{title}</h1>
         {/* 원문은 외부 사이트다 — 새 탭으로 열고 rel로 레퍼러/opener를 끊는다 / The source is off-site: a new tab, with the referrer and opener cut by rel */}

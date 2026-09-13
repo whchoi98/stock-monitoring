@@ -12,6 +12,9 @@
  */
 import type { Envelope } from './types.ts'
 
+/** 20초 업스트림 제한에 여유를 둔 GET 전체 제한시간 / GET deadline with headroom for the 20s upstream limit */
+export const GET_TIMEOUT_MS = 30_000
+
 /**
  * 비 2xx 응답 / A non-2xx response.
  *
@@ -82,7 +85,30 @@ async function request<T>(path: string, init: RequestInit): Promise<Envelope<T>>
  * There is no POST here: no POST endpoint returns an envelope any more. The two AI endpoints answer with
  * `text/event-stream`, so `api/aiStream.ts` calls fetch directly — `request` consumes the body as JSON in one
  * go and cannot read a stream. If a POST is ever needed again it comes back with its own test.
+ *
+ * 호출자 취소와 제한시간은 헤더뿐 아니라 본문 읽기까지 포함한다. 완료 후 타이머·구독을 모두 해제한다.
+ * Caller cancellation and the deadline cover body consumption as well as headers; settlement releases both
+ * the timer and the caller's listener. TimeoutError and caller abort reasons stay distinct from HTTP errors.
  */
-export function apiGet<T>(path: string): Promise<Envelope<T>> {
-  return request<T>(path, { method: 'GET' })
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<Envelope<T>> {
+  signal?.throwIfAborted()
+  const controller = new AbortController()
+  const abort = () => controller.abort(signal?.reason)
+  signal?.addEventListener('abort', abort, { once: true })
+  const timeout = setTimeout(
+    () => controller.abort(new DOMException('GET request timed out', 'TimeoutError')),
+    GET_TIMEOUT_MS,
+  )
+
+  try {
+    return await request<T>(path, { method: 'GET', signal: controller.signal })
+  } catch (error) {
+    // readDetail의 HTML 폴백이 본문 취소를 HTTP 오류로 바꾸지 않게 한다.
+    // readDetail's HTML fallback must not turn an aborted error body into an HTTP error.
+    controller.signal.throwIfAborted()
+    throw error
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', abort)
+  }
 }

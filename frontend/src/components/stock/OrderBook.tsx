@@ -22,6 +22,7 @@ import { useOrderBook } from '../../api/queries.ts'
 import type { Market, OrderBookEntry } from '../../api/types.ts'
 import { formatPrice, formatVolume, type Currency } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { SimulatedBadge } from '../common/SimulatedBadge.tsx'
@@ -57,7 +58,7 @@ export function OrderBook({ symbol }: OrderBookProps) {
     void queryClient.invalidateQueries({ queryKey: ['orderbook', symbol] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="호가를 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="호가를 불러오지 못했습니다" />
 
   const entries = data?.entries ?? []
   const asks = descending(entries, 'ask')
@@ -101,6 +102,7 @@ export function OrderBook({ symbol }: OrderBookProps) {
       }
       flush
     >
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <div className="panel-pad">
           <Spinner />

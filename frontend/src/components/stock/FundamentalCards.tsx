@@ -18,6 +18,7 @@ import { useStock } from '../../api/queries.ts'
 import type { StockDetail } from '../../api/types.ts'
 import { formatMarketCap, formatPrice, formatVolume } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -66,10 +67,11 @@ export function FundamentalCards({ symbol }: FundamentalCardsProps) {
     void queryClient.invalidateQueries({ queryKey: ['stock', symbol] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="핵심 지표를 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="핵심 지표를 불러오지 못했습니다" />
 
   return (
-    <Panel id="fundamentals" eyebrow="FUNDAMENTALS" title="핵심 지표" action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="fundamentals" eyebrow="FUNDAMENTALS" title="핵심 지표" action={<AsOfBadge asOf={data?.last_updated ?? asOf} />}>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading || data === undefined ? (
         <Spinner />
       ) : (

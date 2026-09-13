@@ -35,7 +35,7 @@ Every data endpoint (everything except `/api/health`) wraps its payload:
 ```
 
 - `asOf` — ISO 8601 timestamp of when the data was fetched (cache write time). For stock detail with a live-price overlay, it is the quote's timestamp.
-- `marketOpen` — whether any tracked market (US or KR) is currently open.
+- `marketOpen` — whether the requested market is open for `/api/market/quotes` and `/api/stocks/*`; overview, general news and AI envelopes use the combined US-or-KR flag.
 - `data` — the endpoint-specific payload documented below.
 
 The two AI endpoints carry this same envelope **inside their SSE `final` event** rather than as the response body — see the AI (Bedrock) section below.
@@ -106,13 +106,15 @@ No parameters.
 GET /api/market/quotes?market=us
 ```
 
-One market's 50-symbol quote table.
+Quotes for one market's configured 50-symbol universe. Responses can contain fewer rows under an upstream shortfall; clients must not assume exactly 50 rows.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `market` | `"us"` \| `"kr"` | Yes | Any other value → `422` |
 
 **Response** `200 OK` — envelope; `data` is an array of quote objects (`symbol`, `name`, `name_ko`, `price`, `change`, `change_pct`, `volume`, `market_cap`, `sector`, …). `name_ko` is the Korean stock name from `config.STOCK_NAMES_KO` (`null` when the curated name has no Hangul, e.g. KT, LG).
+
+**Availability**: a usable partial response may be HTTP 200 while `/api/health.sources.yahoo` is `degraded`; a total failure without cached fallback is 503. The workspace renders the received count.
 
 **Caching**: key `quotes:{market}`, stored TTL 24 h; pre-warmed every **45 s** open / **600 s** closed. `market_cap` refreshes on its own 600 s window.
 
@@ -141,6 +143,8 @@ GET /api/stocks/{symbol}
 Detail header (`name`, `name_ko`), key ratios (P/E, EPS, P/B, beta), 52-week range, market cap, sector, and period returns.
 
 **Response** `200 OK` — envelope; `data` is the detail object.
+
+**Consistency**: the quote overlay also derives `prev_close = price - change`; it does not mutate the cached fundamentals. `last_updated` is the fundamentals timestamp and can be older than the overlaid `asOf`. Recoverable field failures retain usable prices and mark the source degraded; non-finite ratios become `null`, and internal failure metadata is never returned.
 
 **Caching**: fundamentals under key `detail:{symbol}`, TTL **12 h** (`FUNDAMENTALS_TTL=43200`). Price-like fields (`price`, `change`, `change_pct`, `volume`, plus the `day_change`/`day_change_pct` mirrors) are **overlaid at request time** from the `quotes:{market}` L1 cache (45 s refresh); when overlaid, `asOf` is the quote's timestamp. If the L1 quote is missing, the cached detail's own price serves as fallback (not an error).
 
@@ -337,7 +341,7 @@ Notes:
 ```
 
 - `asOf` — 데이터를 조회한 시각(캐시 기록 시각)의 ISO 8601 타임스탬프. 가격 오버레이가 적용된 종목 상세에서는 시세의 타임스탬프다.
-- `marketOpen` — 추적 중인 시장(미국 또는 한국) 중 하나라도 장중인지 여부.
+- `marketOpen` — `/api/market/quotes`와 `/api/stocks/*`는 해당 시장의 장중 여부. 개요·전체 뉴스·AI envelope은 미국 또는 한국 중 하나라도 장중인지 여부.
 - `data` — 아래에 문서화된 엔드포인트별 페이로드.
 
 두 AI 엔드포인트는 이 envelope을 응답 본문이 아니라 **SSE `final` 이벤트 안에** 실어 보낸다 — 아래 AI (Bedrock) 절 참조.
@@ -443,6 +447,8 @@ GET /api/stocks/{symbol}
 상세 헤더(`name`, `name_ko`), 핵심지표(PER, EPS, PBR, 베타), 52주 범위, 시가총액, 섹터, 기간수익률.
 
 **응답** `200 OK` — envelope; `data`는 상세 객체.
+
+**일관성**: 가격 오버레이가 같은 시세의 `price - change`로 `prev_close`를 맞추며 캐시된 펀더멘털은 변경하지 않는다. `last_updated`는 재무 기준 시각이므로 오버레이 `asOf`보다 오래될 수 있다. 복구 가능한 필드 실패는 가격을 유지하며 제공원을 degraded로 표시하고, 비유한 비율은 `null`로 정규화한다. 내부 실패 메타데이터는 응답에 포함하지 않는다.
 
 **캐싱**: 펀더멘털은 키 `detail:{symbol}`, TTL **12시간**(`FUNDAMENTALS_TTL=43200`). 가격 계열 필드(`price`, `change`, `change_pct`, `volume`과 미러 필드 `day_change`/`day_change_pct`)는 **요청 시점에** `quotes:{market}` L1 캐시(45초 갱신)에서 덮어쓴다; 덮어쓴 경우 `asOf`는 시세의 타임스탬프다. L1에 시세가 없으면 캐시된 상세의 가격으로 폴백한다(오류 아님).
 

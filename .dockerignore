@@ -2,6 +2,12 @@
 **/node_modules
 **/__pycache__
 backend/static
+frontend/dist
+frontend/playwright-report
+frontend/test-results
+frontend/e2e
+.artifacts
+img
 docs
 # Dockerfile은 frontend/와 backend/만 COPY한다. 아래 디렉터리들이 컨텍스트에 남아 있으면
 # 문서·인프라 코드만 고쳐도 DockerImageAsset 콘텐츠 해시가 바뀌어 매 배포마다 이미지가

@@ -68,9 +68,13 @@ export function AsOfBadge({ asOf }: AsOfBadgeProps) {
   const age = Date.now() - at
   if (age < STALE_AFTER_MS) return null
 
+  const minutes = Math.floor(age / MINUTE_MS)
+  const elapsed = minutes >= 1440
+    ? `${Math.floor(minutes / 1440)}일`
+    : minutes >= 60 ? `${Math.floor(minutes / 60)}시간` : `${minutes}분`
   return (
     <span className="badge" title={`데이터 기준 시각 ${asOf}`}>
-      {Math.floor(age / MINUTE_MS)}분 전 기준
+      {elapsed} 전 기준
     </span>
   )
 }

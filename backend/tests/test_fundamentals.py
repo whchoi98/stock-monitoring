@@ -8,8 +8,10 @@ from datetime import timezone
 
 import pandas as pd
 import pytest
+from fastapi.testclient import TestClient
 
 from app.core import config
+from app.main import create_app
 from app.services import fundamentals
 
 LOGGER_NAME = "app.services.fundamentals"
@@ -239,6 +241,54 @@ def test_fetch_detail_nan_ratio_is_none(monkeypatch):
     assert out.pe_ratio is None and out.beta is None
 
 
+@pytest.mark.parametrize(
+    ("raw_ratio", "expected"),
+    [
+        ("inf", None),
+        ("-inf", None),
+        (float("inf"), None),
+        (float("-inf"), None),
+        ("NaN", None),
+        (-2.5, -2.5),
+        (0.0, 0.0),
+    ],
+    ids=["string-inf", "string-neg-inf", "float-inf", "float-neg-inf", "nan", "negative", "zero"],
+)
+@pytest.mark.parametrize("partial", [False, True], ids=["complete", "partial-history"])
+def test_detail_api_ratios_are_json_safe(monkeypatch, state, raw_ratio, expected, partial):
+    """비유한 지표가 API/캐시 JSON을 깨지 않는다 / Non-finite ratios cannot break API or cache JSON."""
+    _patch_ticker(
+        monkeypatch,
+        info={
+            "trailingPE": raw_ratio,
+            "trailingEps": raw_ratio,
+            "beta": raw_ratio,
+            "priceToBook": raw_ratio,
+            "dividendYield": raw_ratio,
+        },
+        history_error=RuntimeError("offline history failure") if partial else None,
+    )
+
+    with TestClient(create_app(state, background=False), raise_server_exceptions=False) as api:
+        first = api.get("/api/stocks/AAPL")
+        second = api.get("/api/stocks/AAPL")
+        health = api.get("/api/health")
+
+    assert first.status_code == second.status_code == 200
+    body = first.json()
+    assert second.json() == body
+    assert body["data"]["price"] == 110.0
+    for field in ("pe_ratio", "eps", "beta", "pbr", "dividend_yield"):
+        assert body["data"][field] == expected
+    # Partial은 풀어서 캐시하며 내부 실패 정보는 JSON에 담지 않는다.
+    # Partial is unwrapped before caching; internal failure metadata never enters JSON.
+    assert "_source_failures" not in body["data"]
+    cached_l2 = state.cache.l2.store["detail:AAPL"][0]
+    json.dumps(cached_l2, allow_nan=False)
+    assert state.cache.l1.get("detail:AAPL")[0] == cached_l2 == body["data"]
+    assert health.json()["sources"]["yahoo"] == ("degraded" if partial else "ok")
+
+
 def test_fetch_detail_info_failure_warns_and_keeps_ratios_none(monkeypatch, caplog):
     """info 조회 실패는 경고 + 비율 None, 가격 데이터는 유지 / info failure warns, ratios None, price survives."""
     _patch_ticker(monkeypatch, info_error=RuntimeError("info boom"))
@@ -420,3 +470,57 @@ def test_fetch_detail_without_any_price_warns_and_raises(monkeypatch, caplog):
             fundamentals.fetch_detail("AAPL")
 
     assert any(p.get("symbol") == "AAPL" for p in _warning_payloads(caplog))
+
+
+@pytest.mark.parametrize("failed_source", ["last_price", "market_cap", "fast_info", "info", "history"])
+def test_partial_detail_failure_keeps_price_and_degrades_yahoo(
+    monkeypatch, state, caplog, failed_source,
+):
+    """지연 필드 실패도 격리하고 헬스에 알린다 / Lazy field failures stay isolated and visible in health."""
+    error = RuntimeError("offline upstream failure")
+
+    class LazyFastInfo(dict):
+        def __getitem__(self, key):
+            if key == failed_source:
+                raise error
+            return super().__getitem__(key)
+
+    _patch_ticker(
+        monkeypatch,
+        fast_info=LazyFastInfo(FAST_INFO),
+        fast_info_error=error if failed_source == "fast_info" else None,
+        info_error=error if failed_source == "info" else None,
+        history_error=error if failed_source == "history" else None,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        with TestClient(create_app(state, background=False)) as api:
+            response = api.get("/api/stocks/AAPL")
+            health = api.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["price"] == 110.0
+    assert response.json()["data"]["prev_close"] == 100.0
+    assert response.json()["data"]["change"] == 10.0
+    assert health.json()["sources"]["yahoo"] == "degraded"
+    assert state.cache.l1.get("detail:AAPL")[0]["price"] == 110.0
+    assert "offline upstream failure" not in response.text
+    assert any(p.get("event") == "route_fetch_partial" for p in _warning_payloads(caplog))
+
+
+def test_detail_without_any_usable_price_is_unavailable_not_zero(monkeypatch, state):
+    """복구할 가격이 없으면 성공/0원으로 위장하지 않는다 / No usable price must not become a successful zero quote."""
+    class LazyFastInfo(dict):
+        def __getitem__(self, key):
+            raise RuntimeError("offline upstream failure")
+
+    _patch_ticker(monkeypatch, fast_info=LazyFastInfo(), frame=_history_frame([]))
+
+    with TestClient(create_app(state, background=False)) as api:
+        response = api.get("/api/stocks/AAPL")
+        health = api.get("/api/health")
+
+    assert response.status_code == 503
+    assert state.cache.l1.get("detail:AAPL") is None
+    assert health.json()["sources"]["yahoo"] == "degraded"
+    assert "offline upstream failure" not in response.text

@@ -31,12 +31,13 @@ function isTypingTarget(target: EventTarget | null): boolean {
 export function SymbolSearch() {
   const navigate = useNavigate()
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const composing = useRef(false)
   const listId = useId()
   const [query, setQuery] = useState('')
   const [focused, setFocused] = useState(false)
   const [activeIndex, setActiveIndex] = useState(0)
 
-  const { quotes, isLoading } = useSymbolUniverse(focused)
+  const { quotes, isLoading, isFetching, error } = useSymbolUniverse(focused)
   const results = useMemo(() => searchSymbols(quotes, query), [quotes, query])
 
   const expanded = focused && query.trim() !== ''
@@ -50,6 +51,7 @@ export function SymbolSearch() {
    */
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return
       const isK = (event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === 'k'
       const isSlash =
         event.key === '/' &&
@@ -75,6 +77,9 @@ export function SymbolSearch() {
   }
 
   const onKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
+    // 한글 확정 키는 IME의 소유다. Safari의 229 경로도 포함한다.
+    // Composition confirmation belongs to the IME, including Safari's legacy 229 event.
+    if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       if (results.length === 0) return
       event.preventDefault()
@@ -100,9 +105,9 @@ export function SymbolSearch() {
 
   return (
     <div className="search">
-      <span className="search-icon" aria-hidden="true">
-        ⌕
-      </span>
+      <svg className="search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+        <circle cx="10.5" cy="10.5" r="6.5" /><path d="m16 16 4 4" strokeLinecap="round" />
+      </svg>
       <input
         ref={inputRef}
         className="search-input"
@@ -123,6 +128,8 @@ export function SymbolSearch() {
         }}
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
+        onCompositionStart={() => { composing.current = true }}
+        onCompositionEnd={() => { composing.current = false }}
         onKeyDown={onKeyDown}
       />
       {!focused && (
@@ -166,8 +173,15 @@ export function SymbolSearch() {
           </ul>
           {results.length === 0 && (
             <p className="search-empty" role="status">
-              {isLoading ? '종목 목록을 불러오는 중…' : '일치하는 종목이 없습니다'}
+              {isLoading || isFetching
+                ? '종목 목록을 불러오는 중…'
+                : error !== null
+                  ? '종목 목록을 불러오지 못했습니다. 연결 후 다시 검색해 주세요.'
+                  : '일치하는 종목이 없습니다'}
             </p>
+          )}
+          {results.length > 0 && error !== null && (
+            <p className="search-empty" role="status">일부 시장을 불러오지 못했습니다. 확인된 종목을 표시합니다.</p>
           )}
         </div>
       )}

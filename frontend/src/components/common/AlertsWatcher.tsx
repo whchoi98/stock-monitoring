@@ -1,8 +1,8 @@
 /**
- * 가격 알림 감시 — 셸에 한 번 마운트된다. 대기 알림이 있을 때만 두 시장 시세를 관찰하고(`useSymbolUniverse`, 공유 키),
+ * 가격 알림 감시 — 셸에 한 번 마운트된다. 대기 알림이 있을 때만 두 시장 공유 키를 `useQuotes`로 폴링하고,
  * 폴링마다 `evaluateAlerts`로 판정해 발동한 알림을 토스트(+ 권한이 있으면 시스템 알림)로 알린다.
- * The price-alert watcher, mounted once in the shell. Only while pending alerts exist does it observe both markets'
- * quotes (`useSymbolUniverse`, shared keys); on each poll it runs `evaluateAlerts` and announces the fired alerts as
+ * The price-alert watcher, mounted once in the shell. Only while pending alerts exist does it poll both markets'
+ * shared quote keys with `useQuotes`; on each poll it runs `evaluateAlerts` and announces the fired alerts as
  * toasts (plus a system notification when permission was granted).
  *
  * 발동은 스토어에 기록되므로(`markTriggered`) 새로고침해도 같은 알림이 다시 울리지 않는다.
@@ -11,7 +11,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { useSymbolUniverse } from '../../api/queries.ts'
+import { useQuotes, useSymbolUniverse } from '../../api/queries.ts'
 import { evaluateAlerts, markTriggered, type PriceAlert, useAlerts } from '../../lib/alertsStore.ts'
 import { formatPrice, type Currency } from '../../lib/format.ts'
 
@@ -67,6 +67,8 @@ function Toast({ fired, onDismiss }: { fired: Fired; onDismiss: () => void }) {
 export function AlertsWatcher() {
   const alerts = useAlerts()
   const hasPending = alerts.some((alert) => alert.triggeredAt === undefined)
+  useQuotes('us', { enabled: hasPending })
+  useQuotes('kr', { enabled: hasPending })
   const { quotes } = useSymbolUniverse(hasPending)
   const [toasts, setToasts] = useState<Fired[]>([])
 

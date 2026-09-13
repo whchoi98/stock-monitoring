@@ -94,11 +94,11 @@ def _fast_int(source: Any, key: str) -> int:
 
 def _ratio(info: dict, key: str) -> Optional[float]:
     """
-    비율 지표 읽기 - 결측/NaN/변환 실패는 None (0.0으로 대체하지 않음).
-    Read a ratio metric; missing, NaN or unparseable values become None (never 0.0).
+    비율 지표 읽기 - 결측/비유한 값/변환 실패는 None (0.0으로 대체하지 않음).
+    Read a ratio metric; missing, non-finite or unparseable values become None (never 0.0).
 
-    yfinance가 실제로 0을 보고하면 0.0을 그대로 유지한다 (예: 무배당 종목의 배당수익률).
-    A genuine 0 reported by yfinance is preserved (e.g. dividend yield of a non-payer).
+    유한한 음수와 0은 그대로 유지한다 (예: 적자 종목의 EPS, 무배당 종목의 배당수익률).
+    Finite negatives and zero are preserved (e.g. negative EPS or a non-payer's dividend yield).
     """
     value = info.get(key)
     if value is None:
@@ -107,7 +107,7 @@ def _ratio(info: dict, key: str) -> Optional[float]:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return None if math.isnan(number) else number
+    return number if math.isfinite(number) else None
 
 
 def _check_dividend_scale(symbol: str, dividend_yield: Optional[float]) -> None:
@@ -145,30 +145,55 @@ def _market_and_currency(symbol: str) -> tuple:
 # yfinance 접근 (부분 실패 허용) / yfinance access (partial failures tolerated)
 # ---------------------------------------------------------------------------
 
-def _read_fast_info(ticker: Any, symbol: str) -> Any:
+class _SafeFastInfo:
+    """필드 접근 시 생기는 지연 조회 실패를 격리 / Isolate failures triggered by lazy field access."""
+
+    def __init__(self, source: Any, symbol: str, failures: list[str]) -> None:
+        self.source = source
+        self.symbol = symbol
+        self.failures = failures
+        self.values: dict[str, Any] = {}
+
+    def __getitem__(self, key: str) -> Any:
+        # 필요한 필드만 한 번 읽는다. 실패한 필드 재접근도 업스트림을 재호출하지 않는다.
+        # Read only demanded fields, once; accessing a failed field again cannot retry upstream.
+        if key not in self.values:
+            try:
+                self.values[key] = _fast_value(self.source, key)
+            except Exception as exc:
+                self.values[key] = None
+                self.failures.append(f"fast_info.{key}")
+                _warn("detail_fast_info_field_failed", symbol=self.symbol, field=key, error=str(exc))
+        return self.values[key]
+
+
+def _read_fast_info(ticker: Any, symbol: str, failures: list[str]) -> Any:
     """fast_info 조회 (실패 시 경고 + None) / Fetch fast_info (warn and return None on failure)."""
     try:
-        return ticker.fast_info
+        return _SafeFastInfo(ticker.fast_info, symbol, failures)
     except Exception as exc:
+        failures.append("fast_info")
         _warn("detail_fast_info_failed", symbol=symbol, error=str(exc))
         return None
 
 
-def _read_info(ticker: Any, symbol: str) -> dict:
+def _read_info(ticker: Any, symbol: str, failures: list[str]) -> dict:
     """info 조회 (실패 시 경고 + 빈 dict) / Fetch info (warn and return an empty dict on failure)."""
     try:
         info = ticker.info
     except Exception as exc:
+        failures.append("info")
         _warn("detail_info_failed", symbol=symbol, error=str(exc))
         return {}
     return info if isinstance(info, dict) else {}
 
 
-def _read_history(ticker: Any, symbol: str) -> Any:
+def _read_history(ticker: Any, symbol: str, failures: list[str]) -> Any:
     """1년 history 조회 (실패 시 경고 + None) / Fetch the 1-year history (warn and return None on failure)."""
     try:
         return ticker.history(period="1y")
     except Exception as exc:
+        failures.append("history")
         _warn("detail_history_failed", symbol=symbol, error=str(exc))
         return None
 
@@ -257,12 +282,15 @@ def fetch_detail(symbol: str) -> StockDetailResponse:
         RuntimeError: When no price is available from either source (the cache then retries stale data).
     """
     ticker = yf.Ticker(symbol)
-    fast_info = _read_fast_info(ticker, symbol)
-    info = _read_info(ticker, symbol)
-    hist = _read_history(ticker, symbol)
+    failures: list[str] = []
+    fast_info = _read_fast_info(ticker, symbol, failures)
+    info = _read_info(ticker, symbol, failures)
+    hist = _read_history(ticker, symbol, failures)
     closes = _valid_closes(hist)
 
     if not _has_rows(hist):
+        if "history" not in failures:
+            failures.append("history")
         _warn("detail_history_missing", symbol=symbol)
 
     # 가격은 fast_info 우선, 실패 시 history 종가로 복구 / Price from fast_info, recovered from history closes
@@ -285,7 +313,7 @@ def fetch_detail(symbol: str) -> StockDetailResponse:
     ratios = {field: _ratio(info, key) for field, key in _RATIO_KEYS.items()}
     _check_dividend_scale(symbol, ratios["dividend_yield"])
 
-    return StockDetailResponse(
+    detail = StockDetailResponse(
         symbol=symbol,
         name=config.STOCK_NAMES.get(symbol, symbol),
         name_ko=config.STOCK_NAMES_KO.get(symbol),
@@ -312,3 +340,5 @@ def fetch_detail(symbol: str) -> StockDetailResponse:
         last_updated=datetime.now(timezone.utc),
         **ratios,
     )
+    detail._source_failures = failures
+    return detail

@@ -14,7 +14,15 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="StockMon" />
     <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
-    <title>stock-monitoring</title>
+    <meta name="description" content="미국·한국 주식의 시세, 시장 흐름, 뉴스와 AI 분석을 한곳에서 살펴보는 주식 모니터링 워크스페이스." />
+    <title>Stock Monitoring · 시장 모니터링</title>
+    <!-- 첫 페인트부터 저장된 테마를 적용한다 / Apply the saved theme before the first paint. -->
+    <script>
+      try {
+        const theme = localStorage.getItem('stock-monitoring:theme');
+        if (theme === 'dark' || theme === 'light') document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

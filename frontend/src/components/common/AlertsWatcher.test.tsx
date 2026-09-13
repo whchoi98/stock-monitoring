@@ -11,7 +11,7 @@ import type { Quote } from '../../api/types.ts'
 import { addAlert, alertsStore } from '../../lib/alertsStore.ts'
 import { AlertsWatcher } from './AlertsWatcher.tsx'
 
-vi.mock('../../api/queries.ts', () => ({ useSymbolUniverse: vi.fn() }))
+vi.mock('../../api/queries.ts', () => ({ useQuotes: vi.fn(), useSymbolUniverse: vi.fn() }))
 
 const AAPL: Quote = {
   symbol: 'AAPL',

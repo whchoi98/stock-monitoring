@@ -13,7 +13,7 @@
 
 **stock-monitoring** is a real-time stock monitoring web service: a single ECS Fargate container serving a FastAPI backend and a pre-built React SPA, fronted by CloudFront and an ALB, backed by a two-tier cache (in-process L1 + DynamoDB L2) over Yahoo Finance data, with AI stock/article analysis via Amazon Bedrock.
 
-- Tech stack: Python 3.12 + FastAPI (backend), React 19 + TypeScript + Vite (frontend), Python CDK v2 (infra), DynamoDB (cache), Amazon Bedrock `global.anthropic.claude-sonnet-4-6` (AI).
+- Tech stack: Python 3.12 + FastAPI (backend), React 19 + React Router 7.18.3 + strict TypeScript + Vite 8 (frontend), Python CDK v2 (infra), DynamoDB (cache), Amazon Bedrock `global.anthropic.claude-sonnet-4-6` (AI).
 - Primary data flow: a background scheduler pre-warms quotes/overview/news into the tiered cache on market-aware intervals; API routes read through the cache and only hit Yahoo Finance / RSS on a miss (single-flight per key).
 - Production: https://d2wa9w1vbqlndl.cloudfront.net (`StockMonitoringStack`, ap-northeast-2). No network resources are created — the pre-existing `cc-on-bedrock-vpc` is referenced only.
 
@@ -44,7 +44,10 @@
 - **backend/app/models.py** -- pydantic models and the response `envelope` (`{"asOf", "marketOpen", "data"}`).
 
 ### Presentation Layer
-- **frontend/** -- React 19 + TypeScript SPA (Vite 8): Dashboard, StockDetail, ArticleAnalysis pages; @tanstack/react-query for data; lightweight-charts for candles; terminal-style workspace (ADR-001: panel grid, market strip, watchlist rail, amber accent) with the Korean colour convention (up = red, down = blue), Pretendard + JetBrains Mono. Phase 2/3 additions: chart periods 1W–5Y with client-side RSI/MACD sub-panes (one synced crosshair), Bollinger, reference price lines and a candle table; news language tabs + keyword filter; MACRO panel; browser-only user state in `localStorage` via the `lib/localStore.ts` stores (watchlist ★, price alerts evaluated on the 45 s quote poll, panel collapse — the backend never sees it); Korean stock names (`name_ko`) with Hangul/초성 search in the ⌘K command bar; free-form AI questions in the AI panel. Installable PWA (ADR-002): `vite-plugin-pwa` emits a manifest and a workbox worker that precaches the shell and serves SPA routes offline; `/api/*` is never cached, updates are prompt-mode (`UpdateToast`), and the status bar shows an offline badge (`lib/online.ts`).
+- **frontend/** -- React 19, React Router 7.18.3 and strict TypeScript (Vite 8). Dashboard owns URL-backed US/KR/watch scope; StockDetail combines quotes, charts and research; ArticleAnalysis opens `ArticleStart` when no usable URL is supplied.
+- **Market workbench** -- `quoteFilter`/`quoteCsv` derive one searched, sector/movement-filtered and sorted row list for rendering/export. `marketSummary` computes breadth including unchanged stocks from the same quotes. Browser stores retain watchlists, price alerts, panel collapse and density; mobile full-column mode preserves every field and sorter.
+- **Read lifecycle** -- TanStack Query owns shared server keys. GETs carry a 30-second per-attempt deadline and cancellation. Usable cached data survives refresh failure with `DataNotice`; initial failure, pending markets and empty results stay distinct. Watch mode and pending price alerts explicitly poll both markets, including on article pages.
+- **Charts, research and PWA** -- lightweight-charts supports 1W–5Y, MA/Bollinger/reference lines and synced VOL/RSI/MACD panes. SSE research supports free-form questions and explicit article submission. PWA caching owns the app shell only; API requests remain network-backed and updates require the refresh prompt. Strip/news/footer clocks use KST.
 - **backend/static/** -- the `vite build --outDir ../backend/static` output, served by FastAPI `StaticFiles` with an SPA fallback (non-API GET 404 → `index.html`).
 - **CloudFront distribution** -- viewer entry point: redirect-to-https, default behaviour uncached (`CACHING_DISABLED` — the API and the PWA files `sw.js` / `manifest.webmanifest` / `workbox-*.js` / `icons/*`), `/assets/*` (immutable hashed filenames) long-cached (`CACHING_OPTIMIZED`).
 
@@ -72,7 +75,7 @@ flowchart TB
 
   subgraph presentation["Presentation Layer"]
     cf["CloudFront Distribution<br/>redirect-to-https, /assets/* long cache"]
-    spa["React 19 SPA<br/>served from backend/static"]
+    spa["React 19 / Router 7 SPA<br/>served from backend/static"]
   end
 
   subgraph security["Security Layer"]
@@ -175,7 +178,7 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 
 - **Yahoo Finance as the data source** -- the KRX Open API key was never approved; yfinance is free and unauthenticated, and one source covers both US and KR symbols.
 - **Two-tier cache (L1 memory + L2 DynamoDB TTL) with single-flight key locks** -- L1 gives request-path speed, L2 survives container restarts and absorbs cold starts; the per-key lock means N concurrent misses cost exactly one upstream call (both a latency and a Bedrock-cost defense).
-- **Live price overlay** -- the quotes cache (refreshed every 45 s while a market is open) overwrites the 12 h detail cache's `price/change/change_pct/volume` at response time, so the dashboard table, detail header, and order book always show the same price without re-fetching fundamentals.
+- **Live price overlay** -- the quotes cache (refreshed every 45 s while a market is open) overwrites the 12 h detail cache's `price/change/change_pct/volume` and derives `prev_close` from the same quote at response time, so the dashboard table, detail header, and order book always show the same price without re-fetching fundamentals.
 - **Bedrock model `global.anthropic.claude-sonnet-4-6`** -- ap-northeast-2 has no `us.`-prefixed sonnet-4-6 inference profile (verified 2026-08-02); the `global.` profile is the only valid one in this region.
 - **AI rate-limit key = `CloudFront-Viewer-Address`** -- the first `X-Forwarded-For` entry is client-controlled and was demonstrated live (2026-08-02) to allow unlimited limit evasion by rotating values; the viewer-address header is generated by CloudFront from the TCP connection and cannot be forged.
 - **Custom origin request policy instead of managed `ALL_VIEWER_EXCEPT_HOST_HEADER`** -- the managed policy's `allExcept` behavior forwards *no* CloudFront-generated header, which would starve the rate limiter; the custom `allViewerAndWhitelistCloudFront` policy whitelists `CloudFront-Viewer-Address`. Cost: the viewer Host header now reaches the origin — harmless, as neither the ALB (header-rule routing only) nor the backend reads Host.
@@ -189,6 +192,10 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 - **Simulated order book / investor flows are labeled** -- no free real-time depth or flow data exists; responses carry `"simulated": true` so the UI can disclose it.
 
 ## Operations
+
+- **Verified deployment (2026-09-13):** existing `StockMonitoringStack`, task revision 13, one healthy app task; Router 7.18.3, 904 automated tests, zero npm audit findings and live API/UI/SSE checks. [Deployment record](deployments/2026-09-13-router7-quality-upgrade.md).
+- **Build boundary:** generated frontend output, browser reports, fixtures, screenshots and local artifacts are excluded from the Docker context. Deploy the reviewed cloud assembly to preserve the validated image inputs.
+- **CI:** backend pytest plus frontend strict type checks, lint, Vitest and 15 Chromium scenarios; browser artifacts retained for seven days.
 
 - Deployment: `cd infra && .venv/bin/cdk deploy --require-approval never` (~4 min), then `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>` — the step-by-step walkthrough lives in [docs/onboarding.md](onboarding.md).
 - Incident response: start from `GET /api/health` (source status + cache age) and the two CloudWatch alarms. The only incident runbook written so far is [docs/runbooks/quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md) (blank stock table = a fresh empty quotes cache entry).
@@ -204,7 +211,7 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 
 **stock-monitoring**은 실시간 주식 모니터링 웹 서비스다. 단일 ECS Fargate 컨테이너가 FastAPI 백엔드와 빌드된 React SPA를 함께 서빙하고, 그 앞을 CloudFront와 ALB가 감싼다. 데이터는 Yahoo Finance 기반이며 2계층 캐시(프로세스 내 L1 + DynamoDB L2)를 거치고, AI 종목/기사 분석은 Amazon Bedrock으로 수행한다.
 
-- 기술 스택: Python 3.12 + FastAPI(백엔드), React 19 + TypeScript + Vite(프론트엔드), Python CDK v2(인프라), DynamoDB(캐시), Amazon Bedrock `global.anthropic.claude-sonnet-4-6`(AI).
+- 기술 스택: Python 3.12 + FastAPI(백엔드), React 19 + React Router 7.18.3 + strict TypeScript + Vite 8(프론트엔드), Python CDK v2(인프라), DynamoDB(캐시), Amazon Bedrock `global.anthropic.claude-sonnet-4-6`(AI).
 - 기본 데이터 흐름: 백그라운드 스케줄러가 장중/휴장 주기에 맞춰 quotes/overview/news를 계층 캐시에 선제 갱신하고, API 라우트는 캐시를 경유해 읽으며 미스일 때만 Yahoo Finance/RSS를 조회한다(키별 single-flight).
 - 프로덕션: https://d2wa9w1vbqlndl.cloudfront.net (`StockMonitoringStack`, ap-northeast-2). 네트워크 리소스는 생성하지 않으며 기존 `cc-on-bedrock-vpc`를 참조만 한다.
 
@@ -235,7 +242,10 @@ In steady state the scheduler keeps the pre-warmed keys fresh, so a viewer reque
 - **backend/app/models.py** -- pydantic 모델과 응답 `envelope`(`{"asOf", "marketOpen", "data"}`).
 
 ### Presentation Layer (표현 계층)
-- **frontend/** -- React 19 + TypeScript SPA(Vite 8): Dashboard, StockDetail, ArticleAnalysis 페이지. 데이터는 @tanstack/react-query, 캔들은 lightweight-charts. 터미널 스타일 워크스페이스(ADR-001: 패널 그리드·마켓 스트립·워치리스트 레일·앰버 액센트), 한국 관례 색상(상승=빨강/하락=파랑), Pretendard + JetBrains Mono. Phase 2/3 추가: 1W~5Y 기간과 클라이언트 측 RSI/MACD 보조 패널(크로스헤어 동기화), 볼린저, 기준선, 캔들 표; 뉴스 언어 탭+키워드 필터; MACRO 패널; `lib/localStore.ts` 스토어 위 `localStorage` 전용 사용자 상태(관심 종목 ★, 45초 시세 폴링마다 판정하는 가격 알림, 패널 접힘 — 백엔드는 모른다); 한글 종목명(`name_ko`)과 ⌘K 커맨드 바의 한글·초성 검색; AI 패널 자유 질의. 설치형 PWA(ADR-002): `vite-plugin-pwa`가 매니페스트와 workbox 워커를 만들어 셸을 프리캐시하고 SPA 경로를 오프라인에서 서빙; `/api/*`는 절대 캐시하지 않고, 업데이트는 prompt 방식(`UpdateToast`), 상태 바에 오프라인 배지(`lib/online.ts`).
+- **frontend/** -- React 19·React Router 7.18.3·strict TypeScript(Vite 8). Dashboard가 URL 기반 미국/한국/관심 선택을 소유하고, StockDetail이 시세·차트·리서치를 결합하며, ArticleAnalysis는 사용 가능한 URL이 없으면 `ArticleStart`를 연다.
+- **시장 탐색 도구** -- `quoteFilter`/`quoteCsv`가 검색·섹터·등락·정렬을 적용한 같은 행 목록으로 화면과 CSV를 만든다. `marketSummary`는 표와 같은 시세로 보합 포함 집계를 계산한다. 관심·알림·패널 접힘·밀도는 브라우저에 저장하며 모바일 전체 열 보기로 모든 데이터·정렬에 접근한다.
+- **조회 수명** -- TanStack Query의 공유 키를 사용하며 GET에 요청별 30초 제한·취소를 적용한다. 갱신 실패에도 기존 데이터와 `DataNotice`를 유지하고 초기 실패·다른 시장 대기·빈 결과를 구분한다. 관심 목록과 대기 가격 알림은 기사 화면에서도 양 시장을 명시적으로 폴링한다.
+- **차트·리서치·PWA** -- 1W~5Y 차트, MA·볼린저·기준선, 동기 VOL·RSI·MACD 패널과 SSE 자유 질문·기사 분석을 지원한다. PWA는 앱 셸만 캐시하고 API는 네트워크로 요청하며 새 버전은 사용자 새로고침으로 적용한다. 스트립·뉴스·상태 바 시각은 KST다.
 - **backend/static/** -- `vite build --outDir ../backend/static` 산출물. FastAPI `StaticFiles`가 서빙하며 SPA fallback(비-API GET 404 → `index.html`)을 갖는다.
 - **CloudFront 배포** -- 뷰어 진입점: redirect-to-https, 기본 동작은 미캐시(`CACHING_DISABLED` — API와 PWA 파일 `sw.js` / `manifest.webmanifest` / `workbox-*.js` / `icons/*`), `/assets/*`(불변 해시 파일명)는 장기 캐시(`CACHING_OPTIMIZED`).
 
@@ -263,7 +273,7 @@ flowchart TB
 
   subgraph presentation["Presentation Layer"]
     cf["CloudFront Distribution<br/>redirect-to-https, /assets/* long cache"]
-    spa["React 19 SPA<br/>served from backend/static"]
+    spa["React 19 / Router 7 SPA<br/>served from backend/static"]
   end
 
   subgraph security["Security Layer"]
@@ -380,6 +390,10 @@ flowchart LR
 - **시뮬레이션 호가/수급 명시** -- 무료 실시간 호가·수급 데이터가 없다. 응답에 `"simulated": true`를 담아 UI가 이를 고지할 수 있게 한다.
 
 ## 운영
+
+- **배포 검증(2026-09-13):** 기존 `StockMonitoringStack`, 태스크 리비전 13, 건강한 앱 태스크 1개. Router 7.18.3, 자동 테스트 904개, npm audit 0건과 실제 API·화면·SSE를 확인했다. [배포 기록](deployments/2026-09-13-router7-quality-upgrade.md) 참조.
+- **빌드 경계:** 프런트 산출물·브라우저 보고서·fixture·캡처·로컬 검증 파일은 Docker 컨텍스트에서 제외한다. 검토한 cloud assembly를 배포해 검증 입력을 유지한다.
+- **CI:** 백엔드 pytest와 프런트 strict 타입 검사·린트·Vitest·Chromium 15개 시나리오를 실행하고 브라우저 결과물을 7일간 보관한다.
 
 - 배포: `cd infra && .venv/bin/cdk deploy --require-approval never` (~4분) 후 `bash scripts/smoke.sh <CloudFrontURL> <AlbDNS>` — 단계별 절차는 [docs/onboarding.md](onboarding.md)에 있다.
 - 장애 대응: `GET /api/health`(소스 상태 + 캐시 age)와 CloudWatch 알람 2종에서 시작한다. 현재까지 작성된 장애 런북은 [docs/runbooks/quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md)(빈 종목 테이블 = 신선한 빈 시세 캐시 항목) 하나뿐이다.

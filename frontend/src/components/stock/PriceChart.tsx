@@ -53,6 +53,7 @@ import {
   type Currency,
 } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -557,7 +558,7 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
 
   const hasCandles = data !== undefined && data.candles.length > 0
   /** 차트 컨테이너를 렌더하는 조건 — 아래 생성 이펙트의 전제다 / When the container is rendered, which the create effects depend on */
-  const showChart = error === null && !isLoading && hasCandles && view === 'candle'
+  const showChart = !isLoading && hasCandles && view === 'candle'
 
   /*
    * 메인 차트 생성/파괴 — 컨테이너가 생겼을 때와 테마가 바뀔 때만. 데이터 폴링으로는 다시 만들지 않는다.
@@ -971,7 +972,8 @@ export function PriceChart({ symbol, currency, levels, defaultView = 'candle' }:
         </div>
       </div>
 
-      {error !== null ? (
+      <DataNotice error={data === undefined ? null : error} onRetry={retry} />
+      {error !== null && data === undefined ? (
         <ErrorCard onRetry={retry} message="가격 차트를 불러오지 못했습니다" />
       ) : isLoading ? (
         <Spinner />

@@ -9,11 +9,11 @@
  * pass `flush` to drop the body padding.
  *
  * `id`가 있으면 접을 수 있다 — 접힘 상태는 브라우저(localStorage, `lib/panelStore.ts`)에 남고, 상태 바의 "레이아웃 초기화"가
- * 전부 펼친다. 접힌 패널은 본문을 **언마운트**하므로 그 위젯의 폴링도 멈춘다.
+ * 전부 펼친다. 접힌 패널은 본문 자식을 **언마운트**한다. 위젯 자체의 데이터 훅은 유지된다.
  * With an `id` the panel is collapsible: the state lives in the browser (localStorage, `lib/panelStore.ts`) and the
- * status bar's "레이아웃 초기화" expands everything. A collapsed panel **unmounts** its body, so that widget's polling stops.
+ * status bar's "레이아웃 초기화" expands everything. Collapsing unmounts body children; the owning widget's query remains active.
  */
-import type { ReactNode } from 'react'
+import { type ReactNode, useId } from 'react'
 
 import { togglePanel, usePanelCollapsed } from '../../lib/panelStore.ts'
 
@@ -34,12 +34,16 @@ export interface PanelProps {
 }
 
 export function Panel({ id, eyebrow, title, action, className, flush = false, children }: PanelProps) {
+  const regionId = useId()
+  const bodyId = `${regionId}-body`
+  const titleId = `${regionId}-title`
   const collapsed = usePanelCollapsed(id)
   const hasHead = id !== undefined || eyebrow !== undefined || title !== undefined || action !== undefined
   return (
     <section
       className={className === undefined ? 'panel' : `panel ${className}`}
       data-collapsed={collapsed ? 'true' : undefined}
+      aria-labelledby={title !== undefined ? titleId : undefined}
     >
       {hasHead && (
         <header className="panel-head">
@@ -48,6 +52,8 @@ export function Panel({ id, eyebrow, title, action, className, flush = false, ch
               type="button"
               className="panel-toggle"
               aria-expanded={!collapsed}
+              aria-controls={bodyId}
+              aria-describedby={title !== undefined ? titleId : undefined}
               aria-label={collapsed ? '패널 펼치기' : '패널 접기'}
               onClick={() => togglePanel(id)}
             >
@@ -55,11 +61,13 @@ export function Panel({ id, eyebrow, title, action, className, flush = false, ch
             </button>
           )}
           {eyebrow !== undefined && <span className="panel-eyebrow">{eyebrow}</span>}
-          {title !== undefined && <h2 className="panel-title">{title}</h2>}
+          {title !== undefined && <h2 className="panel-title" id={titleId}>{title}</h2>}
           {action !== undefined && <div className="panel-action">{action}</div>}
         </header>
       )}
-      {!collapsed && <div className={flush ? 'panel-body panel-body-flush' : 'panel-body'}>{children}</div>}
+      <div id={bodyId} className={flush ? 'panel-body panel-body-flush' : 'panel-body'} hidden={collapsed}>
+        {!collapsed && children}
+      </div>
     </section>
   )
 }

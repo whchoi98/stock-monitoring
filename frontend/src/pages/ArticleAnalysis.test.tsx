@@ -99,15 +99,35 @@ beforeEach(() => {
 })
 
 describe('ArticleAnalysis', () => {
-  it('url 파라미터가 없으면 잘못된 접근을 안내하고 훅을 부르지 않는다 / without a url it states the bad entry and never calls the hook', async () => {
+  it('빈 메뉴 진입은 분석 입력 화면이며 요청을 보내지 않는다 / an empty entry offers a form without making an AI call', async () => {
     renderPage('')
     await flushAutoRun()
 
-    expect(screen.getByText('잘못된 접근')).toBeTruthy()
+    expect(screen.getByRole('heading', { level: 1, name: '기사 분석' })).toBeTruthy()
+    expect(screen.getByRole('textbox', { name: '기사 주소' })).toBeTruthy()
     expect(screen.getByRole('link', { name: '시장 화면으로 이동' }).getAttribute('href')).toBe('/')
     // 훅 자체가 불리지 않아야 한다 — 빈 url로 유료 엔드포인트를 두드리는 경로가 아예 없어야 한다.
     // The hook must not even run: no path may exist that hits the paid endpoint with an empty url.
     expect(vi.mocked(useArticleAIStream)).not.toHaveBeenCalled()
+    expect(analyze).not.toHaveBeenCalled()
+  })
+
+  it('사용자가 입력한 기사와 언어로 분석을 시작한다 / submits the entered article and language', async () => {
+    renderPage('')
+    fireEvent.change(screen.getByRole('textbox', { name: '기사 주소' }), { target: { value: ARTICLE_URL } })
+    fireEvent.change(screen.getByRole('textbox', { name: '기사 제목 (선택)' }), { target: { value: ARTICLE_TITLE } })
+    fireEvent.change(screen.getByRole('combobox', { name: '기사 언어' }), { target: { value: 'en' } })
+    fireEvent.click(screen.getByRole('button', { name: '기사 분석 시작' }))
+    await flushAutoRun()
+    expect(analyze).toHaveBeenCalledTimes(1)
+    expect(analyze).toHaveBeenCalledWith({ url: ARTICLE_URL, title: ARTICLE_TITLE, language: 'en' })
+  })
+
+  it.each(['javascript:alert(1)', 'data:text/html,news', 'not-a-url'])('잘못된 링크 %s는 AI 요청 없이 고칠 수 있다 / invalid links remain editable', async (url) => {
+    renderPage(`?url=${encodeURIComponent(url)}`)
+    await flushAutoRun()
+    expect(screen.getByRole('textbox', { name: '기사 주소' })).toBeTruthy()
+    expect(screen.getByRole('alert')).toBeTruthy()
     expect(analyze).not.toHaveBeenCalled()
   })
 

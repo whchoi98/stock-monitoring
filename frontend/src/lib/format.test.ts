@@ -102,14 +102,8 @@ test("changeClass treats exactly 0 as flat", () => {
 test("formatPublished renders a short ko-KR month/day + clock", () => {
   const at = new Date("2026-08-02T00:30:00Z");
 
-  expect(formatPublished(at.toISOString())).toBe(
-    new Intl.DateTimeFormat("ko-KR", {
-      month: "numeric",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(at),
-  );
+  expect(formatPublished(at.toISOString())).toContain("8. 2.");
+  expect(formatPublished(at.toISOString())).toContain("09:30");
   // 월/일과 분 단위 시계가 실제로 들어 있다 / The month, the day and a minute-resolution clock are really there
   expect(formatPublished(at.toISOString())).toMatch(/\d+\. \d+\..*\d{1,2}:\d{2}/);
 });

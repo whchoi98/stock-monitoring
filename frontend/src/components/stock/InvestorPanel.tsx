@@ -14,6 +14,7 @@ import { useInvestors } from '../../api/queries.ts'
 import type { InvestorRow } from '../../api/types.ts'
 import { changeClass, formatVolume } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { SimulatedBadge } from '../common/SimulatedBadge.tsx'
@@ -40,7 +41,7 @@ export function InvestorPanel({ symbol }: InvestorPanelProps) {
     void queryClient.invalidateQueries({ queryKey: ['investors', symbol] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="수급을 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="수급을 불러오지 못했습니다" />
 
   const rows = data?.rows ?? []
   // 표는 최근 날짜가 위로 (백엔드는 오래된 날짜부터 준다). 막대는 그 첫 행 = 최근일 / Newest first; the bars read the first row
@@ -64,6 +65,7 @@ export function InvestorPanel({ symbol }: InvestorPanelProps) {
         </>
       }
     >
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <Spinner />
       ) : latest === undefined ? (

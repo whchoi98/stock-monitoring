@@ -76,3 +76,10 @@ Python CDK v2 앱이 단일 스택 `StockMonitoringStack`을 정의하며, 계�
 - 관련 모듈: [infrastructure.md](infrastructure.md) (배포된 토폴로지의 동작), [security.md](security.md) (오리진 검증·IAM), [agent-llm.md](agent-llm.md) (모델 ID가 코드에 있는 이유)
 - 관련 ADR: 아직 없음 — 설계 스펙 `docs/superpowers/specs/2026-08-01-stock-monitoring-design.md`
 - 관련 런북: 아직 없음
+
+
+## 2026-09-13 deployment / 운영 업데이트
+
+React Router 7.18.3 and the quality upgrade were deployed to the existing stack after explicit user approval. The reviewed template changed only the task definition image; no network or storage definitions changed. Generated screenshots, browser reports, fixtures, local artifacts and frontend dist are excluded from the Docker context. The immutable reviewed assembly was deployed with `cdk deploy --app cdk.out`; see the [deployment record](../deployments/2026-09-13-router7-quality-upgrade.md).
+
+사용자 승인 후 기존 스택의 애플리케이션 이미지만 갱신했다. Docker 컨텍스트에서 검증 산출물을 제외하고, 검토한 CDK assembly를 그대로 배포했다. 운영 태스크 리비전은 13이며 배포 후 공개 주소·AI 스트림·화면·ALB 차단을 확인했다.

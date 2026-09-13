@@ -1,7 +1,7 @@
 /**
- * 종목 헤더 (QUOTE HEADER) — 심볼·시장·섹터 태그, 종목명, 현재가(28px 고정폭), "어제보다 ▲+N (N%)", 시가/고가/저가/
+ * 종목 헤더 (QUOTE HEADER) — 심볼·시장·섹터 태그, 종목명, 현재가(34px 고정폭), "전일 대비 ▲+N (N%)", 시가/고가/저가/
  * 전일종가/거래량 통계 셀, 1일/52주 게이지.
- * The quote header: symbol, market and sector tags, the name, the price at 28px mono, "어제보다 ▲+N (N%)", the
+ * The quote header: symbol, market and sector tags, the name, the price at 34px mono, "전일 대비 ▲+N (N%)", the
  * open/high/low/previous-close/volume stat cells and the 1-day / 52-week gauges.
  *
  * 이 패널의 `<h1>`이 페이지 제목이다. 데이터는 훅으로 직접 가져가고, 같은 쿼리 키(`['stock', symbol]`)를 쓰는 다른
@@ -15,7 +15,9 @@ import { useStock } from '../../api/queries.ts'
 import { formatPrice, formatVolume, type Currency } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
 import { ChangeText } from '../common/ChangeText.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
+import { MarketStatus } from '../common/MarketStatus.tsx'
 import { MARKET_LABEL } from '../../lib/markets.ts'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -40,7 +42,7 @@ export interface StockHeaderProps {
 }
 
 export function StockHeader({ symbol }: StockHeaderProps) {
-  const { data, asOf, isLoading, error } = useStock(symbol)
+  const { data, asOf, isLoading, marketOpen, error } = useStock(symbol)
   const queryClient = useQueryClient()
 
   // 상세를 쓰는 위젯들이 공유하는 키 — 한 번의 재시도로 함께 복구된다 / The key the detail widgets share; one retry heals all
@@ -48,7 +50,7 @@ export function StockHeader({ symbol }: StockHeaderProps) {
     void queryClient.invalidateQueries({ queryKey: ['stock', symbol] })
   }
 
-  if (error !== null) {
+  if (error !== null && data === undefined) {
     return <ErrorCard onRetry={retry} message={`${symbol} 정보를 불러오지 못했습니다`} />
   }
 
@@ -62,6 +64,7 @@ export function StockHeader({ symbol }: StockHeaderProps) {
 
   return (
     <Panel className="qh">
+      <DataNotice error={error} onRetry={retry} />
       <div className="qh-main">
         <div className="qh-identity">
           <div className="qh-symbol-row">
@@ -69,24 +72,30 @@ export function StockHeader({ symbol }: StockHeaderProps) {
             <StarButton symbol={data.symbol} />
             <span className="badge badge-accent">{data.market.toUpperCase()}</span>
             <span className="badge">{MARKET_LABEL[data.market]}</span>
+            <MarketStatus market={data.market} marketOpen={error === null ? marketOpen : undefined} />
             {data.sector !== '' && <span className="badge">{data.sector}</span>}
           </div>
           <h1 className="qh-name">
-            {data.name}
+            {data.name_ko?.trim() || data.name}
             {data.name_ko != null && data.name_ko !== data.name && (
-              <span className="qh-name-ko"> · {data.name_ko}</span>
+              <span className="qh-name-ko">{data.name}</span>
             )}
           </h1>
         </div>
 
         <div className="qh-quote">
-          <p className="qh-price">{formatPrice(data.price, data.currency)}</p>
-          {/* "어제보다"는 전일 종가 대비 — `change`/`change_pct`가 바로 그 값이다 / "어제보다" is against yesterday's close, exactly what `change` holds */}
+          <div className="qh-price-row">
+            <p className="qh-price">{formatPrice(data.price, data.currency)}</p>
+            <span className="qh-currency">{data.currency}</span>
+          </div>
+          {/* 마지막 거래일 종가 대비 / Relative to the previous trading session's close. */}
           <p className="qh-change">
-            어제보다 <ChangeText value={data.change} pct={data.change_pct} currency={data.currency} />
+            전일 대비 <ChangeText value={data.change} pct={data.change_pct} currency={data.currency} />
           </p>
-          <AsOfBadge asOf={asOf} />
-          <AlertForm symbol={data.symbol} price={data.price} currency={data.currency} />
+          <div className="qh-quote-actions">
+            <AsOfBadge asOf={asOf} />
+            <AlertForm symbol={data.symbol} price={data.price} currency={data.currency} />
+          </div>
         </div>
       </div>
 

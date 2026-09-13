@@ -23,7 +23,7 @@ There is no traditional database: the data layer is a two-tier cache over Yahoo 
 ### 3. Key Decisions
 - **Values stored as a JSON string** in the `data` attribute so nested structures and numbers round-trip unchanged (DynamoDB's native numbers would surface as `Decimal`).
 - **App-level TTL re-check on `get`**: DynamoDB's own TTL sweep can lag up to 48h. `get_stale` ignores TTL entirely — it is the upstream-failure fallback (`l2-stale` source).
-- **Price overlay**: `detail:{symbol}` (12h) is trusted for slow fundamentals only; `price/change/change_pct/volume` are overlaid at request time from `quotes:{market}` (45s refresh) so table, header and order book agree (`stocks.detail_view`).
+- **Price overlay**: `detail:{symbol}` (12h) is trusted for slow fundamentals only; `price/change/change_pct/volume` are overlaid at request time from `quotes:{market}` (45s refresh while open, 600s when both markets are closed) so table, header and order book agree (`stocks.detail_view`). `prev_close` follows that quote's `price - change`, and the `day_change` mirrors follow the quote too. The overlay copies the detail without mutating its cache entry; the response keeps the quote cache's `asOf`.
 - **Single-flight per-key locks**: the lock map is bounded by in-flight fetches, not by keys ever seen — this matters because AI keys derive from client-supplied URLs and free-form questions (both hashed; the question is capped at 200 chars and normalised first). The SSE AI routes do not take this lock at all: they `peek` then `put`, and concurrent misses for one key are collapsed by the route's own in-flight registry (`app.state.ai_inflight`).
 - **L2 outages never break a request**: every DynamoDB failure is swallowed, logged as single-line JSON, and treated as a miss; the app even boots without L2 (`NullL2` in `main.py`).
 - **Symbol universe gate**: cache keys are only built from symbols passing `deps.resolve_symbol` (US 50 + KR 50), keeping key/lock maps finite.
@@ -62,7 +62,7 @@ There is no traditional database: the data layer is a two-tier cache over Yahoo 
 ### 3. 주요 결정
 - **값은 `data` 속성에 JSON 문자열로 저장** — 중첩 구조와 숫자 타입이 그대로 왕복한다 (DynamoDB 네이티브 숫자는 `Decimal`로 나온다).
 - **`get`에서 앱 레벨 TTL 재확인**: DynamoDB 자체 TTL sweep은 최대 48시간 지연될 수 있다. `get_stale`은 TTL을 완전히 무시 — 업스트림 실패 폴백(`l2-stale` 소스)이다.
-- **가격 오버레이**: `detail:{symbol}`(12h)은 느린 펀더멘털만 신뢰. `price/change/change_pct/volume`은 요청 시점에 `quotes:{market}`(45초 갱신)에서 덮어써 테이블·헤더·호가가 같은 가격을 보인다 (`stocks.detail_view`).
+- **가격 오버레이**: `detail:{symbol}`(12h)은 느린 펀더멘털만 신뢰. `price/change/change_pct/volume`은 요청 시점에 `quotes:{market}`(장중 45초, 두 시장 모두 휴장 시 600초 갱신)에서 덮어써 테이블·헤더·호가가 같은 가격을 보인다 (`stocks.detail_view`). `prev_close`도 해당 시세의 `price - change`로 맞추고 `day_change` 미러 필드도 시세를 따른다. 상세 캐시 원본은 변경하지 않고 복사해 덮어쓰며 응답의 `asOf`는 시세 캐시 시각을 유지한다.
 - **키별 single-flight 락**: 락 맵은 "본 적 있는 키"가 아니라 진행 중 fetch 수에 비례 — AI 키가 클라이언트 URL과 자유 질의(둘 다 해시, 질문은 200자 상한·정규화 후)에서 파생되므로 중요하다. SSE AI 라우트는 이 락을 타지 않는다: `peek` 후 `put`이며, 같은 키의 동시 미스는 라우트 자체의 진행 중 레지스트리(`app.state.ai_inflight`)가 합친다.
 - **L2 장애는 요청을 깨지 않는다**: 모든 DynamoDB 실패는 삼켜지고 단일 라인 JSON으로 기록되며 미스로 취급. L2 없이도 기동한다 (`main.py`의 `NullL2`).
 - **심볼 유니버스 게이트**: 캐시 키는 `deps.resolve_symbol`을 통과한 심볼(US 50 + KR 50)로만 생성 — 키/락 맵의 유한성 보장.

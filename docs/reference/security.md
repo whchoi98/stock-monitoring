@@ -88,3 +88,11 @@ Defense in depth across the edge and the app: the ALB is reachable only through 
 - 관련 모듈: [agent-llm.md](agent-llm.md) (방어가 보호하는 대상), [iac.md](iac.md) (엣지 배선), [infrastructure.md](infrastructure.md) (토폴로지)
 - 관련 ADR: 아직 없음 — 설계 스펙 `docs/superpowers/specs/2026-08-01-stock-monitoring-design.md`
 - 관련 런북: 아직 없음
+
+
+## 2026-09-13 client and dependency review / 프런트엔드·의존성 점검
+
+- Article entry validates HTTP(S), length and absence of credentials; backend per-hop SSRF checks remain authoritative. / 기사 입력 검사는 서버 SSRF 검증을 대체하지 않는다.
+- CSV escapes spreadsheet-sensitive text, quotes and newlines while preserving numeric values. / CSV 텍스트 수식·인용·개행을 처리하며 원본 수치를 보존한다.
+- The user explicitly approved React Router 7.18.3 and production deployment. Router 7.18.3, Vitest 4.1.11 and nanoid 3.3.19 are applied; npm audit reports zero findings. / 사용자 승인 후 버전 전환·운영 배포를 마쳤고 보안 경고는 0건이다.
+- All 904 automated tests passed on Router 7.18.3. Live checks cover both markets, price consistency, chart/article screens, SSE completion, PWA files and direct-ALB blocking. / [배포 기록](../deployments/2026-09-13-router7-quality-upgrade.md) 참조.

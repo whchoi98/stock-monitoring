@@ -39,7 +39,7 @@ jobs:
       - run: pytest -q
 
   frontend:
-    name: frontend · tsc · oxlint · vitest
+    name: frontend · types · lint · unit · browser
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -55,3 +55,13 @@ jobs:
       - run: npx tsc -b
       - run: npm run lint
       - run: npx vitest run
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-validation
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 7

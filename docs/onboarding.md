@@ -14,7 +14,7 @@
 ### 1. Prerequisites
 
 - [ ] **Python 3.12** installed (backend and infra venvs; the production image is `python:3.12-slim`)
-- [ ] **Node.js 20+** installed (frontend; the image build stage uses `node:20-slim`)
+- [ ] **Node.js 20.19+ / 22.12+** installed (frontend; the image build stage uses `node:20-slim`)
 - [ ] **Docker** running — required only for `cdk deploy` (the stack builds a **linux/arm64** image; on an x86 host you need QEMU/binfmt for arm64)
 - [ ] **AWS CLI** configured with credentials for **ap-northeast-2** (deploy, DynamoDB L2, Bedrock AI)
 - [ ] **CDK bootstrap already done** in the target account/region (it is for the production account — do not re-bootstrap unless targeting a new account)
@@ -47,17 +47,28 @@ cd ..
 ### 3. Verify
 
 ```bash
-# Full test suite: backend pytest + frontend vitest (519 tests, all green)
+# Full test suite: backend pytest + frontend vitest (889 tests: backend 437 + frontend 452)
 make test
 ```
 
 Individually:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # backend (343 tests)
-cd frontend && npx vitest run            # frontend (176 tests)
+cd backend && .venv/bin/pytest -q        # backend (437 tests)
+cd frontend && npx vitest run            # frontend (452 tests)
 cd frontend && npm run lint              # oxlint
 ```
+
+Browser validation (15 more scenarios, 904 tests in total):
+
+```bash
+cd frontend
+npx tsc -b
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+`test:e2e` builds the production app and starts its own server on port 4317. It uses controlled API snapshots and synthetic responses without calling Yahoo/AWS. CI runs these checks and retains `playwright-report/` and `test-results/` for seven days. The app, tooling and browser tests all use strict TypeScript. React Router is pinned to 7.18.3.
 
 ### 4. Run Locally
 
@@ -76,7 +87,7 @@ cd frontend && npm run dev               # Vite dev server
 Local behavior notes:
 
 - **No DynamoDB needed locally.** On startup the app probes the cache table; if unreachable it logs `l2_unavailable` and continues with the in-memory L1 only. That warning is normal in local development.
-- **AI endpoints need AWS credentials** with `bedrock:InvokeModel` (model `global.anthropic.claude-sonnet-4-6`, region ap-northeast-2). Without them, `POST /api/ai/*` returns 503 `ai_unavailable` — everything else still works.
+- **AI endpoints need AWS credentials** with `bedrock:InvokeModelWithResponseStream` (the task policy also grants `bedrock:InvokeModel`) (model `global.anthropic.claude-sonnet-4-6`, region ap-northeast-2). Availability failures after streaming starts arrive as SSE `final` with `{"error":"ai_unavailable","status":503}`; the HTTP response is already 200. Ordinary market data remains usable.
 - Run uvicorn with **exactly one worker** (the default). The L1 cache and the AI concurrency semaphore are per-process.
 - Environment variables (all optional locally): `CACHE_TABLE`, `BEDROCK_REGION`, `BEDROCK_MODEL_ID`, `STATIC_DIR` — see `backend/app/core/config.py` for defaults.
 
@@ -93,7 +104,7 @@ bash scripts/smoke.sh \
   stock-monitoring-alb-1937169801.ap-northeast-2.elb.amazonaws.com
 ```
 
-The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/market/overview` returns a valid envelope, (3) `/api/market/quotes?market=us` returns a **non-empty** data array (the 2026-08-04 blank-table incident answered 200 with `[]`), (4) the SPA fallback serves deep links (`/stocks/005930.KS` → 200), and (5) **direct ALB access is blocked** (403 or timeout — both are a pass). Dedicated deploy and rollback runbooks are **not written yet**: `docs/runbooks/` currently holds [quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md) plus the runbook template, so the commands above are the deploy procedure.
+The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/market/overview` returns a valid envelope, (3) `/api/market/quotes?market=us` returns a **non-empty** data array (the 2026-08-04 blank-table incident answered 200 with `[]`), (4) the SPA fallback serves deep links (`/stocks/005930.KS` → 200), and (5) **direct ALB access is blocked** (403 or timeout — both are a pass). For a reviewed deployment, run `cdk synth --quiet`, inspect the template and staged image inputs, then deploy that exact assembly with `cdk deploy StockMonitoringStack --app cdk.out --require-approval never`. The [2026-09-13 deployment record](deployments/2026-09-13-router7-quality-upgrade.md) records this verified procedure, task revision 13 and live checks. Before deploying, retain the prior task/image identifiers; the record is not a tested general rollback runbook.
 
 ## Project Overview
 
@@ -114,11 +125,13 @@ The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/marke
 
 ## Key Concepts
 
-- **Envelope**: every data endpoint returns `{"asOf": <ISO8601>, "marketOpen": <bool>, "data": ...}`.
+- **Envelope**: GET data responses use `{"asOf": <ISO8601>, "marketOpen": <bool>, "data": ...}`. AI results carry that envelope in SSE `final`; `/api/health` has its own liveness shape.
 - **Symbol universe**: only US 50 + KR 50 symbols are accepted (`AAPL`, `005930.KS`, `247540.KQ`); anything else is 404. This keeps cache key/lock maps finite.
 - **Tiered cache**: L1 (in-process) → L2 (DynamoDB, TTL) → fetch, with a per-key single-flight lock.
 - **Price overlay**: detail responses merge slow fundamentals (12 h cache) with the live quote (45 s scheduler refresh) at request time.
 - **Scheduler = freshness**: the pre-warmed keys carry a 24 h TTL; actual freshness comes from the background loops (45 s/600 s market, 120 s/600 s news).
+- **Browser reads**: queries have a 30-second per-attempt GET deadline with cancellation. Retained data is shown with refresh errors; pending markets, initial errors and empty lists are distinct. Watchlists and pending price alerts poll both shared quote keys.
+- **Navigation and time**: market scope survives in the URL; quote filters reset by scope while density persists. Strip/news/footer timestamps use KST. `/articles` opens an input form and starts AI only on submission.
 - **Simulated data**: order book and investor flows are simulations and always carry `"simulated": true`.
 
 ## Troubleshooting
@@ -126,12 +139,12 @@ The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/marke
 | Symptom | Cause / Fix |
 |---------|-------------|
 | `l2_unavailable` warning at startup | No DynamoDB access — normal locally; the app runs on L1 only |
-| `POST /api/ai/*` → 503 `ai_unavailable` | No AWS credentials or no Bedrock model access in ap-northeast-2 |
+| AI SSE `final` → 503 `ai_unavailable` | No AWS credentials or no Bedrock model access in ap-northeast-2 |
 | `cdk deploy` fails with a cloud-assembly schema error | You used a global `cdk` CLI; use `infra/.venv/bin/cdk` (pinned ≥ 2.1134) |
 | `cdk deploy` fails building the image | Docker not running, or an x86 host without arm64 emulation (QEMU/binfmt) |
 | Port 8000 already in use | Stop the other process or run uvicorn with `--port <other>` |
 | Direct ALB URL returns 403 / times out | Expected — the ALB only accepts CloudFront traffic with `X-Origin-Verify` |
-| 429 `rate_limited` on AI endpoints | By design: 3 requests/min/IP; wait `retryAfter` seconds |
+| 429 `rate_limited` on AI endpoints | By design: 3 requests/min/IP; wait the `Retry-After` header |
 
 ## Resources
 
@@ -152,7 +165,7 @@ The smoke script asserts five things: (1) `/api/health` answers, (2) `/api/marke
 ### 1. 사전 요구 사항
 
 - [ ] **Python 3.12** 설치 (backend/infra venv; 프로덕션 이미지는 `python:3.12-slim`)
-- [ ] **Node.js 20+** 설치 (frontend; 이미지 빌드 스테이지는 `node:20-slim`)
+- [ ] **Node.js 20.19+ / 22.12+** 설치 (frontend; 이미지 빌드 스테이지는 `node:20-slim`)
 - [ ] **Docker** 실행 중 — `cdk deploy`에만 필요 (스택이 **linux/arm64** 이미지를 빌드한다; x86 호스트에서는 arm64용 QEMU/binfmt 필요)
 - [ ] **AWS CLI** + **ap-northeast-2** 자격 증명 구성 (배포, DynamoDB L2, Bedrock AI)
 - [ ] 대상 계정/리전에 **CDK bootstrap 완료** (프로덕션 계정에는 이미 되어 있다 — 새 계정 대상이 아니면 다시 하지 않는다)
@@ -185,17 +198,28 @@ cd ..
 ### 3. 검증
 
 ```bash
-# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (519개, 전부 그린)
+# 전체 테스트: 백엔드 pytest + 프론트엔드 vitest (889개: 백엔드 437 + 프런트엔드 452)
 make test
 ```
 
 개별 실행:
 
 ```bash
-cd backend && .venv/bin/pytest -q        # 백엔드 (343개)
-cd frontend && npx vitest run            # 프론트엔드 (176개)
+cd backend && .venv/bin/pytest -q        # 백엔드 (437개)
+cd frontend && npx vitest run            # 프론트엔드 (452개)
 cd frontend && npm run lint              # oxlint
 ```
+
+브라우저 검증(15개 추가 시나리오, 총 904개 테스트):
+
+```bash
+cd frontend
+npx tsc -b
+npx playwright install --with-deps chromium
+npm run test:e2e
+```
+
+`test:e2e`는 프로덕션 앱을 빌드하고 전용 4317 포트에서 실행한다. API 스냅샷과 모의 응답을 사용하므로 Yahoo/AWS를 호출하지 않는다. CI에서도 실행하고 `playwright-report/`·`test-results/`를 7일간 보관한다. 앱·설정·브라우저 테스트 모두 strict TypeScript를 적용하며 React Router는 7.18.3으로 고정되어 있다.
 
 ### 4. 로컬 실행
 
@@ -214,7 +238,7 @@ cd frontend && npm run dev               # Vite dev 서버
 로컬 동작 참고:
 
 - **로컬에서는 DynamoDB가 필요 없다.** 기동 시 캐시 테이블에 프로브를 보내고, 접근 불가면 `l2_unavailable` 경고 후 인메모리 L1만으로 계속 동작한다. 이 경고는 로컬 개발에서 정상이다.
-- **AI 엔드포인트는 AWS 자격 증명이 필요하다** — `bedrock:InvokeModel` (모델 `global.anthropic.claude-sonnet-4-6`, 리전 ap-northeast-2). 없으면 `POST /api/ai/*`가 503 `ai_unavailable`을 반환하며, 나머지는 모두 동작한다.
+- **AI 엔드포인트는 AWS 자격 증명이 필요하다** — `bedrock:InvokeModelWithResponseStream` (태스크 정책은 `bedrock:InvokeModel`도 허용) (모델 `global.anthropic.claude-sonnet-4-6`, 리전 ap-northeast-2). 스트리밍 시작 후 가용성 실패는 SSE `final`의 `{"error":"ai_unavailable","status":503}`으로 전달하며 HTTP는 이미 200이다. 일반 시장 데이터 조회는 계속 사용할 수 있다.
 - uvicorn 워커는 **정확히 1개**(기본값)로 실행한다. L1 캐시와 AI 동시 실행 세마포어가 프로세스 단위다.
 - 환경변수(로컬에서는 전부 선택): `CACHE_TABLE`, `BEDROCK_REGION`, `BEDROCK_MODEL_ID`, `STATIC_DIR` — 기본값은 `backend/app/core/config.py` 참조.
 
@@ -231,7 +255,7 @@ bash scripts/smoke.sh \
   stock-monitoring-alb-1937169801.ap-northeast-2.elb.amazonaws.com
 ```
 
-스모크 스크립트는 5가지를 검증한다: (1) `/api/health` 응답, (2) `/api/market/overview`의 유효한 envelope, (3) `/api/market/quotes?market=us`의 **비어 있지 않은** data 배열(2026-08-04 빈 테이블 장애는 200 + `[]`로 응답했다), (4) SPA fallback의 딥링크 서빙(`/stocks/005930.KS` → 200), (5) **ALB 직접 접근 차단**(403 또는 타임아웃 — 둘 다 통과). 전용 배포/롤백 런북은 **아직 없다**: `docs/runbooks/`에는 현재 [quotes-cache-poisoning.md](runbooks/quotes-cache-poisoning.md)와 런북 템플릿만 있으므로, 위 명령이 곧 배포 절차다.
+스모크 스크립트는 5가지를 검증한다: (1) `/api/health` 응답, (2) `/api/market/overview`의 유효한 envelope, (3) `/api/market/quotes?market=us`의 **비어 있지 않은** data 배열(2026-08-04 빈 테이블 장애는 200 + `[]`로 응답했다), (4) SPA fallback의 딥링크 서빙(`/stocks/005930.KS` → 200), (5) **ALB 직접 접근 차단**(403 또는 타임아웃 — 둘 다 통과). 검토한 이미지로 배포하려면 `cdk synth --quiet` 후 템플릿·스테이징 입력을 확인하고 `cdk deploy StockMonitoringStack --app cdk.out --require-approval never`로 그 assembly를 배포한다. [2026-09-13 배포 기록](deployments/2026-09-13-router7-quality-upgrade.md)에 검증 절차·태스크 리비전 13·운영 점검을 남겼다. 배포 전 이전 태스크·이미지 식별 정보를 보관한다. 이 기록은 일반적인 롤백 절차의 검증을 의미하지 않는다.
 
 ## 프로젝트 개요
 
@@ -252,11 +276,13 @@ bash scripts/smoke.sh \
 
 ## 핵심 개념
 
-- **Envelope**: 모든 데이터 엔드포인트는 `{"asOf": <ISO8601>, "marketOpen": <bool>, "data": ...}`를 반환한다.
+- **Envelope**: GET 데이터 응답은 `{"asOf": <ISO8601>, "marketOpen": <bool>, "data": ...}`를 사용한다. AI 결과는 SSE `final`에 담고 `/api/health`는 별도 생존 상태 형식이다.
 - **심볼 유니버스**: 미국 50 + 한국 50 심볼만 허용한다 (`AAPL`, `005930.KS`, `247540.KQ`); 그 외는 404. 캐시 키/락 맵을 유한하게 유지한다.
 - **계층 캐시**: L1(프로세스 내) → L2(DynamoDB, TTL) → fetch, 키별 single-flight 락.
 - **가격 오버레이**: 상세 응답은 느린 펀더멘털(12시간 캐시)에 실시간 시세(스케줄러 45초 갱신)를 요청 시점에 병합한다.
 - **스케줄러 = 신선도**: 선제 갱신 키의 TTL은 24시간이고, 실제 신선도는 백그라운드 루프(시세 45초/600초, 뉴스 120초/600초)가 만든다.
+- **브라우저 조회**: GET 요청별 30초 제한시간·취소를 적용하고 갱신 실패에도 기존 데이터를 유지한다. 대기·초기 실패·빈 결과를 구분하며 관심 목록과 대기 가격 알림은 양 시장 공유 키를 폴링한다.
+- **탐색·시각**: 시장 선택은 URL에 보존하고 필터는 시장 전환 시 초기화하되 밀도는 저장한다. 스트립·뉴스·상태 바는 KST이며 `/articles` 입력 화면은 제출할 때만 AI를 시작한다.
 - **시뮬레이션 데이터**: 호가와 수급은 시뮬레이션이며 항상 `"simulated": true`를 담는다.
 
 ## 문제 해결
@@ -264,12 +290,12 @@ bash scripts/smoke.sh \
 | 증상 | 원인 / 해결 |
 |------|-------------|
 | 기동 시 `l2_unavailable` 경고 | DynamoDB 접근 불가 — 로컬에서 정상; L1만으로 동작한다 |
-| `POST /api/ai/*` → 503 `ai_unavailable` | AWS 자격 증명 없음 또는 ap-northeast-2 Bedrock 모델 접근 불가 |
+| AI SSE `final` → 503 `ai_unavailable` | AWS 자격 증명 없음 또는 ap-northeast-2 Bedrock 모델 접근 불가 |
 | `cdk deploy`가 cloud-assembly 스키마 오류로 실패 | 전역 `cdk` CLI를 사용함; `infra/.venv/bin/cdk`(≥ 2.1134 고정)를 쓴다 |
 | `cdk deploy` 이미지 빌드 실패 | Docker 미실행, 또는 arm64 에뮬레이션(QEMU/binfmt) 없는 x86 호스트 |
 | 포트 8000 사용 중 | 다른 프로세스를 종료하거나 uvicorn을 `--port <다른 포트>`로 실행 |
 | ALB URL 직접 접근 시 403 / 타임아웃 | 정상 — ALB는 `X-Origin-Verify`를 가진 CloudFront 트래픽만 받는다 |
-| AI 엔드포인트 429 `rate_limited` | 설계된 동작: IP당 분당 3회; `retryAfter`초 후 재시도 |
+| AI 엔드포인트 429 `rate_limited` | 설계된 동작: IP당 분당 3회; `Retry-After` 헤더에 지정된 시간 후 재시도 |
 
 ## 참고 자료
 

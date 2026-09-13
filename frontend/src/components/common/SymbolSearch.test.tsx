@@ -176,4 +176,57 @@ describe('SymbolSearch', () => {
     expect(document.activeElement).toBe(other)
     other.remove()
   })
+
+  it('한글 조합 확정 Enter는 이동하지 않고 다음 Enter가 이동한다 / IME confirmation does not navigate', () => {
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: '삼성' } })
+    fireEvent.compositionStart(input())
+    fireEvent.keyDown(input(), { key: 'Enter', isComposing: true })
+    expect(screen.queryByText('상세 005930.KS')).toBeNull()
+    expect(input().value).toBe('삼성')
+
+    fireEvent.compositionEnd(input())
+    // Safari may emit Enter with isComposing=false while its legacy code is still 229.
+    fireEvent.keyDown(input(), { key: 'Enter', keyCode: 229 })
+    expect(screen.queryByText('상세 005930.KS')).toBeNull()
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    expect(screen.getByText('상세 005930.KS')).toBeTruthy()
+  })
+
+  it('조회 실패를 일치 없음으로 표시하지 않는다 / distinguishes failed lookup from no results', () => {
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [], isLoading: false, error: new Error('offline') })
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: '삼성' } })
+    expect(screen.getByRole('status').textContent).toContain('불러오지 못했습니다')
+    expect(screen.queryByText('일치하는 종목이 없습니다')).toBeNull()
+  })
+
+  it('미국만 도착하고 한국 요청 중이면 검색 실패로 단정하지 않는다 / waits for a pending market before declaring no matches', () => {
+    vi.mocked(useSymbolUniverse).mockReturnValue({
+      quotes: [UNIVERSE[0]!], isLoading: false, isFetching: true, error: null,
+    })
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: '삼성' } })
+    expect(screen.getByRole('status').textContent).toContain('불러오는 중')
+    expect(screen.queryByText('일치하는 종목이 없습니다')).toBeNull()
+
+    vi.mocked(useSymbolUniverse).mockReturnValue({
+      quotes: UNIVERSE, isLoading: false, isFetching: false, error: null,
+    })
+    fireEvent.change(input(), { target: { value: '삼성전자' } })
+    expect(screen.getByRole('option').textContent).toContain('삼성전자')
+  })
+
+  it('한 시장이 실패해도 받은 결과를 선택할 수 있다 / partial results remain selectable with a notice', () => {
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: UNIVERSE, isLoading: false, error: new Error('kr failed') })
+    renderSearch()
+    fireEvent.focus(input())
+    fireEvent.change(input(), { target: { value: 'aapl' } })
+    expect(screen.getByRole('status').textContent).toContain('일부')
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    expect(screen.getByText('상세 AAPL')).toBeTruthy()
+  })
 })

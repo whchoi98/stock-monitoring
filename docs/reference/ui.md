@@ -7,7 +7,7 @@
 ## English
 
 ### 1. Overview
-The visual layer is a **terminal design language** (ADR-001, 2026-09-06), referenced from the two screenshots in `img/` (a Korean Seoul-Terminal-style workspace and Bloomberg Terminal): a viewport-filling workspace grid of 1px-bordered, 6px-radius panels with small uppercase "eyebrow" headers, a fixed market strip under the command bar, a watchlist rail on the stock screen, a bottom status bar, and monospaced numerals (JetBrains Mono) next to Pretendard body text. Dark is the default theme, light is a "terminal on paper" variant with the same density; both are driven entirely by CSS custom properties in `tokens.css` and switched only via `<html data-theme="dark|light">`. Price movement follows the **Korean market convention — up is red, down is blue** (the reference images' Western green/red was deliberately not adopted), and flat (exactly 0) uses the body colour. The accent is **amber**, chosen so that "selected" never shares a hue with "falling" (blue).
+The visual layer is a **terminal design language** (ADR-001, 2026-09-06), referenced from the two screenshots in `img/` (a Korean Seoul-Terminal-style workspace and Bloomberg Terminal): a viewport-filling workspace grid of 1px-bordered, 8px-radius panels with small uppercase "eyebrow" headers, a fixed market strip under the command bar, a watchlist rail on the stock screen, a bottom status bar, and monospaced numerals (JetBrains Mono) next to Pretendard body text. Dark is the default theme, light is a "terminal on paper" variant with the same density; both are driven entirely by CSS custom properties in `tokens.css` and switched only via `<html data-theme="dark|light">`. Price movement follows the **Korean market convention — up is red, down is blue** (the reference images' Western green/red was deliberately not adopted), and flat (exactly 0) uses the body colour. The accent is **amber**, chosen so that "selected" never shares a hue with "falling" (blue).
 
 ### 2. Components
 | Component | Path | Purpose |
@@ -27,13 +27,17 @@ The visual layer is a **terminal design language** (ADR-001, 2026-09-06), refere
 
 ### 3. Key Decisions
 - **Up = red (`--up`), down = blue (`--down`), flat = body colour** — the Korean market convention; reversing this (Western green/red) is a correctness bug here, not a style choice. The reference terminals use green/red and were not followed on this point.
-- **Amber accent** (`#F2A93B` dark / `#B8720A` light): with blue as the down colour, a blue accent would put "selected" and "falling" on one axis in the watchlist and tables. Amber is also the classic terminal accent. `--ok` (green) exists for the market-state dot only and must never colour a price move.
+- **Amber accent** (`#F2A93B` dark / `#97600B` light): with blue as the down colour, a blue accent would put "selected" and "falling" on one axis in the watchlist and tables. Amber is also the classic terminal accent. `--ok` (green) exists for the market-state dot only and must never colour a price move.
 - **Never hardcode colours in components** — always the `tokens.css` variables. Canvas is the exception: `PriceChart` reads token *values* by name. The volume tints (`--chart-vol-up/down`) use comma `rgba()` because they are handed to the canvas colour parser.
 - **Theme switches only via `<html data-theme>`**, with `color-scheme` per theme so native controls follow; dark is the default.
-- **Density over decoration**: 13px body, 6px panel radius, 8px workspace gap, 1px borders, `tabular-nums` everywhere; panel heads never shrink (`flex-shrink: 0`) so wrapped actions cannot spill over the first row of a height-capped panel.
+- **Density over decoration**: 14px body, 8px panel radius, 12px workspace gap, 1px borders, `tabular-nums` everywhere; panel heads never shrink (`flex-shrink: 0`) so wrapped actions cannot spill over the first row of a height-capped panel.
 - **Indices live in the market strip**, not in cards: they are visible on every screen, and the dashboard's first row is freed for pulse, sectors and news.
 - **Simulated data is visually labelled** (`SimulatedBadge`) wherever the order book / investor flows render — mirrors the API's `"simulated": true`.
-- **Structural tokens are measured, not derived**: `--term-top-h` (85px = command bar 44 + strip 40 + rule) caps the sticky rail and news column; re-measure it when the top block changes.
+- **Sticky offsets use measured heights**: `--sticky-top-h` from `stickyOffsets.ts` positions the rail/toasts; `--term-top-h` is a 109px desktop fallback (56px command bar + 52px strip + rule). The news column contains its own bounded flex scroller.
+
+### Quality refinement (2026-09-13)
+
+`workspace.css` owns the page heading/market toolbar, breadth display, quote filters/density/mobile column toggle, recovery notices and article input form. The desktop grid gives quotes the wide area and news/macro a secondary column. At narrower widths quotes precede secondary panels. Muted text contrast is stronger in both themes; the light accent is `#97600B`, light declining text is `#2067D0`. News/rail bodies carry their height constraints through the flex chain. Indicator buttons wrap instead of extending the phone viewport. All fields remain reachable through the mobile full-column toggle. Theme/search icons are inline SVG so missing font glyphs cannot obscure them. [ADR-003](../decisions/ADR-003-market-workbench-and-recoverable-reads.md) records these decisions.
 
 ### 4. Code Pointers
 - `frontend/src/styles/tokens.css` — the complete token set and the up/down/flat classes (the header states the hardcoding ban and the amber rationale)
@@ -52,7 +56,7 @@ The visual layer is a **terminal design language** (ADR-001, 2026-09-06), refere
 ## 한국어
 
 ### 1. 개요
-비주얼 계층은 **터미널 디자인 언어**다 (ADR-001, 2026-09-06). `img/`의 참조 이미지 두 장(한국어 Seoul Terminal 스타일 워크스페이스, Bloomberg Terminal)에서 가져왔다: 뷰포트를 가득 채우는 워크스페이스 그리드, 1px 테두리·6px 라운드 패널과 대문자 소형 "eyebrow" 헤더, 커맨드 바 아래 고정 마켓 스트립, 종목 화면의 워치리스트 레일, 하단 상태 바, Pretendard 본문 옆의 고정폭 숫자(JetBrains Mono). 다크가 기본이고 라이트는 밀도가 같은 "종이 위의 터미널"이다. 전부 `tokens.css`의 CSS 커스텀 프로퍼티로 구동되며 테마 전환은 `<html data-theme="dark|light">`로만 한다. 등락 표시는 **한국 관례 — 상승=빨강, 하락=파랑**(참조 이미지의 서구식 초록/빨강은 의도적으로 채택하지 않았다)이고 보합(정확히 0)은 본문색. 액센트는 **앰버** — "선택됨"이 "하락"(파랑)과 같은 색축을 쓰지 않게 하기 위해서다.
+비주얼 계층은 **터미널 디자인 언어**다 (ADR-001, 2026-09-06). `img/`의 참조 이미지 두 장(한국어 Seoul Terminal 스타일 워크스페이스, Bloomberg Terminal)에서 가져왔다: 뷰포트를 가득 채우는 워크스페이스 그리드, 1px 테두리·8px 라운드 패널과 대문자 소형 "eyebrow" 헤더, 커맨드 바 아래 고정 마켓 스트립, 종목 화면의 워치리스트 레일, 하단 상태 바, Pretendard 본문 옆의 고정폭 숫자(JetBrains Mono). 다크가 기본이고 라이트는 밀도가 같은 "종이 위의 터미널"이다. 전부 `tokens.css`의 CSS 커스텀 프로퍼티로 구동되며 테마 전환은 `<html data-theme="dark|light">`로만 한다. 등락 표시는 **한국 관례 — 상승=빨강, 하락=파랑**(참조 이미지의 서구식 초록/빨강은 의도적으로 채택하지 않았다)이고 보합(정확히 0)은 본문색. 액센트는 **앰버** — "선택됨"이 "하락"(파랑)과 같은 색축을 쓰지 않게 하기 위해서다.
 
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
@@ -72,13 +76,17 @@ The visual layer is a **terminal design language** (ADR-001, 2026-09-06), refere
 
 ### 3. 주요 결정
 - **상승=빨강(`--up`), 하락=파랑(`--down`), 보합=본문색** — 한국 시장 관례. 이를 뒤집는 것(서구식 초록/빨강)은 스타일 취향이 아니라 **정확성 버그**다. 참조 터미널은 초록/빨강을 쓰지만 이 점은 따르지 않았다.
-- **앰버 액센트**(`#F2A93B` 다크 / `#B8720A` 라이트): 하락색이 파랑이라 파란 액센트는 워치리스트·표에서 "선택됨"과 "하락"을 같은 색축에 놓는다. 앰버는 터미널의 고전적 액센트이기도 하다. `--ok`(초록)는 장 상태 점 전용이며 등락에 절대 쓰지 않는다.
+- **앰버 액센트**(`#F2A93B` 다크 / `#97600B` 라이트): 하락색이 파랑이라 파란 액센트는 워치리스트·표에서 "선택됨"과 "하락"을 같은 색축에 놓는다. 앰버는 터미널의 고전적 액센트이기도 하다. `--ok`(초록)는 장 상태 점 전용이며 등락에 절대 쓰지 않는다.
 - **컴포넌트에서 색상 하드코딩 금지** — 항상 `tokens.css` 변수. canvas만 예외로 `PriceChart`가 토큰 *값*을 이름으로 읽는다. 거래량 색(`--chart-vol-up/down`)은 canvas 색 파서에 넘어가므로 쉼표 `rgba()` 표기다.
 - **테마는 `<html data-theme>`로만 전환**, 테마별 `color-scheme` 설정으로 네이티브 컨트롤도 따라온다. 기본은 다크.
-- **장식보다 밀도**: 본문 13px, 패널 라운드 6px, 워크스페이스 간격 8px, 1px 테두리, 전역 `tabular-nums`. 패널 머리는 줄어들지 않는다(`flex-shrink: 0`) — 높이 제한 패널에서 줄바꿈된 액션이 첫 행 위로 흘러넘치지 않게.
+- **장식보다 밀도**: 본문 14px, 패널 라운드 8px, 워크스페이스 간격 12px, 1px 테두리, 전역 `tabular-nums`. 패널 머리는 줄어들지 않는다(`flex-shrink: 0`) — 높이 제한 패널에서 줄바꿈된 액션이 첫 행 위로 흘러넘치지 않게.
 - **지수는 마켓 스트립에** 산다(카드 아님): 모든 화면에서 보이고, 시장 화면 첫 행이 펄스·섹터·뉴스에 쓰인다.
 - **시뮬레이션 데이터는 시각적으로 표시**(`SimulatedBadge`) — 호가/수급 렌더링마다, API의 `"simulated": true`를 그대로 반영.
-- **구조 토큰은 유도하지 않고 실측한다**: `--term-top-h`(85px = 커맨드 바 44 + 스트립 40 + 경계선)가 sticky 레일·뉴스 열의 높이 상한을 정한다. 상단 구성이 바뀌면 다시 측정한다.
+- **고정 영역은 실측 높이를 사용한다**: `stickyOffsets.ts`의 `--sticky-top-h`가 레일·토스트 위치를 정한다. `--term-top-h`는 109px 데스크톱 폴백(커맨드 바 56 + 스트립 52 + 경계선)이다. 뉴스는 높이가 제한된 flex 본문 안에서 스크롤한다.
+
+### 품질 개선 (2026-09-13)
+
+`workspace.css`가 페이지 제목·시장 도구 모음, 보합 포함 분포, 시세 필터·밀도·모바일 전체 열, 복구 안내와 기사 입력 폼을 담당한다. 넓은 화면은 시세에 넓은 영역, 뉴스·경제 지표에 보조 열을 배정하고 좁은 화면에서는 시세가 보조 패널보다 먼저 나온다. 양 테마의 보조 텍스트 대비를 높였으며 라이트 액센트는 `#97600B`, 하락색은 `#2067D0`이다. 뉴스·레일은 flex 본문까지 높이 제한을 이어 내부 스크롤을 유지한다. 지표 버튼은 휴대폰에서 줄바꿈하고 모바일 전체 열 토글로 모든 데이터와 정렬에 접근한다. 테마·검색 아이콘은 폰트 글리프에 의존하지 않는 SVG다. 결정 근거는 [ADR-003](../decisions/ADR-003-market-workbench-and-recoverable-reads.md)에 기록했다.
 
 ### 4. 코드 포인터
 - `frontend/src/styles/tokens.css` — 전체 토큰 세트와 up/down/flat 클래스 (파일 머리에 하드코딩 금지와 앰버 근거 명시)

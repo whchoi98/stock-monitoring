@@ -26,8 +26,31 @@ function stubFetch(response: Response) {
   return fetchMock
 }
 
+/**
+ * 헤더 전 또는 본문 도중 멈춘 전송 — 실제 fetch처럼 signal이 전송과 본문을 함께 중단한다.
+ * A transport stalled before headers or during the body; like fetch, its signal aborts both.
+ */
+function stallFetch(at: 'headers' | number) {
+  const fetchMock = vi.fn<typeof fetch>((_path, init) => new Promise((resolve, reject) => {
+    const signal = init?.signal
+    if (at === 'headers') {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      return
+    }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        signal?.addEventListener('abort', () => controller.error(signal.reason), { once: true })
+      },
+    })
+    resolve(new Response(body, { status: at }))
+  }))
+  vi.stubGlobal('fetch', fetchMock)
+  return fetchMock
+}
+
 afterEach(() => {
   vi.unstubAllGlobals()
+  vi.useRealTimers()
 })
 
 describe('apiGet', () => {
@@ -81,4 +104,74 @@ describe('apiGet', () => {
     expect(error).toBe(failure)
     expect(error).not.toBeInstanceOf(ApiError)
   })
+
+  it.each(['headers', 200, 503] as const)(
+    '20초 업스트림 후 전송 제한 / bounds a stalled %s transfer after allowing the 20s upstream',
+    async (at) => {
+      vi.useFakeTimers()
+      const fetchMock = stallFetch(at)
+      let failure: unknown
+      const pending = apiGet('/api/market/overview').catch((error: unknown) => { failure = error })
+
+      await vi.advanceTimersByTimeAsync(20_000)
+      expect(failure).toBeUndefined()
+
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true)
+      expect(failure).toMatchObject({ name: 'TimeoutError' })
+      await pending
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it.each(['headers', 200, 503] as const)(
+    '전송 경계까지 호출자 취소 / caller cancellation reaches the %s transfer',
+    async (at) => {
+      vi.useFakeTimers()
+      const caller = new AbortController()
+      const reason = new DOMException('Caller cancelled', 'AbortError')
+      const fetchMock = stallFetch(at)
+      let failure: unknown
+      const pending = apiGet('/api/market/overview', caller.signal)
+        .catch((error: unknown) => { failure = error })
+      await vi.advanceTimersByTimeAsync(0)
+
+      caller.abort(reason)
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(true)
+      expect(failure).toBe(reason)
+      await pending
+      expect(vi.getTimerCount()).toBe(0)
+    },
+  )
+
+  it('이미 취소된 호출은 fetch를 시작하지 않는다 / does not fetch for an already-aborted caller', async () => {
+    vi.useFakeTimers()
+    const fetchMock = stubFetch(jsonResponse(200, { data: [] }))
+    const caller = new AbortController()
+    caller.abort()
+
+    const error = await apiGet('/api/market/overview', caller.signal).catch((caught: unknown) => caught)
+
+    expect(error).toBe(caller.signal.reason)
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([200, 503])(
+    '완료 후 타이머와 호출자 구독 정리 / cleans up a settled %s request',
+    async (status) => {
+      vi.useFakeTimers()
+      const caller = new AbortController()
+      const fetchMock = stubFetch(jsonResponse(status, { data: [], detail: 'unavailable' }))
+
+      await apiGet('/api/market/overview', caller.signal).catch(() => undefined)
+      expect(vi.getTimerCount()).toBe(0)
+      caller.abort()
+      await vi.advanceTimersByTimeAsync(45_000)
+
+      expect(fetchMock.mock.calls[0][1]?.signal?.aborted).toBe(false)
+    },
+  )
 })

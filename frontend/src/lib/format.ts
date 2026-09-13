@@ -73,6 +73,7 @@ export function formatVolume(v: number): string {
  * description without changing the behaviour (no switch to a 24-hour cycle), so F4's screens do not shift.
  */
 const PUBLISHED_FORMAT = new Intl.DateTimeFormat('ko-KR', {
+  timeZone: 'Asia/Seoul',
   month: 'numeric',
   day: 'numeric',
   hour: '2-digit',

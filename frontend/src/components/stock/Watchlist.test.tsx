@@ -75,6 +75,26 @@ beforeEach(() => {
 })
 
 describe('Watchlist', () => {
+  it('저장한 한국 종목을 받지 못한 경우 빈 관심 목록으로 표시하지 않는다 / failed watched-market loading is not an empty watchlist', () => {
+    watchlistStore.set(['005930.KS'])
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [AAPL], isLoading: false, error: new Error('KR unavailable') })
+    renderWatchlist()
+    fireEvent.click(screen.getByRole('button', { name: '관심' }))
+    expect(screen.getByRole('alert')).toBeTruthy()
+    expect(screen.queryByText('☆를 눌러 관심 종목을 추가하세요')).toBeNull()
+    expect(screen.queryByRole('status', { name: '데이터 갱신 안내' })).toBeNull()
+    expect(screen.getByRole('button', { name: '다시 시도' })).toBeTruthy()
+  })
+
+  it('확보한 관심 종목이 있으면 오류 안내와 함께 유지한다 / retained watched rows stay visible with a notice', () => {
+    watchlistStore.set(['AAPL', '005930.KS'])
+    vi.mocked(useSymbolUniverse).mockReturnValue({ quotes: [AAPL], isLoading: false, error: new Error('KR unavailable') })
+    const { rows } = renderWatchlist()
+    fireEvent.click(screen.getByRole('button', { name: '관심' }))
+    expect(rows()).toHaveLength(1)
+    expect(screen.getByRole('status', { name: '데이터 갱신 안내' })).toBeTruthy()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
   it('종목마다 행을 렌더하고 현재 종목을 강조한다 / renders one row per quote and highlights the current symbol', () => {
     const { rows, items } = renderWatchlist()
 

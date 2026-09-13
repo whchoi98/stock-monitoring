@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from typing import Any, Optional
+from datetime import datetime
+from typing import Any, Callable, Optional
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import deps
 from app.cache.memory import MemoryCache
 from app.cache.tiered import TieredCache
 from app.core import config
@@ -249,6 +251,22 @@ class FakeServices:
 # ---------------------------------------------------------------------------
 # 픽스처 / Fixtures
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+def market_clock(monkeypatch) -> Callable[[str], None]:
+    """응답 시각만 고정하고 실제 장 시간 계산은 유지 / Freeze response time, retaining real market-hour logic."""
+    def freeze(iso_time: str) -> None:
+        instant = datetime.fromisoformat(iso_time)
+
+        class FrozenDatetime:
+            @classmethod
+            def now(cls, tz: Any) -> datetime:
+                return instant.astimezone(tz)
+
+        monkeypatch.setattr(deps, "datetime", FrozenDatetime)
+
+    return freeze
+
 
 @pytest.fixture
 def services(monkeypatch) -> FakeServices:

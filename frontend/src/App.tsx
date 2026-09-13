@@ -36,16 +36,16 @@ function Brand() {
 export default function App() {
   /*
    * 스트립·상태 바 데이터는 셸에서 한 번만 가져온다 — 시장 화면이 쓰는 `useOverview()`와 같은 쿼리 키라 요청은
-   * 공유되고, 로딩/실패 중에는 빈 배열과 undefined가 내려가 스트립은 스스로 사라지고 상태 바는 "확인 중"이 된다
+   * 공유된다. 첫 응답 전에는 빈 배열과 undefined로 스트립을 생략하고 상태 바는 "확인 중"이다. 갱신 실패는 기존 스트립을 유지한다
    * (앱은 계속 뜬다).
    * The shell fetches the strip and status data once; it shares the query key (and therefore the request) with the
-   * market screen's `useOverview()`. While loading or after a failure, empty arrays and undefined go down: the strip
-   * removes itself and the status bar reads "확인 중" — the app still renders.
+   * market screen's `useOverview()`. Before the first response, empty arrays and undefined go down: the strip
+   * removes itself and the status bar reads "확인 중". A failed refresh retains the last strip data and marks session status unknown.
    *
    * `asOf`/`marketOpen`은 envelope에서 벗겨진 형제 값이라 `data` 안에 없다 (`queries.ts`의 `unwrap`).
    * `asOf`/`marketOpen` are peeled off the envelope as siblings, so they do not live inside `data`.
    */
-  const { data, asOf, marketOpen } = useOverview()
+  const { data, asOf, marketOpen, error } = useOverview()
 
   // 상단 고정 블록·상태 바의 실측 높이를 CSS 변수로 — 토스트가 줄바꿈된 블록을 덮지 않게 (`lib/stickyOffsets.ts`)
   // Export the sticky blocks' measured heights as CSS variables so toasts never cover a wrapped block (`lib/stickyOffsets.ts`)
@@ -53,6 +53,7 @@ export default function App() {
 
   return (
     <div className="terminal">
+      <a className="skip-link" href="#main-content">본문으로 건너뛰기</a>
       <div className="term-top">
         <header className="topbar">
           <Brand />
@@ -74,11 +75,11 @@ export default function App() {
         />
       </div>
 
-      <main className="term-main">
+      <main className="term-main" id="main-content" tabIndex={-1}>
         <Outlet />
       </main>
 
-      <StatusBar marketOpen={marketOpen} asOf={asOf} />
+      <StatusBar marketOpen={error !== null ? undefined : marketOpen} asOf={asOf} error={error} />
       {/* 가격 알림은 어느 화면에서든 울려야 하므로 셸에 산다 / Price alerts must fire on any screen, so the watcher lives in the shell */}
       <AlertsWatcher />
       {/* 서비스 워커 새 버전·오프라인 준비 안내 (PWA) / New-version and offline-ready notices from the service worker (PWA) */}

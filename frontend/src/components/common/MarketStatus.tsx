@@ -10,15 +10,18 @@
  */
 export interface MarketStatusProps {
   marketOpen: boolean | undefined
+  market?: 'us' | 'kr'
 }
 
-export function MarketStatus({ marketOpen }: MarketStatusProps) {
+export function MarketStatus({ marketOpen, market }: MarketStatusProps) {
   const state = marketOpen === undefined ? 'unknown' : marketOpen ? 'open' : 'closed'
   const label = state === 'open' ? '장중' : state === 'closed' ? '장마감' : '확인 중'
   return (
     <span
       className={`status status-${state}`}
-      title="한국 또는 미국 정규장 개장 여부 / Whether the Korean or the US regular session is open"
+      title={market === undefined
+        ? '한국 또는 미국 정규장 개장 여부 / Whether the Korean or the US regular session is open'
+        : `${market === 'us' ? '미국' : '한국'} 정규장 개장 여부`}
     >
       <span className="status-dot" aria-hidden="true" />
       {label}

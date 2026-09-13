@@ -11,6 +11,7 @@ import { useOverview } from '../../api/queries.ts'
 import type { Market } from '../../api/types.ts'
 import { changeClass, formatPct } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { MARKET_LABEL } from '../../lib/markets.ts'
 import { Panel } from '../common/Panel.tsx'
@@ -30,7 +31,7 @@ export function SectorBars({ market }: SectorBarsProps) {
     void queryClient.invalidateQueries({ queryKey: ['overview'] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="섹터 등락을 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="섹터 등락을 불러오지 못했습니다" />
 
   const sectors = data?.sectors[market] ?? []
   // 0으로 나누지 않는다 — 전 섹터가 정확히 보합이면 막대는 길이 0이다 / Never divide by zero: an all-flat market yields zero-length bars
@@ -38,6 +39,7 @@ export function SectorBars({ market }: SectorBarsProps) {
 
   return (
     <Panel id="sector-heat" eyebrow="SECTOR HEAT" title={`섹터 등락 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <Spinner />
       ) : sectors.length === 0 ? (

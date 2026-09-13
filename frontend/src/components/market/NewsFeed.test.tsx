@@ -131,6 +131,9 @@ describe('NewsFeed', () => {
     expect(titles()).toHaveLength(0)
     expect(screen.getByText('조건에 맞는 뉴스가 없습니다')).toBeTruthy()
     expect(screen.getByText('0/3건')).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: '뉴스 필터 초기화' }))
+    expect(titles()).toHaveLength(3)
   })
 
   it('빈 링크는 새 탭으로 열지 않는다 (href="" = 현재 페이지 복제) / never opens an empty link in a new tab', () => {

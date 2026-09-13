@@ -29,6 +29,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .coverage
+.artifacts/
 
 # CDK synth 산출물 / CDK synth output
 cdk.out/

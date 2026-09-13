@@ -10,6 +10,7 @@ import { useMemo, useState } from 'react'
 import { useNews } from '../../api/queries.ts'
 import { filterNews, NEWS_LANGUAGE_LABEL, type NewsLanguageFilter } from '../../lib/newsFilter.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { NewsList } from '../common/NewsList.tsx'
 import { Panel } from '../common/Panel.tsx'
@@ -32,7 +33,7 @@ export function NewsFeed() {
   const shown = useMemo(() => filterNews(items, { language, query }), [items, language, query])
   const filtering = language !== 'all' || query.trim() !== ''
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="뉴스를 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="뉴스를 불러오지 못했습니다" />
 
   return (
     <Panel
@@ -41,6 +42,15 @@ export function NewsFeed() {
       title="시장 뉴스"
       action={
         <>
+          {items.length > 0 && (
+            <span className="badge">{filtering ? `${shown.length}/${items.length}건` : `${items.length}건`}</span>
+          )}
+          <AsOfBadge asOf={asOf} />
+        </>
+      }
+      flush
+    >
+      <div className="news-tools" role="search" aria-label="시장 뉴스 필터">
           <div className="tabs" role="group" aria-label="뉴스 필터">
             {LANGUAGES.map((value) => (
               <button
@@ -62,14 +72,11 @@ export function NewsFeed() {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
-          {items.length > 0 && (
-            <span className="badge">{filtering ? `${shown.length}/${items.length}건` : `${items.length}건`}</span>
-          )}
-          <AsOfBadge asOf={asOf} />
-        </>
-      }
-      flush
-    >
+        {filtering && (
+          <button type="button" className="btn" aria-label="뉴스 필터 초기화" onClick={() => { setLanguage('all'); setQuery('') }}>초기화</button>
+        )}
+      </div>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <div className="panel-pad">
           <Spinner />

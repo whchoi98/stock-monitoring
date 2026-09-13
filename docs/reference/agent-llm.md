@@ -17,7 +17,7 @@ The LLM layer produces Korean-markdown stock analyses and article summaries/tran
 | Rate limiter | `backend/app/api/ratelimit.py` | Sliding window, 3 req/min/IP (`AI_RATE_PER_MIN`), keyed per [security.md](security.md) |
 | Model config | `backend/app/core/config.py` | `BEDROCK_MODEL_ID`, `BEDROCK_REGION`, `AI_TTL` 6h, `AI_RATE_PER_MIN` 3, `AI_GLOBAL_CONCURRENCY` 2, `AI_FETCH_CONCURRENCY` 2 (dedicated article-fetch semaphore, separate from the Bedrock one so a slow 2 MB fetch — up to `FETCH_TOTAL_DEADLINE` 20 s in `news.py` — cannot starve the Bedrock budget) |
 | Article fetch | `backend/app/services/news.py` | `fetch_article_content` — the guarded fetch that feeds the article prompt |
-| Frontend consumers | `frontend/src/api/aiStream.ts`, `frontend/src/components/stock/AIPanel.tsx`, `frontend/src/pages/ArticleAnalysis.tsx`, `frontend/src/lib/aiMessages.ts` | `useStockAIStream` / `useArticleAIStream` consume the SSE stream (phase wording, deltas rendered as they arrive, the `final` settling the result); error → user wording |
+| Frontend consumers | `frontend/src/api/aiStream.ts`, `frontend/src/components/stock/AIPanel.tsx`, `frontend/src/pages/ArticleAnalysis.tsx`, `frontend/src/pages/ArticleStart.tsx`, `frontend/src/lib/aiMessages.ts` | `useStockAIStream` / `useArticleAIStream` consume the SSE stream (phase wording, deltas rendered as they arrive, the `final` settling the result); error → user wording |
 
 ### 3. Key Decisions
 - **Model id `global.anthropic.claude-sonnet-4-6` lives in code, not the task env**: `ap-northeast-2` has no `us.`-prefixed sonnet-4-6 inference profile (verified 2026-08-02 against `list-inference-profiles`; the `global.` profile was confirmed with a live call). The infra deliberately does not inject `BEDROCK_MODEL_ID`.
@@ -25,6 +25,7 @@ The LLM layer produces Korean-markdown stock analyses and article summaries/tran
 - **Cache keys**: `ai:stock:{symbol}`, `ai:stock:{symbol}:q:{sha256(question)[:16]}` and `ai:article:{sha1(url)[:16]}` — the article key is URL-only (same URL + different title returns the first analysis; the raw URL never enters the key), and a question key hashes the *normalised* question so a repeat shares the 6h cache while the default analysis stays untouched.
 - **Free-form questions (2026-09-07)**: `{question}` switches `_stock_prompt` to an answer/evidence/risk format. The question is user input, so it is (1) normalised by the pydantic validator (control characters dropped, `<`/`>` full-widthed so the fence cannot be closed, whitespace collapsed, blank rejected, ≤ `MAX_QUESTION_LEN` 200), (2) clipped once more in the prompt (`QUESTION_LIMIT`), and (3) fenced inside `<question>` with instructions not to follow embedded directives, not to leave the provided data and not to give trade orders. Rate limit, concurrency cap and TTL are the same as the default analysis; the only cost change is that distinct questions are distinct cache entries, bounded by the per-IP limit.
 - **Typed errors map to distinct statuses** (carried in the SSE `final` event as `{"error", "status"}`, since the HTTP status is already committed once the stream starts): 503 `ai_unavailable` (credentials/access codes: `AccessDeniedException` etc.), 500 `ai_failed` (other call failures), 502 `article_unavailable` (empty article body — no Bedrock call, and **failures are never cached**).
+- **Article entry is explicit**: the `/articles` input screen makes no AI call until a valid URL is submitted. Following an article link enters the same SSE flow; unmounting or starting another request cancels the previous client stream.
 - **Prompt inputs come from existing caches**: stock analysis reuses the price-overlaid detail and cached news titles, so an AI request rarely hits yfinance/RSS. Caps: article body 6 000 chars (`ARTICLE_CONTENT_LIMIT`), 5 news titles, response tokens 4 096 (article) / 1 024 (stock).
 - **Availability cache remembers success only**, so a transient credential failure recovers on the next call. The semaphore is created inside the running loop (asyncio primitives bind their creation loop) and is held for the whole stream; the synchronous boto3 event stream is read by a dedicated pump thread that feeds an `asyncio.Queue`.
 
@@ -55,7 +56,7 @@ LLM 계층은 Amazon Bedrock의 Claude 모델(`global.anthropic.claude-sonnet-4-
 | 레이트리미터 | `backend/app/api/ratelimit.py` | 슬라이딩 윈도우, 3회/분/IP(`AI_RATE_PER_MIN`). 키 선택은 [security.md](security.md) 참조 |
 | 모델 설정 | `backend/app/core/config.py` | `BEDROCK_MODEL_ID`, `BEDROCK_REGION`, `AI_TTL` 6h, `AI_RATE_PER_MIN` 3, `AI_GLOBAL_CONCURRENCY` 2, `AI_FETCH_CONCURRENCY` 2(기사 본문 fetch 전용 세마포어 — Bedrock 세마포어와 분리해 느린 2MB fetch(`news.py`의 `FETCH_TOTAL_DEADLINE` 20초까지)가 Bedrock 예산을 잠식하지 못하게) |
 | 기사 조회 | `backend/app/services/news.py` | `fetch_article_content` — 기사 프롬프트에 공급되는 가드된 조회 |
-| 프론트 소비자 | `frontend/src/api/aiStream.ts`, `frontend/src/components/stock/AIPanel.tsx`, `frontend/src/pages/ArticleAnalysis.tsx`, `frontend/src/lib/aiMessages.ts` | `useStockAIStream` / `useArticleAIStream`이 SSE를 소비한다(단계 문구, 도착하는 대로 렌더되는 델타, `final`로 결과 확정). 오류 → 사용자 문구 |
+| 프론트 소비자 | `frontend/src/api/aiStream.ts`, `frontend/src/components/stock/AIPanel.tsx`, `frontend/src/pages/ArticleAnalysis.tsx`, `frontend/src/pages/ArticleStart.tsx`, `frontend/src/lib/aiMessages.ts` | `useStockAIStream` / `useArticleAIStream`이 SSE를 소비한다(단계 문구, 도착하는 대로 렌더되는 델타, `final`로 결과 확정). 오류 → 사용자 문구 |
 
 ### 3. 주요 결정
 - **모델 ID `global.anthropic.claude-sonnet-4-6`는 태스크 env가 아니라 코드에**: `ap-northeast-2`에는 `us.` 프리픽스 sonnet-4-6 추론 프로파일이 없다 (2026-08-02 `list-inference-profiles` 실측; `global.` 프로파일은 실호출로 확인). 인프라는 의도적으로 `BEDROCK_MODEL_ID`를 주입하지 않는다.
@@ -65,6 +66,8 @@ LLM 계층은 Amazon Bedrock의 Claude 모델(`global.anthropic.claude-sonnet-4-
 - **타입 있는 예외가 상태 코드로 구분 매핑** (스트림이 시작된 뒤에는 HTTP 상태를 바꿀 수 없으므로 SSE `final` 이벤트의 `{"error", "status"}`로 전달): 503 `ai_unavailable`(자격 증명/접근 계열: `AccessDeniedException` 등), 500 `ai_failed`(그 외 호출 실패), 502 `article_unavailable`(본문 없음 — Bedrock 미호출, **실패는 절대 캐시하지 않음**).
 - **프롬프트 입력은 기존 캐시에서**: 종목 분석은 가격 오버레이된 상세와 캐시된 뉴스 제목을 재사용 — AI 요청이 yfinance/RSS를 새로 때리는 일은 드물다. 상한: 기사 본문 6,000자(`ARTICLE_CONTENT_LIMIT`), 뉴스 제목 5개, 응답 토큰 4,096(기사) / 1,024(종목).
 - **가용성 캐시는 성공만 기억** — 일시적 자격 증명 실패는 다음 호출에서 복구. 세마포어는 실행 중인 루프 안에서 생성(asyncio 프리미티브는 생성 시점 루프에 묶임)되고 스트림 완료까지 보유. 동기 boto3 이벤트 스트림은 전용 펌프 스레드가 읽어 `asyncio.Queue`로 넘긴다.
+
+- **기사 입력은 명시적으로 실행한다**: `/articles` 입력 화면은 유효한 URL 제출 전 AI를 호출하지 않는다. 뉴스 링크도 같은 SSE 흐름으로 연결되고 화면 이동·재실행 시 이전 클라이언트 스트림을 취소한다.
 
 ### 4. 코드 포인터
 - `backend/app/api/ai.py` — 모듈 docstring: 방어 순서 전체. `_analysis_stream`(SSE 골격: 첫 phase 즉시·캐시 프로브·선점자/팔로워·모든 경로에서 final, 503/500/502 구분을 `deps.cached` 대신 여기서 매핑하는 이유), `_bedrock_deltas`(스트림 완료까지 세마포어 보유 + 소스 상태 반영)

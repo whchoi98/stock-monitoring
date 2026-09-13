@@ -7,7 +7,7 @@
 ## English
 
 ### 1. Overview
-A React 19 + TypeScript (strict) SPA built with Vite 8, laid out as a **terminal workspace** (ADR-001). Three pages — Dashboard (market workspace), StockDetail (stock workspace with a watchlist rail), ArticleAnalysis — share an app shell: a sticky top block (command bar with brand, nav, ⌘K symbol search and theme toggle; a market strip of index cells and an indicator crawl), the page via `Outlet`, and a sticky bottom status bar (market state, source, polling cadence, as-of, KST clock). All server state flows through TanStack Query hooks that unwrap the backend envelope, the two AI endpoints excepted: they stream SSE and are consumed by `api/aiStream.ts` (§3). Polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
+A React 19 + React Router 7.18.3 + TypeScript (strict) SPA built with Vite 8, laid out as a **terminal workspace** (ADR-001). Three pages — Dashboard (market workspace), StockDetail (stock workspace with a watchlist rail), ArticleAnalysis — share an app shell: a sticky top block (command bar with brand, nav, ⌘K symbol search and theme toggle; a market strip of index cells and an indicator crawl), the page via `Outlet`, and a sticky bottom status bar (market state, source, polling cadence, as-of, KST clock). All server state flows through TanStack Query hooks that unwrap the backend envelope, the two AI endpoints excepted: they stream SSE and are consumed by `api/aiStream.ts` (§3). Polling uses exactly two constants. In development Vite proxies `/api` to `:8000`; in production the same-origin paths are served by CloudFront.
 
 ### 2. Components
 | Component | Path | Purpose |
@@ -15,7 +15,7 @@ A React 19 + TypeScript (strict) SPA built with Vite 8, laid out as a **terminal
 | Entry + routes | `frontend/src/main.tsx` | `RouterProvider` and the route table (routes deliberately not in `App.tsx` — oxlint `react/only-export-components` preserves HMR) |
 | App shell | `frontend/src/App.tsx` | Command bar (brand, nav, `SymbolSearch`, `ThemeToggle`) + `MarketStrip` in one sticky block / `Outlet` / `StatusBar`, plus `NotFound` (child `*` route) and `RouteError` (shell `errorElement`) so one dead link never sinks the app |
 | HTTP client | `frontend/src/api/client.ts` | Same-origin `/api/...` paths (no base URL); `ApiError { status, detail }`; network failures propagate unwrapped |
-| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET data only, no AI. `useSymbolUniverse(enabled)` feeds the search from both markets' quotes on the shared `['quotes', market]` keys, gated by `enabled` and without its own polling |
+| Query hooks | `frontend/src/api/queries.ts` | Envelope unwrapping; every hook returns `{data, asOf, marketOpen, isLoading, isFetching, error}`; `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET data only, no AI. `useSymbolUniverse(enabled)` feeds the search from both markets' quotes on the shared `['quotes', market]` keys, gated by `enabled` and without its own polling |
 | AI streaming hooks | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`; the two AI endpoints are SSE, so this file (and only this file) calls fetch directly — see §3 |
 | API types | `frontend/src/api/types.ts` | `Envelope<T>` and every payload type |
 | Pages | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
@@ -27,19 +27,32 @@ A React 19 + TypeScript (strict) SPA built with Vite 8, laid out as a **terminal
 ### 3. Key Decisions
 - **No base URL**: paths are always same-origin absolute (`/api/...`) — the Vite proxy covers development, CloudFront covers production; there is nothing to configure per environment.
 - **Envelope unwrapping happens only in query hooks** so `asOf`/`marketOpen` are never dropped; the UI shows data freshness via `AsOfBadge`.
-- **`marketOpen` is never faked**: while loading or after a failure it is `undefined` — "unknown" and "closed" are different things.
+- **`marketOpen` is never faked**: it is undefined before the first response. Refetch errors retain the last snapshot, but session indicators explicitly show unknown while failed/offline.
 - **Polling only via the two exported constants** (45s quotes / 120s news); hand-rolled `setInterval` is forbidden.
 - **UI branches on `ApiError.status`/`detail`** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`); `readDetail` never throws even on HTML error bodies from ALB/CloudFront.
 - **Deploy build goes into the backend**: `npm run build:deploy` outputs to `backend/static`, which FastAPI serves (`make build` wraps this).
-- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 319 tests); lint is oxlint.
+- **Tests colocated** as `.test.tsx`/`.test.ts` next to the code (vitest, 452 tests); lint is oxlint.
 - **Symbol search loads nothing until focused**: `SymbolSearch` calls `useSymbolUniverse(focused)`; `⌘K`/`Ctrl+K`/`/` focus it, ↑↓ select, Enter navigates to `/stocks/:symbol`. It is an ARIA 1.2 combobox (input `combobox`, list `listbox`, `aria-activedescendant`).
 - **The watchlist rail follows the detail's `market`**, never a guess from the symbol suffix; `StockDetail` mounts it only once the detail has arrived and remounts it (`key={market}`) on a cross-market switch.
 - **The chart's overlay toggles flip `visible`**, never recreate a series; the OHLC legend is fed by `subscribeCrosshairMove` through a time→index map and falls back to the last candle off-chart. **Volume/RSI/MACD are separate charts** (lightweight-charts v4 is single-pane; the volume left the main pane and the candle series clamps its autoscale floor at 0 with price-unit padding, so the price axis never runs below zero — the old pixel band printed negative labels on 5Y; pane fills run with the time-scale link muted and before `fitContent`, because a pane's `setData` fires its logical range synchronously and would otherwise override the main chart's queued fit on a cached period switch) linked two ways via `subscribeVisibleLogicalRangeChange` with a re-entrancy guard and an equal `rightPriceScale.minimumWidth` so the x axes coincide; the table view (`CandleTable`) unmounts the canvas entirely. Reference levels (`levels` prop: previous close, 52-week high/low) are price lines; 0 sentinels are skipped.
-- **User state lives only in the browser**: the watchlist (★), price alerts and collapsed panels sit in localStorage behind `lib/localStore.ts` (`useSyncExternalStore`, cross-tab `storage` event, junk-tolerant parsers). The backend never sees them; this is not server state and not subject to the react-query rule. The `watch` scope and the alert watcher read the already-shared `['quotes', market]` caches (`useSymbolUniverse`, gated by `enabled`), so they add no request.
+- **User state lives only in the browser**: watchlist, price alerts, collapsed panels and quote density use `localStore`. Watch mode and the shell alert watcher explicitly poll shared US/KR quote keys when needed; search is passive. Concurrent requests share the same cache keys.
 - **The AI panel asks or analyses**: an empty question calls `analyze()` (default analysis, body-less POST); a typed question or preset calls `analyze({ question })`, which the backend caches under its own key and echoes back as `data.question` so even a cache hit shows what was answered. Retry re-sends the same question.
 - **Sub-pane crosshairs are one crosshair**: `PriceChart.broadcastCrosshair` relays `subscribeCrosshairMove` from whichever chart moved (main, volume, RSI, MACD) to the others via `setCrosshairPosition` (horizontal line on that chart's series value at the same time) with a re-entrancy guard, and clears them all when the pointer leaves; the legend follows the same index.
-- **The service worker owns the app shell only (ADR-002)**: `VitePWA` in `vite.config.ts` precaches the build output, falls SPA routes back to `index.html` (`/api/` denylisted) and caches fonts `CacheFirst` on first use; `/api/*` has no worker route, so quotes, news and AI always hit the network; offline, TanStack Query (`networkMode: 'online'`) pauses the polls and keeps the last data while `StatusBar` shows an offline badge (a cold visit shows failure cards) (`lib/online.ts`, `navigator.onLine` via `useSyncExternalStore`). Updates are `prompt`-mode: `UpdateToast` (`virtual:pwa-register/react`) offers "새로 고침", which posts `SKIP_WAITING`; nothing reloads by itself.
+- **The service worker owns the app shell only (ADR-002)**: `VitePWA` in `vite.config.ts` precaches the build output, falls SPA routes back to `index.html` (`/api/` denylisted) and caches fonts `CacheFirst` on first use; `/api/*` has no worker route, so quotes, news and AI always hit the network; offline, TanStack Query (`networkMode: 'online'`) pauses the polls and keeps the last data while `StatusBar` shows an offline badge (an offline first fetch waits for connectivity) (`lib/online.ts`, `navigator.onLine` via `useSyncExternalStore`). Updates are `prompt`-mode: `UpdateToast` (`virtual:pwa-register/react`) offers "새로 고침", which posts `SKIP_WAITING`; nothing reloads by itself.
+- **Alerts poll on every screen**: `AlertsWatcher` activates both shared `useQuotes` observers only while a pending alert exists, so article pages and other-market views keep monitoring. Removing or firing the last pending alert disables those polls.
 - **Alerts fire once**: the shell's `AlertsWatcher` evaluates on every quote poll, records `triggeredAt` before toasting, and only asks for `Notification` permission when the user creates an alert.
+
+
+#### Quality upgrade (2026-09-13, ADR-003)
+
+- **Market navigation:** `Dashboard` owns `?market=us|kr&watch=1`, keeping the underlying market when watch is selected. One toolbar changes the workspace and manually invalidates active quote, overview and news keys. Returning from a stock preserves the selected scope.
+- **Quote workbench:** `quoteFilter.ts` combines unlimited symbol/Korean/initial search, sector and movement filters, preserving source order before sorting and keeping null/non-finite values last. `quoteCsv.ts` exports the displayed order, original values and currencies with a UTF-8 BOM, CSV escaping and spreadsheet text guards. `quotePreferences.ts` remembers density via `localStore`; filters/sort reset on scope changes. Phones provide core columns plus a full-column toggle.
+- **Aligned breadth:** `MarketPulse` reads `useQuotes(market)` and `marketSummary.ts`, including unchanged quotes and labelling the tracked count. Leader lists include only the appropriate direction and link to the stock page.
+- **Recovery states:** `DataNotice` accompanies usable retained data after a failed refresh. Initial errors use `ErrorCard`, including a failed watchlist whose returned array is empty. Global search waits while any market fetch is pending before reporting no matches. Keyboard Enter respects IME composition, including legacy key code 229.
+- **Read lifecycle:** `apiGet(path, signal?)` has a 30-second per-attempt deadline through body consumption and cleans up its timer/listener. Query functions forward their AbortSignal. `useQuotes(market, {enabled?})` enables both watch-market polls on existing keys; `useSymbolUniverse` remains passive. Watch timestamps use the oldest contributing market timestamp.
+- **Article entry:** `/articles` without a usable URL renders `ArticleStart`. HTTP(S), credentials and length are checked before submission; server SSRF guards remain authoritative. Opening the form sends no AI request, while submitting or following an article link enters the existing SSE analysis flow.
+- **Time and accessibility:** strip/news/footer times use KST; fundamentals and returns use `last_updated` ahead of the overlaid price timestamp. Panels have named regions and stable `aria-controls` targets. The shell has a skip link, and stored themes apply before first paint.
+- **Verification:** strict TypeScript covers app, config and browser tests. `npm run test:e2e` builds the app and launches a dedicated port 4317 server without reuse. Fifteen Chromium scenarios use snapshots (synthetic AI, no Yahoo/AWS calls) across 360/390/768/1440px, both themes, filters/export, storage, errors, offline recovery, keyboard, charts and article input. CI saves screenshots and failure traces.
 
 #### AI streaming (SSE)
 The two AI endpoints answer with `text/event-stream` instead of the envelope, so `frontend/src/api/aiStream.ts` is the **one** file that calls fetch directly — a deliberate, bounded exception to "server state lives in react-query", which caches a single settled result per key and has nowhere to hold a response that grows. Everything else stays in query hooks.
@@ -75,7 +88,7 @@ The two AI endpoints answer with `text/event-stream` instead of the envelope, so
 ## 한국어
 
 ### 1. 개요
-React 19 + TypeScript(strict) SPA, Vite 8 빌드, **터미널 워크스페이스** 레이아웃(ADR-001). 세 페이지 — Dashboard(시장 워크스페이스), StockDetail(워치리스트 레일이 있는 종목 워크스페이스), ArticleAnalysis — 가 앱 셸을 공유한다: 상단 sticky 블록(브랜드·네비·⌘K 종목 검색·테마 토글의 커맨드 바, 지수 셀 + 지표 크롤의 마켓 스트립), `Outlet`의 페이지, 하단 sticky 상태 바(장 상태·출처·폴링 주기·기준 시각·KST 시계). 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거친다 — 단 두 AI 엔드포인트는 예외로, SSE로 흘러오며 `api/aiStream.ts`가 소비한다(§3). 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
+React 19 + React Router 7.18.3 + TypeScript(strict) SPA, Vite 8 빌드, **터미널 워크스페이스** 레이아웃(ADR-001). 세 페이지 — Dashboard(시장 워크스페이스), StockDetail(워치리스트 레일이 있는 종목 워크스페이스), ArticleAnalysis — 가 앱 셸을 공유한다: 상단 sticky 블록(브랜드·네비·⌘K 종목 검색·테마 토글의 커맨드 바, 지수 셀 + 지표 크롤의 마켓 스트립), `Outlet`의 페이지, 하단 sticky 상태 바(장 상태·출처·폴링 주기·기준 시각·KST 시계). 서버 상태는 전부 envelope을 언래핑하는 TanStack Query 훅을 거친다 — 단 두 AI 엔드포인트는 예외로, SSE로 흘러오며 `api/aiStream.ts`가 소비한다(§3). 폴링은 상수 두 개만 쓴다. 개발에서는 Vite가 `/api`를 `:8000`으로 프록시하고, 운영에서는 같은 오리진 경로를 CloudFront가 서빙한다.
 
 ### 2. 구성요소
 | 구성요소 | 경로 | 목적 |
@@ -83,7 +96,7 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드, **터미널 워크스페이스
 | 엔트리 + 라우트 | `frontend/src/main.tsx` | `RouterProvider`와 라우트 테이블 (의도적으로 `App.tsx`에 두지 않음 — oxlint `react/only-export-components`가 HMR 보존) |
 | 앱 셸 | `frontend/src/App.tsx` | 커맨드 바(브랜드·네비·`SymbolSearch`·`ThemeToggle`) + `MarketStrip`을 한 sticky 블록에 / `Outlet` / `StatusBar` + `NotFound`(`*` 자식 라우트)·`RouteError`(셸 `errorElement`) — 죽은 링크 하나가 앱 전체를 내려앉히지 않는다 |
 | HTTP 클라이언트 | `frontend/src/api/client.ts` | 같은 오리진 `/api/...` 경로(base URL 없음). `ApiError { status, detail }`. 네트워크 실패는 감싸지 않고 전파 |
-| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET 데이터 전용(AI 없음). `useSymbolUniverse(enabled)`는 두 시장 시세를 공유 키 `['quotes', market]`로 검색에 공급하며 `enabled` 게이트·자체 폴링 없음 |
+| 쿼리 훅 | `frontend/src/api/queries.ts` | envelope 언래핑. 모든 훅이 `{data, asOf, marketOpen, isLoading, isFetching, error}` 반환. `QUOTE_POLL_MS` 45 000, `NEWS_POLL_MS` 120 000 — GET 데이터 전용(AI 없음). `useSymbolUniverse(enabled)`는 두 시장 시세를 공유 키 `['quotes', market]`로 검색에 공급하며 `enabled` 게이트·자체 폴링 없음 |
 | AI 스트리밍 훅 | `frontend/src/api/aiStream.ts` | `useStockAIStream(symbol)` / `useArticleAIStream()`. 두 AI 엔드포인트가 SSE라 이 파일만 fetch를 직접 쓴다 — §3 참조 |
 | API 타입 | `frontend/src/api/types.ts` | `Envelope<T>`와 모든 페이로드 타입 |
 | 페이지 | `frontend/src/pages/` | `Dashboard.tsx`, `StockDetail.tsx`, `ArticleAnalysis.tsx` |
@@ -95,19 +108,32 @@ React 19 + TypeScript(strict) SPA, Vite 8 빌드, **터미널 워크스페이스
 ### 3. 주요 결정
 - **base URL 없음**: 경로는 항상 같은 오리진 절대 경로(`/api/...`) — 개발은 Vite 프록시, 운영은 CloudFront. 환경별 설정이 필요 없다.
 - **envelope 언래핑은 쿼리 훅에서만** — `asOf`/`marketOpen`을 잃지 않는다. 데이터 신선도는 `AsOfBadge`로 노출.
-- **`marketOpen`을 꾸미지 않는다**: 첫 로딩 중·실패 후에는 `undefined` — "모름"과 "장 닫힘"은 다르다.
+- **`marketOpen`을 꾸미지 않는다**: 첫 응답 전에는 `undefined`다. 갱신 실패는 마지막 스냅샷을 유지하되 장 상태 표시는 오류·오프라인 중 확인 중으로 구분한다.
 - **폴링은 export된 상수 두 개만** (시세 45초 / 뉴스 120초). 수동 `setInterval` 금지.
 - **화면은 `ApiError.status`/`detail`로 분기** (429 `rate_limited`, 503 `ai_unavailable`, 500 `ai_failed`, 502 `article_unavailable`). `readDetail`은 ALB/CloudFront의 HTML 오류 본문에서도 절대 throw하지 않는다.
 - **배포 빌드는 백엔드로**: `npm run build:deploy`가 `backend/static`에 출력, FastAPI가 서빙 (`make build`가 래핑).
-- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 301개). 린트는 oxlint.
+- **테스트는 colocated** `.test.tsx`/`.test.ts` (vitest, 452개). 린트는 oxlint.
 - **종목 검색은 포커스 전까지 아무것도 요청하지 않는다**: `SymbolSearch`가 `useSymbolUniverse(focused)`를 부른다. `⌘K`/`Ctrl+K`/`/`로 포커스, ↑↓ 선택, Enter로 `/stocks/:symbol` 이동. ARIA 1.2 콤보박스(입력 `combobox`, 목록 `listbox`, `aria-activedescendant`).
 - **워치리스트 레일은 상세의 `market`을 따른다** — 심볼 접미사로 추측하지 않는다. `StockDetail`은 상세가 도착한 뒤에만 레일을 마운트하고, 시장이 바뀌는 전환에는 `key={market}`으로 다시 마운트한다.
 - **차트 오버레이 토글은 `visible`만 바꾼다** — 시리즈를 다시 만들지 않는다. OHLC 레전드는 `subscribeCrosshairMove`가 시각→인덱스 맵을 거쳐 채우고, 차트 밖에서는 마지막 캔들로 되돌아간다. **거래량/RSI/MACD는 별도 차트**다(lightweight-charts v4는 단일 패널. 거래량을 메인에서 빼내고 캔들 시리즈가 autoscale 바닥을 0에서 클램프해(아래 여백은 가격 단위) 가격축이 0 아래로 내려가지 않는다 — 옛 픽셀 띠가 5Y에서 음수 라벨을 만들었다. 패널 채우기는 시간축 링크를 끊은 채 `fitContent` 앞에서 한다 — 패널의 `setData`가 논리 범위를 동기 발화해 캐시 히트 기간 전환 시 메인의 맞춤을 덮어쓰기 때문) — `subscribeVisibleLogicalRangeChange`로 양방향 동기화(재진입 가드)하고 `rightPriceScale.minimumWidth`를 같게 두어 x축을 맞춘다. 표 뷰(`CandleTable`)는 캔버스를 통째로 언마운트한다. 기준선(`levels` 프롭: 전일종가·52주 고/저)은 가격선이며 0 센티널은 건너뛴다.
-- **사용자 상태는 브라우저에만 산다**: 관심 종목(★)·가격 알림·패널 접힘은 `lib/localStore.ts`(`useSyncExternalStore`, 다른 탭은 `storage` 이벤트, 손상 허용 파서) 위의 localStorage에 있다. 백엔드는 이 값을 모른다 — 서버 상태가 아니므로 react-query 규칙의 대상이 아니다. `watch` 스코프와 알림 감시는 이미 공유되는 `['quotes', market]` 캐시(`useSymbolUniverse`, `enabled` 게이트)를 읽어 요청을 늘리지 않는다.
+- **사용자 상태는 브라우저에만 산다**: 관심 종목·가격 알림·패널 접힘·표 밀도는 `localStore`를 사용한다. 관심 모드와 셸 알림 감시는 필요할 때 미국·한국 공유 키를 명시적으로 폴링하고, 검색은 수동 관찰자로 남는다. 같은 키의 진행 중 요청은 공유된다.
 - **AI 패널은 묻거나 분석한다**: 질문이 비어 있으면 `analyze()`(기본 분석, 본문 없는 POST), 질문·프리셋이면 `analyze({ question })` — 백엔드가 자기 키로 캐시하고 `data.question`으로 되돌려 캐시 히트에서도 무엇에 대한 답인지 보인다. 재시도는 같은 질문을 다시 보낸다.
 - **보조 패널의 크로스헤어는 하나다**: `PriceChart.broadcastCrosshair`가 움직인 차트(메인·거래량·RSI·MACD)의 `subscribeCrosshairMove`를 나머지 차트의 `setCrosshairPosition`으로 중계하고(가로선은 그 차트 시리즈의 같은 시각 값), 재진입 가드로 되울림을 막으며, 포인터가 나가면 모두 지운다. 레전드도 같은 인덱스를 따른다.
-- **서비스 워커는 앱 셸만 담당한다 (ADR-002)**: `vite.config.ts`의 `VitePWA`가 빌드 산출물을 프리캐시하고 SPA 경로를 `index.html`로 돌리며(`/api/` 제외) 폰트는 첫 사용 시 `CacheFirst`로 담는다. `/api/*`에는 워커 라우트가 없어 시세·뉴스·AI는 항상 네트워크로 가고, 오프라인이면 TanStack Query(`networkMode: 'online'`)가 폴링을 멈춰 마지막 데이터가 남고 `StatusBar`가 오프라인 배지를 보인다(콜드 진입은 실패 카드)(`lib/online.ts`, `useSyncExternalStore` 위의 `navigator.onLine`). 업데이트는 `prompt` 방식 — `UpdateToast`(`virtual:pwa-register/react`)가 "새로 고침"을 제공하고 `SKIP_WAITING`을 보낸다. 저절로 다시 읽는 것은 없다.
+- **서비스 워커는 앱 셸만 담당한다 (ADR-002)**: `vite.config.ts`의 `VitePWA`가 빌드 산출물을 프리캐시하고 SPA 경로를 `index.html`로 돌리며(`/api/` 제외) 폰트는 첫 사용 시 `CacheFirst`로 담는다. `/api/*`에는 워커 라우트가 없어 시세·뉴스·AI는 항상 네트워크로 가고, 오프라인이면 TanStack Query(`networkMode: 'online'`)가 폴링을 멈춰 마지막 데이터가 남고 `StatusBar`가 오프라인 배지를 보인다(오프라인 최초 조회는 연결 복구 후 진행)(`lib/online.ts`, `useSyncExternalStore` 위의 `navigator.onLine`). 업데이트는 `prompt` 방식 — `UpdateToast`(`virtual:pwa-register/react`)가 "새로 고침"을 제공하고 `SKIP_WAITING`을 보낸다. 저절로 다시 읽는 것은 없다.
+- **어느 화면에서도 가격을 감시한다**: `AlertsWatcher`가 대기 알림이 있을 때만 양 시장의 `useQuotes` 폴링을 켠다. 기사 화면·다른 시장 화면에서도 감시하고 마지막 대기 알림이 사라지면 중지한다.
 - **알림은 한 번만 울린다**: 셸의 `AlertsWatcher`가 시세 폴링마다 판정하고, 토스트 전에 `triggeredAt`을 기록하며, `Notification` 권한은 사용자가 알림을 만들 때만 묻는다.
+
+
+#### 품질 개선 (2026-09-13, ADR-003)
+
+- **시장 탐색:** `Dashboard`가 `?market=us|kr&watch=1`을 소유한다. 관심 선택 시 기준 시장을 보존하며 상단 도구 모음의 새로고침은 현재 시세·개요·뉴스 키를 갱신한다. 종목 상세에서 돌아오면 스코프가 복원된다.
+- **시세 탐색 도구:** `quoteFilter.ts`의 한글·초성·영문·심볼 검색, 섹터·등락 필터, 결측값 마지막 정렬을 조합한다. `quoteCsv.ts`는 화면 순서·원본 수치·통화를 보존하고 BOM·CSV 인용·텍스트 수식 방어를 적용한다. 밀도만 `quotePreferences.ts`와 `localStore`에 기억하고 필터·정렬은 스코프 전환 시 초기화한다. 모바일에서도 전체 열을 펼칠 수 있다.
+- **일치하는 집계:** `MarketPulse`는 표와 같은 `useQuotes(market)`을 읽고 `marketSummary.ts`에서 보합 포함 집계와 방향별 순위를 만든다. 추적 종목 범위를 명시하고 각 순위 행은 종목 상세로 연결된다.
+- **복구 상태:** 사용 가능한 데이터를 유지한 갱신 실패만 `DataNotice`로 표시한다. 빈 배열로 끝난 관심 종목 조회 실패도 `ErrorCard`이며, 검색은 다른 시장의 요청이 끝나기 전 일치 없음으로 단정하지 않는다. 한글 조합 확정 Enter와 Safari의 229 키 경로를 이동으로 소비하지 않는다.
+- **조회 수명:** `apiGet(path, signal?)`은 본문 읽기를 포함한 요청별 30초 제한시간과 취소를 지원한다. 쿼리 함수가 AbortSignal을 전달하고, `useQuotes(market, {enabled?})`로 관심 목록의 양 시장을 기존 공유 키에서 폴링한다. 검색 유니버스 자체는 폴링하지 않는다. 관심 시각은 실제 행을 제공한 시장 중 가장 오래된 값이다.
+- **기사 진입:** 사용 가능한 URL 없는 `/articles`는 `ArticleStart` 입력 화면이다. 제출 전에는 AI를 호출하지 않으며 HTTP(S)·인증정보·길이를 검사한다. 서버 SSRF 검증을 대체하지 않고 기존 SSE 분석 흐름을 재사용한다.
+- **시각·접근성:** 스트립·뉴스·상태 바는 KST. 재무/기간수익률은 가격 오버레이 시각 대신 `last_updated`를 우선한다. 패널의 제목·본문 제어 관계, 본문 바로가기, 첫 페인트 이전 테마 복원을 제공한다.
+- **검증:** 앱·설정·브라우저 테스트에 strict TypeScript를 적용한다. `npm run test:e2e`는 빌드 후 전용 4317 포트에서 실행하며 다른 서버를 재사용하지 않는다. 15개 Chromium 시나리오가 네 해상도·양 테마·탐색·내보내기·저장·오류·오프라인·키보드·차트·기사 입력을 검증한다. 스냅샷과 테스트 AI 응답만 사용하며 CI는 캡처·실패 추적을 저장한다.
 
 #### AI 스트리밍 (SSE)
 두 AI 엔드포인트는 envelope 대신 `text/event-stream`으로 답한다. 그래서 `frontend/src/api/aiStream.ts`가 fetch를 직접 쓰는 **유일한** 파일이다 — "서버 상태는 react-query로만"의 의도적이고 좁은 예외다(react-query는 키마다 완결된 결과 하나를 캐시하므로 자라나는 응답을 담을 자리가 없다). 그 밖의 서버 상태는 전부 쿼리 훅에 남는다.

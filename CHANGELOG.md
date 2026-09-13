@@ -15,7 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+**2026-09-13 deployment:** the quality workbench and React Router 7.18.3 are running in the existing production stack (task revision 13). All 904 automated tests and live API/UI/SSE checks passed; npm audit reported zero findings. [Deployment record](docs/deployments/2026-09-13-router7-quality-upgrade.md).
+
 ### Added
+- Add a market workbench with URL-backed scope, tracked-universe breadth (including unchanged stocks), Korean/initial search, sector/movement filters, null-last sorting, density preferences and safe displayed-order CSV export
+- Add an actionable article-analysis entry form, mobile full-column access, accessible panel relationships and a skip link
+- Add strict TypeScript and 15 production-build Chromium scenarios with screenshots, offline API fixtures and CI artifacts
 - Add an installable PWA (ADR-002): a web-app manifest with brand-mark icons and a workbox service worker that precaches the app shell, serves SPA routes offline and caches fonts on first use — `/api/*` is never cached (offline, polls pause on the last data); the status bar shows an offline badge and a toast offers "새로 고침" when a new version is waiting; the backend SPA fallback now keeps real 404s for `/assets/*` and file-like paths so a rolling deploy can never cache HTML under an asset URL
 - Add Korean stock names (`name_ko`) to quotes and stock detail, shown in search results and the quote header, with Korean-name and Hangul-initial (초성) matching in symbol search
 - Add free-form questions to the AI stock analysis panel — a question input with presets, an optional `{question}` body (1–200 chars after normalisation), a per-question cache key `ai:stock:{symbol}:q:{sha256[:16]}`, and the question echoed in the result
@@ -31,10 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add a post-deploy smoke check that `/api/market/quotes?market=us` returns a non-empty data array — the outage answered 200 OK with an empty array, which no existing check caught
 
 ### Changed
+- Synchronize README, onboarding, architecture, API contracts and reference navigation with the deployed application; add a documentation index separating current guides from historical plans
+- Refine dark/light contrast, typography, spacing and mobile layout; align strip/news/footer timestamps to KST and display the fundamentals' own timestamp
+- Upgrade React Router to 7.18.3, Vitest to 4.1.11 and nanoid to 3.3.19; npm audit reports no vulnerabilities
 - Redesign the frontend as a terminal-style workspace (ADR-001) — a panel grid with uppercase eyebrows (MARKET PULSE, SECTOR HEAT, QUOTE MONITOR, NEWS WIRE, PRICE ACTION, AI RESEARCH, ORDER BOOK, INVESTOR FLOW…), a terminal palette with an amber accent and JetBrains Mono numerals; the Korean up=red/down=blue convention is kept
 - Raise the article AI response cap from 2048 to 4096 tokens so long translation-plus-summary outputs are no longer truncated and cached truncated (stock analyses stay at 1024)
 
 ### Fixed
+- Retain cached values after refresh failures, bound and cancel GET requests, refresh both watchlist markets, and distinguish pending searches and failed watchlists from empty results
+- Keep price alerts polling both markets on article pages and other-market views while pending, then stop after the last alert fires or is removed
+- Correct market-scoped open flags and overlaid previous close; recover lazy fundamentals field failures and normalize non-finite ratios before caching
+- Contain news scrolling, wrap chart indicator controls on phones, preserve full mobile data access, and avoid navigating on IME confirmation
 - Fix the main price axis printing 0 / -50000 / -100000 on wide-range periods such as 5Y — the volume moved from an overlay on the main chart into its own synced VOL sub-pane, and the candle series pads below in price units with the autoscale floor clamped at 0 (no pixel margin below, marker margin included), so the axis never extends below zero even when a symbol's 5Y range is many times its low; pane fills run with the time-scale link muted so a cached period switch still fits the main chart to the new data
 - Fix article extraction missing `<article>`, body `<div>` and `<p>` tags whose attributes exceed 1000 characters and leaving 1000+ character tags (data-URI images) in the text — the tag regexes drop the length cap (they stay linear by excluding `<`) and stage 2 parses each `<div>`'s `class` attribute instead of chaining several character classes in one regex
 - Fix article extraction swallowing the site footer when a page has no `</article>` within the window (a truncated page, or an article longer than it) — an unclosed `<article>` or body-`<div>` window now stops at the next structural boundary (`<footer`, `</main>`, `<nav`) instead of word-filtering paragraphs, and the window grew from 100k to 250k characters so 100k+ articles are read whole; `<pre>`/`<divider>`/`data-class=` no longer pass as `<p>`/`<div>`/`class=`
@@ -94,7 +106,12 @@ First production release.
 
 ## [Unreleased]
 
+**2026-09-13 운영 반영:** 품질 개선과 React Router 7.18.3을 기존 스택의 태스크 리비전 13으로 배포했다. 자동 테스트 904개와 실제 API·화면·SSE 검증을 통과했고 npm audit는 0건이다. [배포 기록](docs/deployments/2026-09-13-router7-quality-upgrade.md) 참조.
+
 ### Added
+- URL 시장 선택, 보합 포함 추적 종목 요약, 한글·초성 검색, 섹터·등락 필터, 결측값 마지막 정렬, 표 밀도 저장, 화면 순서 CSV를 제공하는 시장 탐색 도구 추가
+- 기사 분석 입력 화면, 모바일 전체 열, 패널 접근성 연결, 본문 바로가기 추가
+- strict TypeScript와 프로덕션 빌드 대상 Chromium 15개 시나리오·화면 캡처·CI 결과물 보존 추가
 - 설치형 PWA 추가(ADR-002): 브랜드 마크 아이콘을 담은 웹 앱 매니페스트와 앱 셸을 프리캐시하는 workbox 서비스 워커 — SPA 경로 오프라인 서빙, 폰트는 첫 사용 시 캐시, `/api/*`는 절대 캐시하지 않음(오프라인에서는 폴링이 멈춰 마지막 데이터 유지); 상태 바에 오프라인 배지, 새 버전이 대기 중이면 토스트가 "새로 고침" 제공; 백엔드 SPA fallback은 `/assets/*`·파일형 경로에 진짜 404를 유지해 롤링 배포 중 자산 URL 아래 HTML이 캐시되지 않음
 - 시세·종목 상세에 한글 종목명(`name_ko`) 추가 — 검색 결과와 종목 헤더에 표시, 종목 검색에서 한글명·초성 매칭 지원
 - AI 종목 분석 패널에 자유 질의 추가 — 질문 입력과 프리셋, 선택 본문 `{question}`(정규화 후 1~200자), 질문별 캐시 키 `ai:stock:{symbol}:q:{sha256[:16]}`, 결과에 질문 에코
@@ -110,10 +127,17 @@ First production release.
 - `/api/market/quotes?market=us`의 data 배열이 비어 있지 않은지 확인하는 배포 후 스모크 검사 추가 — 장애 당시 200 OK + 빈 배열이어서 기존 검사가 모두 놓쳤음
 
 ### Changed
+- README·온보딩·아키텍처·API 규약·레퍼런스 탐색을 운영 코드에 맞게 동기화하고 현행 안내와 과거 설계 기록을 구분하는 문서 색인 추가
+- 양 테마 대비·서체·간격·모바일 배치 개선, 스트립·뉴스·상태 바 KST 통일, 재무 자체 기준 시각 표시
+- React Router 7.18.3·Vitest 4.1.11·nanoid 3.3.19 보안 업데이트 적용; npm audit 취약점 0건
 - 프론트엔드를 터미널 스타일 워크스페이스로 개편(ADR-001) — 대문자 eyebrow 패널 그리드(MARKET PULSE, SECTOR HEAT, QUOTE MONITOR, NEWS WIRE, PRICE ACTION, AI RESEARCH, ORDER BOOK, INVESTOR FLOW…), 앰버 액센트와 JetBrains Mono 숫자의 터미널 팔레트, 한국 등락색(상승 빨강/하락 파랑) 관례 유지
 - 기사 AI 응답 토큰 상한을 2048에서 4096으로 상향 — 긴 번역+요약 결과가 잘린 채 캐시되지 않음(종목 분석은 1024 유지)
 
 ### Fixed
+- 갱신 실패 시 기존 데이터 유지, GET 제한시간·취소, 양 시장 관심 시세 갱신, 검색 대기·관심 조회 실패와 빈 상태 구분
+- 기사 화면·다른 시장 화면에서도 대기 가격 알림을 갱신하고, 마지막 대기 알림 발동·삭제 후 폴링 중지
+- 시장별 장 상태·가격 오버레이 전일 종가 수정, 지연 펀더멘털 필드의 부분 실패 복구, 비유한 비율의 캐시 전 정규화
+- 뉴스 넘침·모바일 차트 지표 넘침 수정, 모든 시세 열 접근 보존, 한글 조합 확정 시 잘못된 화면 이동 방지
 - 5Y처럼 범위가 넓은 기간에서 메인 가격축이 0 / -50000 / -100000까지 찍히던 문제 수정 — 거래량을 메인 차트 오버레이에서 별도 동기 VOL 보조 패널로 분리하고, 캔들 시리즈의 아래 여백을 가격 단위로 주며 autoscale 바닥을 0에서 클램프(하단 픽셀 여백·마커 여백 0)해 5Y 범위가 최저가의 수십 배인 종목에서도 축이 0 아래로 내려가지 않음; 패널 채우기는 시간축 링크를 끊고 수행해 캐시 히트 기간 전환에서도 메인 차트가 새 데이터에 맞춰짐
 - 속성이 1000자를 넘는 `<article>`·본문 `<div>`·`<p>`를 놓치고 1000자 초과 태그(data-URI 이미지)를 본문에 남기던 기사 추출 문제 수정 — 태그 regex의 길이 상한을 없애고(`<` 제외로 선형 유지) 전략 2는 문자 클래스 여러 개를 한 정규식에 이어 붙이는 대신 `<div>`마다 `class` 속성을 파싱
 - 창 안에 `</article>`이 없는 페이지(잘린 페이지, 창보다 긴 기사)에서 기사 추출이 사이트 푸터까지 삼키던 문제 수정 — 닫히지 않은 `<article>`·본문 `<div>` 창은 단락을 단어로 걸러 내는 대신 다음 구조 경계(`<footer`, `</main>`, `<nav`)에서 멈추고, 창을 100k→250k자로 늘려 100k 넘는 기사도 끝까지 읽음; `<pre>`/`<divider>`/`data-class=`는 더 이상 `<p>`/`<div>`/`class=`로 통과하지 않음

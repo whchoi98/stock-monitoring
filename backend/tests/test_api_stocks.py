@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import get_args
 
+import pytest
+
 from app.api.stocks import Period
 from app.core import config
 from app.services.simulation import build_order_book
@@ -67,6 +69,56 @@ def test_detail_falls_back_to_cached_price_without_quotes_cache(client, services
     assert response.json()["data"]["price"] == FAKE_DETAIL_PRICE
     # 상세 라우트가 시장 전체 시세 조회를 유발하지 않는다 / The detail route triggers no market-wide quotes fetch
     assert services.calls["fetch_quotes"] == 0
+
+
+@pytest.mark.parametrize(
+    ("price", "change", "change_pct"),
+    [(110.0, 10.0, 10.0), (90.0, -10.0, -10.0), (100.0, 0.0, 0.0)],
+)
+def test_detail_quote_overlay_keeps_previous_close_consistent(
+    client, state, price, change, change_pct,
+):
+    """가격·등락·전일종가는 한 스냅샷이다 / Price, change and previous close share one snapshot."""
+    before = client.get(f"/api/stocks/{US_SYMBOL}").json()["data"]
+    quote = LIVE_QUOTE.model_dump(mode="json")
+    quote.update(price=price, change=change, change_pct=change_pct, volume=2000)
+    quote_as_of = "2026-09-11T15:00:00+00:00"
+    state.cache.l1.set("quotes:us", [quote], config.L2_TTL, quote_as_of)
+
+    response = client.get(f"/api/stocks/{US_SYMBOL}")
+
+    assert response.status_code == 200
+    body = response.json()
+    data = body["data"]
+    assert data["prev_close"] == 100.0
+    assert data["price"] == price
+    assert data["change"] == data["day_change"] == change
+    assert data["change_pct"] == data["day_change_pct"] == change_pct
+    assert data["volume"] == 2000
+    assert body["asOf"] == quote_as_of
+    # 오버레이가 공유 캐시를 바꾸면 안 된다 / The overlay must not mutate the shared fundamentals cache.
+    assert state.cache.l1.get(f"detail:{US_SYMBOL}")[0] == before
+
+
+@pytest.mark.parametrize(
+    ("instant", "us_open", "kr_open"),
+    [
+        ("2026-09-10T02:00:00+00:00", False, True),
+        ("2026-09-10T14:00:00+00:00", True, False),
+        ("2026-09-13T02:00:00+00:00", False, False),
+    ],
+)
+def test_stock_routes_report_the_symbols_market_hours(
+    client, market_clock, instant, us_open, kr_open,
+):
+    """다른 시장 개장이 종목의 장중 표시를 켜지 않는다 / Another market opening cannot open this stock's market."""
+    market_clock(instant)
+
+    for symbol, expected in ((US_SYMBOL, us_open), (KR_SYMBOL, kr_open)):
+        for suffix in ("", "/chart", "/news", "/orderbook", "/investors"):
+            response = client.get(f"/api/stocks/{symbol}{suffix}")
+            assert response.status_code == 200
+            assert response.json()["marketOpen"] is expected, (symbol, suffix)
 
 
 def test_unknown_symbol_is_404_and_creates_no_cache_key(client, state):

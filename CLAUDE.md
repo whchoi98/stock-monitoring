@@ -15,12 +15,12 @@ Real-time stock monitoring dashboard on Yahoo Finance data — quotes, charts, f
 ### Backend (`backend/`)
 - Python 3.12, FastAPI + uvicorn (**단일 워커 고정** — L1 캐시·AI 세마포어가 프로세스 단위 / single worker is load-bearing), pydantic v2
 - yfinance (시세/재무), httpx (RSS/기사 조회), boto3 (DynamoDB·Bedrock), defusedxml (RSS 파싱 — 엔티티 확장 DoS 차단)
-- 테스트 / Tests: pytest 408개 (`backend/tests/`)
+- 테스트 / Tests: pytest 437개 (`backend/tests/`)
 
 ### Frontend (`frontend/`)
 - React 19 + TypeScript (strict) + Vite 8
-- @tanstack/react-query (서버 상태·폴링), react-router-dom v6, lightweight-charts, react-markdown, @fontsource/pretendard
-- 테스트 / Tests: vitest + @testing-library/react 319개 (colocated `.test.tsx`) · 린트 / Lint: oxlint
+- @tanstack/react-query (서버 상태·폴링), react-router-dom 7.18.3, lightweight-charts, react-markdown, @fontsource/pretendard
+- 테스트 / Tests: vitest + @testing-library/react 452개 (colocated `.test.tsx`) · Playwright 브라우저 회귀 15개 · 린트 / Lint: oxlint
 - UI: 터미널 디자인 언어 (ADR-001) — 패널 그리드 워크스페이스, 마켓 스트립, 워치리스트 레일, 앰버 액센트, JetBrains Mono 숫자 / Terminal design language: panel-grid workspace, market strip, watchlist rail, amber accent, mono numerals
 
 ### Infrastructure (`infra/`)
@@ -44,7 +44,8 @@ frontend/             - React 19 + TS + Vite 8
   src/pages/          - Dashboard(시장 워크스페이스), StockDetail(종목 워크스페이스), ArticleAnalysis
   src/lib/            - format, clock, search(+hangul 초성), markets(QuoteScope), scopedQuotes, newsFilter, localStore(+watchlist/alerts/panel 스토어 — 브라우저 전용), online(오프라인 배지), stickyOffsets(고정 블록 실측 높이 → 토스트 앵커), aiMessages, articleLink, sse
   public/icons/       - PWA 아이콘 — 192/512/maskable은 vite.config.ts의 VitePWA 매니페스트가, apple-touch는 index.html이 참조
-  src/styles/         - tokens.css(디자인 토큰 — 색상 하드코딩 금지), global.css
+  e2e/                - Playwright browser regressions (production build, offline API snapshots)
+  src/styles/         - tokens.css(디자인 토큰 — 색상 하드코딩 금지), global.css, workspace.css
 infra/                - CDK v2 Python (venv: infra/.venv, cdk.json app = .venv/bin/python3 app.py)
   stacks/stock_monitoring_stack.py - 단일 스택 전체 (캐시/시크릿/ECS/ALB/CloudFront/알람)
 docs/reference/       - 계층별 구현 레퍼런스 (아래 Implementation References)
@@ -62,14 +63,15 @@ Makefile              - build(프론트→backend/static) / run(:8000) / test(�
 
 ```bash
 # 테스트 / Tests
-cd backend && .venv/bin/pytest -q          # 백엔드 (408)
-cd frontend && npx vitest run              # 프론트 (319)
+cd backend && .venv/bin/pytest -q          # 백엔드 (437)
+cd frontend && npx vitest run              # 프론트 (452)
 make test                                  # 전체 (두 스위트 모두 실행 후 종합 판정)
 # CI: .github/workflows/ci.yml — push/PR마다 위 두 스위트 + tsc -b + oxlint
 
 # 로컬 실행 / Local run
 make run                                   # 통합 빌드+실행 → http://localhost:8000
 cd frontend && npm run dev                 # 프론트 dev 서버 (vite 프록시 /api → :8000)
+cd frontend && npm run test:e2e            # production build + Chromium (port 4317, API fixtures)
 cd frontend && npm run lint                # oxlint
 
 # 배포 / Deploy (~4분)
@@ -141,6 +143,9 @@ Format: `ADR-NNN-concise-title.md`
 
 계층별 구현 상세 문서. 코드 수정 전 해당 계층 문서를 먼저 읽는다.
 Per-layer implementation details; read the matching doc before touching a layer.
+
+문서 시작점 / Documentation entry: [docs/README.md](docs/README.md).
+검증·운영 반영 / Verified deployment: [2026-09-13 deployment record](docs/deployments/2026-09-13-router7-quality-upgrade.md) — Router 7.18.3, 904 tests, npm audit 0 findings, task revision 13.
 
 <!-- AUTO-MANAGED:references -->
 - [Infrastructure / 인프라](docs/reference/infrastructure.md) — CloudFront → ALB → Fargate(ARM64) 런타임 토폴로지, Dockerfile, 알람, 스모크

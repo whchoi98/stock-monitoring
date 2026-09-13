@@ -49,10 +49,13 @@ LIVE_PRICE_FIELDS = ("price", "change", "change_pct", "volume")
 # 캐시 경유 조회 / Cached fetches
 # ---------------------------------------------------------------------------
 
-async def detail_payload(symbol: str) -> dict:
+async def detail_payload(symbol: str) -> dict | deps.Partial:
     """종목 상세를 dict로 (동기 서비스는 to_thread) / Stock detail as a dict (sync service via to_thread)."""
     detail = await asyncio.to_thread(fundamentals.fetch_detail, symbol)
-    return detail.model_dump(mode="json")
+    payload = detail.model_dump(mode="json")
+    if detail._source_failures:
+        return deps.Partial(payload, {"symbol": symbol, "failures": detail._source_failures})
+    return payload
 
 
 async def cached_detail(state: AppState, symbol: str) -> Tuple[dict, str]:
@@ -117,6 +120,8 @@ def overlay_live_price(detail: dict, quote: Optional[dict]) -> dict:
     한 응답 안에서 값이 어긋나지 않게 한다.
     `day_change`/`day_change_pct` mirror `change`/`change_pct` (TUI compatibility) and are updated with
     them so a single response never contradicts itself.
+    전일종가도 시세의 현재가−등락금액으로 맞춘다. 12시간 캐시의 전일종가는 다른 거래일일 수 있다.
+    Previous close also follows the quote's price minus change; the 12h cache may refer to another session.
 
     Args:
         detail: 캐시된 상세 dict / The cached detail dict.
@@ -133,6 +138,8 @@ def overlay_live_price(detail: dict, quote: Optional[dict]) -> dict:
         value = quote.get(field)
         if value is not None:
             merged[field] = value
+    if quote.get("price") is not None and quote.get("change") is not None:
+        merged["prev_close"] = quote["price"] - quote["change"]
     merged["day_change"] = merged.get("change")
     merged["day_change_pct"] = merged.get("change_pct")
     return merged
@@ -173,7 +180,7 @@ async def get_detail(
 ) -> dict:
     """상세 헤더 + 핵심지표 + 52주 범위 + 기간수익률 / Detail header, key ratios, 52-week range and period returns."""
     data, as_of = await detail_view(state, symbol)
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(deps.market_of(symbol)), as_of)
 
 
 @router.get("/{symbol}/chart")
@@ -184,7 +191,7 @@ async def get_chart(
 ) -> dict:
     """OHLCV + MA5/MA20 + 골든/데드 크로스 / OHLCV plus MA5/MA20 and golden/dead cross signals."""
     data, as_of = await cached_chart(state, symbol, period)
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(deps.market_of(symbol)), as_of)
 
 
 @router.get("/{symbol}/news")
@@ -200,7 +207,7 @@ async def get_stock_news(
         lambda: company_news_payload(symbol),
         deps.SOURCE_RSS,
     )
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(deps.market_of(symbol)), as_of)
 
 
 @router.get("/{symbol}/orderbook")
@@ -227,7 +234,7 @@ async def get_orderbook(
         "entries": [entry.model_dump(mode="json") for entry in entries],
         "simulated": True,
     }
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(deps.market_of(symbol)), as_of)
 
 
 @router.get("/{symbol}/investors")
@@ -257,4 +264,4 @@ async def get_investors(
         "rows": [row.model_dump(mode="json") for row in rows],
         "simulated": True,
     }
-    return envelope(data, deps.market_open_now(), as_of)
+    return envelope(data, deps.market_open_now(deps.market_of(symbol)), as_of)

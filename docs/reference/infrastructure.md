@@ -74,3 +74,10 @@ Production runtime topology: CloudFront (redirect-to-https) fronts an internet-f
 - 관련 모듈: [iac.md](iac.md) (스택 정의 방식), [security.md](security.md) (오리진 검증·SG 근거), [data.md](data.md) (DynamoDB 캐시 테이블)
 - 관련 ADR: [ADR-002](../decisions/ADR-002-pwa-app-shell.md)(PWA 파일은 기본 `CACHING_DISABLED` 동작을 그대로 탄다 — 인프라 변경 없음) — 승인된 설계는 `docs/superpowers/specs/2026-08-01-stock-monitoring-design.md`
 - 관련 런북: [quotes-cache-poisoning.md](../runbooks/quotes-cache-poisoning.md) (빈 종목 테이블 = 신선한 빈 시세 캐시 항목). 배포 = `cd infra && .venv/bin/cdk deploy --require-approval never` 후 `scripts/smoke.sh`
+
+
+## 2026-09-13 deployment / 운영 업데이트
+
+React Router 7.18.3 and the quality upgrade were deployed to the existing stack after explicit user approval. The reviewed template changed only the task definition image; no network or storage definitions changed. Generated screenshots, browser reports, fixtures, local artifacts and frontend dist are excluded from the Docker context. The immutable reviewed assembly was deployed with `cdk deploy --app cdk.out`; see the [deployment record](../deployments/2026-09-13-router7-quality-upgrade.md).
+
+사용자 승인 후 기존 스택의 애플리케이션 이미지만 갱신했다. Docker 컨텍스트에서 검증 산출물을 제외하고, 검토한 CDK assembly를 그대로 배포했다. 운영 태스크 리비전은 13이며 배포 후 공개 주소·AI 스트림·화면·ALB 차단을 확인했다.

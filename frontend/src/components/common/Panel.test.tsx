@@ -53,4 +53,13 @@ describe('Panel', () => {
     )
     expect(screen.getByText('뉴스 본문')).toBeTruthy()
   })
+
+  it('패널 제목과 접기 버튼이 해당 본문을 가리킨다 / labels its region and identifies the controlled body', () => {
+    render(<Panel id="quotes" title="시세"><span>시세 본문</span></Panel>)
+    const region = screen.getByRole('region', { name: '시세' })
+    const toggle = screen.getByRole('button', { name: '패널 접기' })
+    const controlled = document.getElementById(toggle.getAttribute('aria-controls') ?? '')
+    expect(controlled?.textContent).toContain('시세 본문')
+    expect(region.contains(controlled)).toBe(true)
+  })
 })

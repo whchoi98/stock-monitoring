@@ -14,6 +14,7 @@ import { useStock } from '../../api/queries.ts'
 import type { Period } from '../../api/types.ts'
 import { arrow, changeClass, formatPct } from '../../lib/format.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
@@ -59,13 +60,14 @@ export function ReturnsRow({ symbol }: ReturnsRowProps) {
     void queryClient.invalidateQueries({ queryKey: ['stock', symbol] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="기간수익률을 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="기간수익률을 불러오지 못했습니다" />
 
   // 조회 실패 시 `returns` 자체가 null이고, 이력이 짧으면 키별로 null이다 — 어느 쪽이든 "—" / Null overall or per key; either way an em dash
   const returns = data?.returns ?? null
 
   return (
-    <Panel id="returns" eyebrow="RETURNS" title="기간수익률" action={<AsOfBadge asOf={asOf} />}>
+    <Panel id="returns" eyebrow="RETURNS" title="기간수익률" action={<AsOfBadge asOf={data?.last_updated ?? asOf} />}>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading || data === undefined ? (
         <Spinner />
       ) : (

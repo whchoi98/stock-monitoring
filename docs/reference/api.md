@@ -24,6 +24,9 @@ The FastAPI layer serves everything under `/api/*` and falls back to the SPA (`i
 
 ### 3. Key Decisions
 - **One envelope everywhere**: `{"asOf", "marketOpen", "data"}`. `asOf` is the cached value's timestamp (after a price overlay it becomes the quote's timestamp — the price is the headline datum).
+- **Market-scoped open flags**: `/api/market/quotes?market=...` reports that market's hours, and every `GET /api/stocks/{symbol}...` reports the symbol's market. Overview and the market news feed retain the aggregate "either market open" flag. The detector uses weekdays, local session hours and New York DST; exchange holidays and early closes are not modeled.
+- **Consistent price overlay**: detail's `prev_close` is derived from the same quote's `price - change`; `day_change` and `day_change_pct` mirror the overlaid changes. The slow fundamentals cache is not mutated.
+- **Recoverable detail failures stay visible**: lazy `fast_info` field reads are isolated, so a failed price field can use history and a failed secondary field does not discard usable prices. `info`/`history` failures and missing history also produce a `Partial` at the route boundary: the usable payload is cached and served, while Yahoo is marked `degraded`. Failure names travel in a private model attribute, never in response/cache JSON. No usable price still raises into the existing stale fallback or 503.
 - **Symbols are validated before any cache key exists**: `resolve_symbol` normalizes case and suffixes (`.KS`/`.KQ`) and 404s outside the universe, keeping cache/lock maps finite.
 - **Enum-typed query params**: chart `period` is a `Literal` (`1w 1m 3m 6m 1y 5y`; `1w` is hourly bars, `5y` weekly, the rest daily) kept identical to the `CHART_TTL` keys (a test asserts the match); FastAPI rejects anything else with 422.
 - **Fixed error strings only** (`app_not_ready`, `rate_limited`, `ai_unavailable`, `ai_failed`, `article_unavailable`): exception text may carry an AWS account/ARN/model id and goes to server logs only.
@@ -72,6 +75,9 @@ FastAPI 계층은 `/api/*` 전체를 서빙하고, API가 아닌 GET/HEAD 경로
 
 ### 3. 주요 결정
 - **envelope 단일 규약**: `{"asOf", "marketOpen", "data"}`. `asOf`는 캐시된 값의 시각 (가격 오버레이 후에는 시세의 시각 — 가격이 응답의 대표 데이터).
+- **시장 범위에 맞는 장중 표시**: `/api/market/quotes?market=...`는 요청 시장, 모든 `GET /api/stocks/{symbol}...`는 해당 종목 시장의 장중 여부를 반환한다. overview와 시장 뉴스 피드는 기존의 "둘 중 하나라도 개장" 규약을 유지한다. 판정은 평일·현지 정규 시간·뉴욕 DST 기준이며 거래소 공휴일·조기 폐장은 아직 반영하지 않는다.
+- **일관된 가격 오버레이**: 상세의 `prev_close`도 같은 시세의 `price - change`로 맞추고, `day_change`·`day_change_pct`는 덮어쓴 등락을 따른다. 느린 펀더멘털 캐시 원본은 변경하지 않는다.
+- **복구 가능한 상세 실패도 상태에 반영**: `fast_info`의 지연 필드 접근을 격리해 가격 필드 실패는 history로 복구하고 보조 필드 실패는 사용 가능한 가격을 버리지 않는다. `info`·`history` 조회 실패와 history 결손도 라우트에서 `Partial`로 전달한다. 유효 페이로드는 캐시·서빙하면서 Yahoo는 `degraded`로 표시한다. 실패 이름은 모델의 private 속성으로만 전달되어 응답·캐시 JSON에는 포함되지 않는다. 가격을 어디서도 얻지 못하면 기존 stale 폴백 또는 503 경로를 유지한다.
 - **캐시 키 생성 전에 심볼 검증**: `resolve_symbol`이 대소문자·접미사(`.KS`/`.KQ`)를 정규화하고 유니버스 밖은 404 — 캐시/락 맵의 유한성 보장.
 - **쿼리 파라미터는 enum 타입**: 차트 `period`는 `CHART_TTL` 키와 동일한 `Literal`(`1w 1m 3m 6m 1y 5y` — `1w`는 시간봉, `5y`는 주봉, 나머지는 일봉. 테스트가 일치를 검증). 다른 값은 FastAPI가 422로 거절.
 - **오류 본문은 고정 문구만** (`app_not_ready`, `rate_limited`, `ai_unavailable`, `ai_failed`, `article_unavailable`): 예외 문자열에는 AWS 계정/ARN/모델 ID가 섞일 수 있어 서버 로그에만 남긴다.

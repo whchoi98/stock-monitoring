@@ -76,6 +76,14 @@ beforeEach(() => {
 })
 
 describe('PriceChart', () => {
+  it('갱신 실패에도 받은 캔들을 유지하고 재시도를 제공한다 / retains candle data after a background refresh fails', () => {
+    vi.mocked(useChart).mockReturnValue(hookResult({ data: WITH_CANDLES, error: new Error('refresh failed') }))
+    const { container } = renderChart('AAPL', 'table')
+    expect(container.querySelectorAll('.candle-table tbody tr')).toHaveLength(2)
+    expect(screen.getByRole('status', { name: '데이터 갱신 안내' }).textContent).toContain('마지막')
+    expect(screen.getByRole('button', { name: '다시 시도' })).toBeTruthy()
+  })
+
   it('기간 탭 6개를 1M 선택 상태로 렌더한다 / renders the six period tabs with 1M selected', () => {
     renderChart()
 

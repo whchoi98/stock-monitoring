@@ -8,14 +8,12 @@ import { formatClock, formatKstClock } from './clock.ts'
 
 describe('formatClock', () => {
   it('HH:MM 형식이다 / is HH:MM', () => {
-    expect(formatClock('2026-08-03T05:32:00+00:00')).toMatch(/^\d{2}:\d{2}$/)
+    expect(formatClock('2026-08-03T05:32:00+00:00')).toBe('14:32')
   })
 
   it('자정 시각을 24시가 아닌 00시로 낸다 / renders the midnight hour as 00, never 24', () => {
-    // 호스트 시간대에 상관없이 로컬 자정 시간대에 떨어지는 순간을 만든다 / An instant inside the host's local midnight hour, whatever the zone
-    const midnight = new Date()
-    midnight.setHours(0, 37, 0, 0)
-    expect(formatClock(midnight.toISOString())).toBe('00:37')
+    // 브라우저 시간대와 무관하게 서울 자정 / Seoul midnight regardless of the browser zone.
+    expect(formatClock('2026-09-12T15:37:00Z')).toBe('00:37')
   })
 
   it('파싱 불가면 null / null when unparseable', () => {

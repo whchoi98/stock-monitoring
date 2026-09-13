@@ -1,114 +1,94 @@
 /**
- * 시장 펄스 패널 — 상승/하락 종목 수(breadth) + 상위 3종 리스트 3개 (상승·하락·거래량).
- * The market-pulse panel: breadth (advancing/declining) plus three leader lists (gainers, losers, volume).
- *
- * **라벨은 정직하게**: 백엔드의 `top_losers`는 "등락률 하위 3종"이므로 전 종목이 상승한 장에서는 상승 종목이
- * 들어올 수 있다(반대도 마찬가지다). 그래서 부호를 가정하는 렌더 로직을 두지 않고, 색·화살표는 각 항목의 값에서
- * `changeClass`/`arrow`가 스스로 결정한다.
- * **Honest labels**: the backend's `top_losers` is "the bottom three by change", so in an all-up market it can hold
- * risers (and vice versa). No rendering logic assumes a sign; `changeClass`/`arrow` derive colour and arrow per value.
+ * 시세 표와 같은 캐시로 집계하는 시장 요약. 보합을 포함하며 추적 종목의 범위를 명시한다.
+ * Market breadth and leaders from the same quotes as the table, including unchanged stocks.
  */
 import { useQueryClient } from '@tanstack/react-query'
+import { useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 
-import { useOverview } from '../../api/queries.ts'
-import type { Market, Quote } from '../../api/types.ts'
-import { arrow, changeClass, formatPct, formatVolume } from '../../lib/format.ts'
-import { AsOfBadge } from '../common/AsOfBadge.tsx'
-import { ErrorCard } from '../common/ErrorCard.tsx'
+import { useQuotes } from '../../api/queries.ts'
+import type { Market } from '../../api/types.ts'
+import { changeClass, formatPct, formatVolume } from '../../lib/format.ts'
 import { MARKET_LABEL } from '../../lib/markets.ts'
+import { summarizeQuotes } from '../../lib/marketSummary.ts'
+import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
+import { ErrorCard } from '../common/ErrorCard.tsx'
+import { MarketStatus } from '../common/MarketStatus.tsx'
 import { Panel } from '../common/Panel.tsx'
 import { Spinner } from '../common/Spinner.tsx'
 
-interface LeaderListProps {
-  label: string
-  quotes: Quote[]
-  /** 오른쪽에 등락을 붙일지 거래량을 붙일지 / Whether the right-hand metric is the change or the volume */
-  metric: 'change' | 'volume'
-}
+const LEADERS = [
+  { key: 'gainers', label: '상승 상위', empty: '상승 종목이 없습니다' },
+  { key: 'losers', label: '하락 상위', empty: '하락 종목이 없습니다' },
+  { key: 'volume', label: '거래량 상위', empty: '거래량 데이터가 없습니다' },
+] as const
+type Leaders = typeof LEADERS[number]['key']
 
-/**
- * 상위 종목 한 줄 — 터미널 관례대로 심볼로 읽고 종목명은 title에 둔다 (세 열이 나란히 앉는 폭에서 종목명은 잘린다).
- * 등락은 부호가 있는 퍼센트만 — 금액까지 붙이면 한 줄이 넘친다. 색·화살표는 각 항목의 값에서 나온다.
- * One leader row, read by symbol as terminals do, with the name in the title (names truncate at three columns). The
- * change is the signed percentage alone; the amount would overflow the line. Colour and arrow come from each value.
- */
-function LeaderList({ label, quotes, metric }: LeaderListProps) {
-  return (
-    <div className="leader-list">
-      <p className="leader-label eyebrow">{label}</p>
-      <ul className="leader-items">
-        {quotes.map((quote) => {
-          const kind = changeClass(quote.change)
-          return (
-            <li className="leader-item" key={quote.symbol}>
-              <span className="leader-symbol" title={quote.name}>
-                {quote.symbol}
-              </span>
-              {metric === 'change' ? (
-                <span className={`leader-metric ${kind}`}>
-                  {kind === 'flat' ? arrow(quote.change) : `${arrow(quote.change)}${formatPct(quote.change_pct)}`}
-                </span>
-              ) : (
-                <span className="leader-metric">{formatVolume(quote.volume)}</span>
-              )}
-            </li>
-          )
-        })}
-      </ul>
-    </div>
-  )
-}
-
-export interface MarketPulseProps {
-  /** 표시할 시장 — 탭 상태는 시장 화면이 소유한다 / The market to show; the market screen owns the tab state */
-  market: Market
-}
-
-export function MarketPulse({ market }: MarketPulseProps) {
-  const { data, asOf, isLoading, error } = useOverview()
-  const queryClient = useQueryClient()
-
-  // 개요를 쓰는 위젯들이 공유하는 키 (`api/queries.ts`의 `['overview']`) / The key the overview widgets share
-  const retry = () => {
-    void queryClient.invalidateQueries({ queryKey: ['overview'] })
-  }
-
-  if (error !== null) return <ErrorCard onRetry={retry} message="시장 요약을 불러오지 못했습니다" />
-
-  const summary = data?.summary[market]
-  const breadth = summary === undefined ? 0 : summary.advancing + summary.declining
+export function MarketPulse({ market }: { market: Market }) {
+  const { data, asOf, isLoading, marketOpen, error } = useQuotes(market)
+  const client = useQueryClient()
+  const [leaders, setLeaders] = useState<Leaders>('gainers')
+  const summary = useMemo(() => summarizeQuotes(data ?? []), [data])
+  const retry = () => { void client.invalidateQueries({ queryKey: ['quotes', market] }) }
+  const selected = LEADERS.find(item => item.key === leaders)!
 
   return (
-    <Panel id="market-pulse" eyebrow="MARKET PULSE" title={`시장 요약 · ${MARKET_LABEL[market]}`} action={<AsOfBadge asOf={asOf} />}>
-      {isLoading ? (
+    <Panel
+      id="market-pulse"
+      eyebrow="MARKET PULSE"
+      title={`시장 요약 · ${MARKET_LABEL[market]}`}
+      action={<><MarketStatus market={market} marketOpen={error === null ? marketOpen : undefined} /><AsOfBadge asOf={asOf} /></>}
+    >
+      {error !== null && data === undefined ? (
+        <ErrorCard onRetry={retry} message="시장 요약을 불러오지 못했습니다" />
+      ) : isLoading ? (
         <Spinner />
-      ) : summary === undefined ? (
+      ) : summary.total === 0 ? (
         <p className="empty">시장 요약 데이터가 없습니다</p>
       ) : (
         <>
-          <div className="breadth">
-            <span className="up">상승 {summary.advancing}</span>
-            <span className="down">하락 {summary.declining}</span>
-            <span className="breadth-total">{breadth} 종목</span>
-          </div>
-          {/*
-            보합만 있는 장(상승 0 + 하락 0)에서는 비율을 만들 수 없으므로 막대를 그리지 않는다.
-            트랙은 하락색, 채움은 상승색 — 색은 클래스가 정하고 CSS가 currentColor로 칠한다.
-            An all-flat market (0 up, 0 down) yields no ratio, so no bar is drawn. The track takes the down colour
-            and the fill the up colour: classes decide, CSS paints them via currentColor.
-          */}
-          {breadth > 0 && (
-            <div className="breadth-bar down">
-              <span
-                className="breadth-fill up"
-                style={{ width: `${((summary.advancing / breadth) * 100).toFixed(1)}%` }}
-              />
+          <DataNotice error={error} onRetry={retry} />
+          <div className="pulse-layout">
+            <div className="pulse-breadth">
+              <span className="pulse-caption">추적 종목 중 상승 비중</span>
+              <p className="pulse-ratio">{summary.advancingPct?.toFixed(0)}<span>%</span></p>
+              <div className="pulse-distribution" role="img" aria-label={`상승 ${summary.advancing} · 보합 ${summary.unchanged} · 하락 ${summary.declining}`}>
+                <span className="pulse-segment up" style={{ flex: summary.advancing }} />
+                <span className="pulse-segment flat" style={{ flex: summary.unchanged }} />
+                <span className="pulse-segment down" style={{ flex: summary.declining }} />
+              </div>
+              <dl className="pulse-counts">
+                <div><dt><i className="up" />상승</dt><dd className="up">{summary.advancing}</dd></div>
+                <div><dt><i className="flat" />보합</dt><dd>{summary.unchanged}</dd></div>
+                <div><dt><i className="down" />하락</dt><dd className="down">{summary.declining}</dd></div>
+              </dl>
+              <p className="pulse-universe">추적 {summary.total}종목 기준</p>
             </div>
-          )}
-          <div className="leader-lists">
-            <LeaderList label="상승 상위" quotes={summary.top_gainers} metric="change" />
-            <LeaderList label="하락 상위" quotes={summary.top_losers} metric="change" />
-            <LeaderList label="거래량 상위" quotes={summary.volume_leaders} metric="volume" />
+            <div className="pulse-leaders">
+              <div className="tabs" role="group" aria-label="주요 종목 순위">
+                {LEADERS.map(item => (
+                  <button key={item.key} type="button" className={leaders === item.key ? 'tab tab-active' : 'tab'} aria-pressed={leaders === item.key} onClick={() => setLeaders(item.key)}>
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              {summary[leaders].length === 0 ? <p className="empty">{selected.empty}</p> : (
+                <ol className="pulse-leader-list">
+                  {summary[leaders].map((quote, index) => (
+                    <li key={quote.symbol}>
+                      <Link className="pulse-leader" to={`/stocks/${encodeURIComponent(quote.symbol)}`}>
+                        <span className="pulse-rank">{index + 1}</span>
+                        <span className="pulse-stock"><strong>{quote.name_ko ?? quote.name}</strong><span className="mono">{quote.symbol}</span></span>
+                        <span className={`pulse-metric ${leaders === 'volume' ? '' : changeClass(quote.change_pct)}`}>
+                          {leaders === 'volume' ? formatVolume(quote.volume) : formatPct(quote.change_pct)}
+                        </span>
+                      </Link>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
           </div>
         </>
       )}

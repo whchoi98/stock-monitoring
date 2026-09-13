@@ -8,6 +8,7 @@ import { useQueryClient } from '@tanstack/react-query'
 
 import { useStockNews } from '../../api/queries.ts'
 import { AsOfBadge } from '../common/AsOfBadge.tsx'
+import { DataNotice } from '../common/DataNotice.tsx'
 import { ErrorCard } from '../common/ErrorCard.tsx'
 import { NewsList } from '../common/NewsList.tsx'
 import { Panel } from '../common/Panel.tsx'
@@ -27,12 +28,13 @@ export function StockNews({ symbol }: StockNewsProps) {
     void queryClient.invalidateQueries({ queryKey: ['stock-news', symbol] })
   }
 
-  if (error !== null) return <ErrorCard onRetry={retry} message="종목 뉴스를 불러오지 못했습니다" />
+  if (error !== null && data === undefined) return <ErrorCard onRetry={retry} message="종목 뉴스를 불러오지 못했습니다" />
 
   const items = data ?? []
 
   return (
     <Panel id="stock-news" eyebrow="NEWS WIRE" title="종목 뉴스" action={<AsOfBadge asOf={asOf} />} flush>
+      <DataNotice error={error} onRetry={retry} />
       {isLoading ? (
         <div className="panel-pad">
           <Spinner />

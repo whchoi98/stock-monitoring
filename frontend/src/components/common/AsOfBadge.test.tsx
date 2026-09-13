@@ -29,6 +29,13 @@ function secondsAgo(n: number): string {
 }
 
 describe('AsOfBadge', () => {
+  it('오래된 재무 데이터 기준 시각은 시간·일 단위로 읽힌다 / long-lived data uses hours and days', () => {
+    freezeClock()
+    const { container, rerender } = render(<AsOfBadge asOf={secondsAgo(2 * 60 * 60)} />)
+    expect(container.textContent).toBe('2시간 전 기준')
+    rerender(<AsOfBadge asOf={secondsAgo(2 * 24 * 60 * 60)} />)
+    expect(container.textContent).toBe('2일 전 기준')
+  })
   it('60초 미만은 아무것도 렌더하지 않는다 / renders nothing under 60s', () => {
     freezeClock()
     const { container } = render(<AsOfBadge asOf={secondsAgo(59)} />)

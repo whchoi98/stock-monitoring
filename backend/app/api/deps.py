@@ -16,7 +16,7 @@ from typing import Any, Awaitable, Callable, Tuple
 from fastapi import HTTPException, Request
 
 from app.core import config
-from app.core.market_hours import any_market_open
+from app.core.market_hours import any_market_open, is_kr_market_open, is_us_market_open
 from app.state import AppState, STATUS_DEGRADED, STATUS_OK
 
 logger = logging.getLogger(__name__)
@@ -142,9 +142,14 @@ def market_of(symbol: str) -> str:
     return "kr" if symbol.upper().endswith(KR_SUFFIXES) else "us"
 
 
-def market_open_now() -> bool:
-    """모든 응답 envelope에 들어가는 장중 여부 / The market-open flag every response envelope carries."""
-    return any_market_open(datetime.now(timezone.utc))
+def market_open_now(market: str | None = None) -> bool:
+    """시장 범위의 장중 여부, 범위가 없으면 두 시장 OR / Scoped market hours; unscoped responses use either market."""
+    now = datetime.now(timezone.utc)
+    if market == "us":
+        return is_us_market_open(now)
+    if market == "kr":
+        return is_kr_market_open(now)
+    return any_market_open(now)
 
 
 # ---------------------------------------------------------------------------

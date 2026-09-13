@@ -19,12 +19,13 @@
   --border: #1e2533;
   --border-strong: #2b3446;
   --text: #a6afc0;
-  --text-dim: #6b7587;
+  --text-dim: #929eb2;
   --text-strong: #f2f5fa;
   --accent: #f2a93b;
   --accent-soft: rgb(242 169 59 / 14%);
   --accent-ink: #14100a;
   --ok: #2fb37a;
+  --ok-soft: rgb(47 179 122 / 18%);
   --up: #f5445a;
   --down: #4391ff;
   --up-soft: rgb(245 68 90 / 14%);
@@ -48,14 +49,15 @@
   --border: #d9dee7;
   --border-strong: #b9c2d0;
   --text: #4b5565;
-  --text-dim: #7c8797;
+  --text-dim: #626f83;
   --text-strong: #111827;
-  --accent: #b8720a;
+  --accent: #97600b;
   --accent-soft: rgb(184 114 10 / 12%);
   --accent-ink: #ffffff;
   --ok: #1e8e5f;
+  --ok-soft: rgb(30 142 95 / 14%);
   --up: #de2b39;
-  --down: #2272eb;
+  --down: #2067d0;
   --up-soft: rgb(222 43 57 / 12%);
   --down-soft: rgb(34 114 235 / 12%);
   --chart-ma5: #1f2937;
@@ -69,20 +71,20 @@
 
 /* 테마 무관 구조 토큰 / Structural tokens, theme-independent */
 :root {
-  --radius: 6px;
+  --radius: 8px;
   --radius-sm: 4px;
   --font-sans: Pretendard, 'Noto Sans KR', sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
   /*
-   * 상단 sticky 블록(커맨드 바 44px + 마켓 스트립 40px + 경계 1px)과 하단 상태 바의 높이 — 내부 스크롤 영역이
+   * 상단 sticky 블록(커맨드 바 56px + 마켓 스트립 52px + 경계 1px)과 하단 상태 바의 높이 — 내부 스크롤 영역이
    * 뷰포트에 맞춰 최대 높이를 정할 때 쓴다. 실측으로 확정한 값이므로 상단 구성이 바뀌면 다시 측정한다.
-   * The heights of the top sticky block (command bar 44px + market strip 40px + 1px rule) and the bottom
+   * The desktop fallback heights (command bar 56px + market strip 52px + 1px rule) and the bottom
    * status bar, used by inner scroll areas to cap themselves to the viewport. Settled by measurement — re-measure
    * whenever the top block changes.
    */
-  --term-top-h: 85px;
-  --term-status-h: 28px;
-  --ws-gap: 8px;
+  --term-top-h: 109px;
+  --term-status-h: 32px;
+  --ws-gap: 12px;
 }
 
 /* 등락 색 — 한국 관례(상승 빨강/하락 파랑), 보합(정확히 0)은 본문색 */
